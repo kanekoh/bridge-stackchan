@@ -1,0 +1,55 @@
+# 秘匿情報・環境設定
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+.venv/
+venv/
+env/
+.Python
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 生成された音声ファイル
+audio/
+/tmp/bridge-audio/
+*.mp3
+*.wav
+*.ogg
+
+# ログ
+*.log
+logs/
+
+# IDE / エディタ
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Docker
+*.override.yml
+docker-compose.override.yml
+
+# 証明書・鍵
+*.pem
+*.key
+*.crt
+*.p12
