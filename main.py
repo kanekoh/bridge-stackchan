@@ -2,6 +2,7 @@ import os
 import uuid
 import json
 import logging
+import threading
 from pathlib import Path
 
 import requests
@@ -141,9 +142,24 @@ def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, so
     payload = json.dumps(msg, ensure_ascii=False)
     logger.info("MQTT connecting: broker=%s port=%d tls=%s", MQTT_BROKER, MQTT_PORT, MQTT_TLS)
     client = _build_mqtt_client()
-    rc = client.connect(MQTT_BROKER, MQTT_PORT, keepalive=30)
-    logger.info("MQTT connect rc=%d", rc)
+
+    connected = threading.Event()
+
+    def on_connect(client, userdata, flags, reason_code, properties):
+        if reason_code == 0:
+            connected.set()
+        else:
+            logger.error("MQTT connect failed: reason_code=%s", reason_code)
+
+    client.on_connect = on_connect
     client.loop_start()
+    client.connect(MQTT_BROKER, MQTT_PORT, keepalive=30)
+
+    if not connected.wait(timeout=10):
+        client.loop_stop()
+        raise RuntimeError("MQTT connection timeout (no CONNACK within 10s)")
+
+    logger.info("MQTT connected")
     msg_info = client.publish(topic, payload, qos=1)
     logger.info("MQTT publish queued: mid=%d", msg_info.mid)
     try:
