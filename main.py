@@ -1,3 +1,4 @@
+import io
 import os
 import uuid
 import json
@@ -5,9 +6,10 @@ import logging
 import threading
 from pathlib import Path
 
+import openai
 import requests
 import paho.mqtt.client as mqtt
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, Form, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -31,6 +33,20 @@ MQTT_DEVICE_ID = os.getenv("MQTT_DEVICE_ID", "default")
 
 AUDIO_DIR = Path(os.getenv("AUDIO_DIR", "/tmp/bridge-audio"))
 AUDIO_BASE_URL = os.getenv("AUDIO_BASE_URL", "http://localhost:8000")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "https://api.openai.com/v1")
+OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "gpt-4o")
+OPENCLAW_SYSTEM_PROMPT = os.getenv(
+    "OPENCLAW_SYSTEM_PROMPT",
+    (
+        "あなたはスタックちゃんというかわいいアシスタントロボットです。"
+        "家族みんなと会話します。"
+        "返事は短く、かわいく、話しやすい言葉で答えてください。"
+        "日本語で答えてください。"
+        "英語で話しかけられたときは、やさしい日本語でカタカナ英語を交えて返してください。"
+    ),
+)
 
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -201,13 +217,91 @@ def speak(req: SpeakRequest):
     return resp
 
 
+def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
+    """Transcribe audio bytes using OpenAI Whisper API."""
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+    buf = io.BytesIO(audio_bytes)
+    buf.name = filename or "audio.mp3"
+    result = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=buf,
+        language="ja",
+    )
+    return result.text
+
+
+def chat_with_openclaw(text: str, system_prompt_append: str = "") -> str:
+    """Send transcribed text to OpenClaw and return the reply."""
+    client = openai.OpenAI(api_key=OPENAI_API_KEY, base_url=OPENCLAW_BASE_URL)
+    system_prompt = OPENCLAW_SYSTEM_PROMPT
+    if system_prompt_append:
+        system_prompt = system_prompt + "\n\n" + system_prompt_append
+    response = client.chat.completions.create(
+        model=OPENCLAW_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text},
+        ],
+    )
+    return response.choices[0].message.content
+
+
 @app.post("/ingest-audio")
-async def ingest_audio(file: UploadFile = File(...)):
+async def ingest_audio(
+    file: UploadFile = File(...),
+    system_prompt_append: str = Form(""),
+    source: str = Form("stackchan"),
+    priority: str = Form("normal"),
+    request_id: str = Form(""),
+):
     """
-    Receive audio from Stack-chan, run STT, return transcribed text.
-    Phase 2 placeholder — STT integration not yet implemented.
+    Receive audio from Stack-chan, run STT, call OpenClaw, speak the reply via VOICEVOX + MQTT.
+
+    Form fields (all optional):
+    - system_prompt_append: extra instructions appended to the base system prompt
+    - source: label stored in the MQTT message (default: "stackchan")
+    - priority: MQTT message priority (default: "normal")
+    - request_id: caller-supplied idempotency key (auto-generated if omitted)
     """
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
+
+    req_id = request_id or str(uuid.uuid4())
     audio_bytes = await file.read()
-    logger.info("Received audio: filename=%s size=%d", file.filename, len(audio_bytes))
-    # TODO: run STT (e.g. Whisper) and forward to OpenClaw
-    raise HTTPException(status_code=501, detail="STT not yet implemented (Phase 2)")
+    logger.info("Received audio: filename=%s size=%d request_id=%s", file.filename, len(audio_bytes), req_id)
+
+    try:
+        transcript = transcribe_audio(audio_bytes, file.filename or "audio.mp3")
+    except Exception as e:
+        logger.error("STT error: %s", e)
+        raise HTTPException(status_code=502, detail=f"STT error: {e}")
+    logger.info("Transcript: request_id=%s text=%s", req_id, transcript[:80])
+
+    try:
+        reply = chat_with_openclaw(transcript, system_prompt_append)
+    except Exception as e:
+        logger.error("OpenClaw error: %s", e)
+        raise HTTPException(status_code=502, detail=f"OpenClaw error: {e}")
+    logger.info("OpenClaw reply: request_id=%s text=%s", req_id, reply[:80])
+
+    try:
+        audio_url, audio_streaming_url = resolve_audio_url(reply)
+    except Exception as e:
+        logger.error("VOICEVOX error: %s", e)
+        raise HTTPException(status_code=502, detail=f"VOICEVOX error: {e}")
+
+    try:
+        publish_speak(audio_url, audio_streaming_url, reply, source, priority, req_id)
+    except Exception as e:
+        logger.error("MQTT error: %s", e)
+        raise HTTPException(status_code=502, detail=f"MQTT error: {e}")
+
+    resp: dict = {
+        "requestId": req_id,
+        "transcript": transcript,
+        "reply": reply,
+        "audioUrl": audio_url,
+    }
+    if audio_streaming_url:
+        resp["audioStreamingUrl"] = audio_streaming_url
+    return resp
