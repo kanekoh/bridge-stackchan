@@ -43,6 +43,9 @@ SPEAKER_ID_THRESHOLD = float(os.getenv("SPEAKER_ID_THRESHOLD", "0.75"))
 
 _JST = timezone(timedelta(hours=9))
 
+_openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+_http_session = requests.Session()
+
 app = FastAPI(title="Bridge API", version="0.1.0")
 
 
@@ -123,7 +126,7 @@ def get_audio_url_web(text: str) -> tuple[str, str | None]:
     """Get MP3 URLs from VOICEVOX Web高速版 (api.tts.quest) without downloading.
     Returns (mp3DownloadUrl, mp3StreamingUrl).
     """
-    resp = requests.get(
+    resp = _http_session.get(
         f"{VOICEVOX_URL}/synthesis",
         params={"speaker": VOICEVOX_SPEAKER, "text": text, "key": VOICEVOX_API_KEY},
         timeout=60,
@@ -233,10 +236,9 @@ def speak(req: SpeakRequest):
 
 def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     """Transcribe audio bytes using OpenAI Whisper API."""
-    client = openai.OpenAI(api_key=OPENAI_API_KEY)
     buf = io.BytesIO(audio_bytes)
     buf.name = filename or "audio.wav"
-    result = client.audio.transcriptions.create(
+    result = _openai_client.audio.transcriptions.create(
         model="whisper-1",
         file=buf,
         language="ja",
@@ -255,7 +257,7 @@ def identify_speaker(audio_bytes: bytes) -> str | None:
         headers = {}
         if SPEAKER_ID_API_KEY:
             headers["Authorization"] = f"Bearer {SPEAKER_ID_API_KEY}"
-        resp = requests.post(
+        resp = _http_session.post(
             f"{SPEAKER_ID_URL}/identify",
             files={"audio": ("audio.wav", audio_bytes, "audio/wav")},
             headers=headers,
@@ -316,7 +318,7 @@ def chat_with_openclaw(text: str, speaker: str | None = None, system_prompt_appe
     )
 
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=60)
+        resp = _http_session.post(url, json=payload, headers=headers, timeout=60)
         if not resp.ok:
             logger.error("OpenClaw HTTP %d: body=%s", resp.status_code, resp.text[:500])
         resp.raise_for_status()
