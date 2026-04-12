@@ -32,6 +32,20 @@ info() { echo -e "${CYAN}▶${RESET} $1"; }
 warn() { echo -e "${YELLOW}⚠${RESET}  $1"; }
 header() { echo -e "\n${BOLD}$1${RESET}"; }
 
+# ── テスト用WAVファイル生成 ───────────────────────────
+WAV_FILE=$(mktemp /tmp/test_audio_XXXXXX.wav)
+python3 - <<'EOF' > "${WAV_FILE}"
+import io, sys, wave
+buf = io.BytesIO()
+with wave.open(buf, "wb") as wf:
+    wf.setnchannels(1)
+    wf.setsampwidth(2)
+    wf.setframerate(16000)
+    wf.writeframes(b"\x00\x00" * 16000)  # 1秒の無音
+sys.stdout.buffer.write(buf.getvalue())
+EOF
+trap 'rm -f "${WAV_FILE}"' EXIT
+
 # ── サービス起動確認 ──────────────────────────────────
 if ! curl -sf "${BASE_URL}/healthz" > /dev/null 2>&1; then
   warn "サービスが起動していません: ${BASE_URL}"
@@ -43,6 +57,37 @@ info "サービス確認OK: ${BASE_URL}"
 # ── テスト実行 ────────────────────────────────────────
 header "インターフェーステスト"
 echo -e "  テストメッセージ: ${BOLD}${MESSAGE}${RESET}\n"
+
+# --- /debug/connectivity ---
+echo -e "${BOLD}[GET /debug/connectivity]${RESET}"
+HTTP_CODE=$(curl -s -o /tmp/debug_body.json -w "%{http_code}" "${BASE_URL}/debug/connectivity")
+BODY=$(cat /tmp/debug_body.json)
+if [[ "${HTTP_CODE}" == "200" ]]; then
+  echo "${BODY}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print('  ENV:')
+for k, v in d.get('env', {}).items():
+    print(f'    {k}: {v}')
+print('  TCP:')
+for k, v in d.get('tcp', {}).items():
+    mark = '✓' if v == 'ok' else '✗'
+    print(f'    {mark} {k}: {v}')
+"
+  ALL_TCP_OK=$(echo "${BODY}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+bad = [k for k, v in d.get('tcp', {}).items() if v != 'ok']
+print(' '.join(bad))
+")
+  if [[ -z "${ALL_TCP_OK}" ]]; then
+    pass "全サービスへの TCP 接続 OK"
+  else
+    fail "TCP 接続失敗: ${ALL_TCP_OK}"
+  fi
+else
+  fail "HTTP ${HTTP_CODE}"
+fi
 
 # --- /healthz ---
 echo -e "${BOLD}[GET /healthz]${RESET}"
@@ -77,35 +122,40 @@ if [[ "${HTTP_CODE}" == "200" ]]; then
   pass "HTTP 200"
   echo -e "     requestId : ${REQUEST_ID}"
   echo -e "     audioUrl  : ${AUDIO_URL}"
+  if [[ -n "${REQUEST_ID}" ]]; then
+    pass "requestId が返却された"
+  else
+    fail "requestId が空"
+  fi
 elif [[ "${HTTP_CODE}" == "502" ]]; then
   DETAIL=$(echo "${BODY}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('detail',''))" 2>/dev/null || echo "${BODY}")
-  warn "HTTP 502 (外部サービス未接続の可能性): ${DETAIL}"
-  echo -e "  ${YELLOW}→ VOICEVOX/MQTT が利用できない環境では502は想定内です${RESET}"
-  PASS=$((PASS + 1))  # 接続性テストとしては「疎通確認まで到達」をパスとする
+  fail "HTTP 502 — ${DETAIL}"
 else
   fail "HTTP ${HTTP_CODE}, body=${BODY}"
 fi
 
-# --- /ingest-audio (Phase 2 プレースホルダ、501 を期待) ---
+# --- /ingest-audio ---
 echo -e "\n${BOLD}[POST /ingest-audio]${RESET}"
+info "WAVファイル: ${WAV_FILE} ($(wc -c < "${WAV_FILE}") bytes)"
 HTTP_CODE=$(curl -s -o /tmp/ingest_body.json -w "%{http_code}" \
   -X POST "${BASE_URL}/ingest-audio" \
-  -F "file=@/dev/null;filename=test.wav;type=audio/wav")
+  -F "file=@${WAV_FILE};filename=test.wav;type=audio/wav")
 BODY=$(cat /tmp/ingest_body.json)
 
-if [[ "${HTTP_CODE}" == "501" ]]; then
-  pass "HTTP 501 (Phase 2 未実装として正しく返却)"
+if [[ "${HTTP_CODE}" == "200" ]]; then
+  TRANSCRIPT=$(echo "${BODY}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('transcript',''))" 2>/dev/null || true)
+  REPLY=$(echo "${BODY}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('reply',''))" 2>/dev/null || true)
+  pass "HTTP 200 (STT + OpenClaw + VOICEVOX + MQTT すべて成功)"
+  echo -e "     transcript : ${TRANSCRIPT}"
+  echo -e "     reply      : ${REPLY}"
+elif [[ "${HTTP_CODE}" == "503" ]]; then
+  warn "HTTP 503 (OPENAI_API_KEY 未設定 — STT は使用不可)"
+  PASS=$((PASS + 1))
+elif [[ "${HTTP_CODE}" == "502" ]]; then
+  DETAIL=$(echo "${BODY}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('detail',''))" 2>/dev/null || echo "${BODY}")
+  fail "HTTP 502 — ${DETAIL}"
 else
-  fail "HTTP ${HTTP_CODE} (501 を期待), body=${BODY}"
-fi
-
-# --- /audio/<不存在ID>.mp3 (404 を期待) ---
-echo -e "\n${BOLD}[GET /audio/nonexistent.mp3]${RESET}"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/audio/nonexistent-id.mp3")
-if [[ "${HTTP_CODE}" == "404" ]]; then
-  pass "HTTP 404 (存在しないファイルとして正しく返却)"
-else
-  fail "HTTP ${HTTP_CODE} (404 を期待)"
+  fail "HTTP ${HTTP_CODE}, body=${BODY}"
 fi
 
 # ── 結果サマリ ────────────────────────────────────────

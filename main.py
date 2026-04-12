@@ -1,17 +1,17 @@
+import asyncio
 import io
 import os
+import socket
 import uuid
 import json
 import logging
 import threading
-from pathlib import Path
+from datetime import datetime, timezone, timedelta
 
 import openai
 import requests
 import paho.mqtt.client as mqtt
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -31,27 +31,19 @@ MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 MQTT_TLS = os.getenv("MQTT_TLS", "false").lower() == "true"
 MQTT_DEVICE_ID = os.getenv("MQTT_DEVICE_ID", "default")
 
-AUDIO_DIR = Path(os.getenv("AUDIO_DIR", "/tmp/bridge-audio"))
-AUDIO_BASE_URL = os.getenv("AUDIO_BASE_URL", "http://localhost:8000")
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "https://api.openai.com/v1")
-OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "gpt-4o")
-OPENCLAW_SYSTEM_PROMPT = os.getenv(
-    "OPENCLAW_SYSTEM_PROMPT",
-    (
-        "あなたはスタックちゃんというかわいいアシスタントロボットです。"
-        "家族みんなと会話します。"
-        "返事は短く、かわいく、話しやすい言葉で答えてください。"
-        "日本語で答えてください。"
-        "英語で話しかけられたときは、やさしい日本語でカタカナ英語を交えて返してください。"
-    ),
-)
+OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789/v1")
+OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "openclaw")
+OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+OPENCLAW_SESSION_KEY = os.getenv("OPENCLAW_SESSION_KEY", "")
 
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+SPEAKER_ID_URL = os.getenv("SPEAKER_ID_URL", "")
+SPEAKER_ID_API_KEY = os.getenv("SPEAKER_ID_API_KEY", "")
+SPEAKER_ID_THRESHOLD = float(os.getenv("SPEAKER_ID_THRESHOLD", "0.75"))
+
+_JST = timezone(timedelta(hours=9))
 
 app = FastAPI(title="Bridge API", version="0.1.0")
-app.mount("/audio", StaticFiles(directory=str(AUDIO_DIR)), name="audio")
 
 
 def _build_mqtt_client() -> mqtt.Client:
@@ -61,6 +53,63 @@ def _build_mqtt_client() -> mqtt.Client:
     if MQTT_TLS:
         client.tls_set()  # uses system CA bundle; works with HiveMQ Cloud
     return client
+
+
+class _MqttConnection:
+    """Persistent MQTT connection; reconnects automatically on the next publish."""
+
+    def __init__(self):
+        self._client: mqtt.Client | None = None
+        self._lock = threading.Lock()
+
+    def _connect(self) -> mqtt.Client:
+        logger.info("MQTT connecting: broker=%s port=%d tls=%s", MQTT_BROKER, MQTT_PORT, MQTT_TLS)
+        client = _build_mqtt_client()
+        connected = threading.Event()
+
+        def on_connect(client, userdata, flags, reason_code, properties):
+            if reason_code == 0:
+                connected.set()
+            else:
+                logger.error("MQTT connect failed: reason_code=%s", reason_code)
+
+        def on_disconnect(client, userdata, flags, reason_code, properties):
+            logger.warning("MQTT disconnected: reason_code=%s", reason_code)
+
+        client.on_connect = on_connect
+        client.on_disconnect = on_disconnect
+        client.loop_start()
+        client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+
+        if not connected.wait(timeout=10):
+            client.loop_stop()
+            raise RuntimeError("MQTT connection timeout (no CONNACK within 10s)")
+
+        logger.info("MQTT connected (persistent)")
+        return client
+
+    def publish(self, topic: str, payload: str) -> None:
+        for attempt in range(2):
+            with self._lock:
+                if self._client is None or not self._client.is_connected():
+                    self._client = self._connect()
+                client = self._client
+
+            msg_info = client.publish(topic, payload, qos=1)
+            logger.info("MQTT publish queued: mid=%d", msg_info.mid)
+            try:
+                msg_info.wait_for_publish(timeout=10)
+                logger.info("MQTT publish confirmed: topic=%s mid=%d payload=%s", topic, msg_info.mid, payload)
+                return
+            except Exception as e:
+                logger.warning("MQTT publish attempt %d failed: %s", attempt + 1, e)
+                with self._lock:
+                    self._client = None  # force reconnect on next attempt
+
+        raise RuntimeError("MQTT publish failed after retry")
+
+
+_mqtt_conn = _MqttConnection()
 
 
 class SpeakRequest(BaseModel):
@@ -92,54 +141,9 @@ def get_audio_url_web(text: str) -> tuple[str, str | None]:
     return mp3_url, data.get("mp3StreamingUrl")
 
 
-def generate_audio_local(text: str, output_path: Path) -> None:
-    """Generate MP3 using local VOICEVOX (audio_query → synthesis → ffmpeg)."""
-    import subprocess
-    import tempfile
-
-    # Step 1: audio_query
-    resp = requests.post(
-        f"{VOICEVOX_URL}/audio_query",
-        params={"text": text, "speaker": VOICEVOX_SPEAKER},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    query = resp.json()
-
-    # Step 2: synthesis → WAV
-    resp = requests.post(
-        f"{VOICEVOX_URL}/synthesis",
-        params={"speaker": VOICEVOX_SPEAKER},
-        json=query,
-        timeout=60,
-    )
-    resp.raise_for_status()
-    wav_bytes = resp.content
-
-    # Step 3: WAV → MP3
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp.write(wav_bytes)
-        tmp_path = tmp.name
-
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_path, str(output_path)],
-            check=True,
-            capture_output=True,
-        )
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
-
-
 def resolve_audio_url(text: str) -> tuple[str, str | None]:
     """Return (audioUrl, audioStreamingUrl) for the given text."""
-    if VOICEVOX_API_KEY:
-        return get_audio_url_web(text)
-    else:
-        audio_id = str(uuid.uuid4())
-        mp3_path = AUDIO_DIR / f"{audio_id}.mp3"
-        generate_audio_local(text, mp3_path)
-        return f"{AUDIO_BASE_URL}/audio/{audio_id}.mp3", None
+    return get_audio_url_web(text)
 
 
 def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, source: str, priority: str, request_id: str) -> None:
@@ -156,42 +160,52 @@ def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, so
     if audio_streaming_url:
         msg["audioStreamingUrl"] = audio_streaming_url
     payload = json.dumps(msg, ensure_ascii=False)
-    logger.info("MQTT connecting: broker=%s port=%d tls=%s", MQTT_BROKER, MQTT_PORT, MQTT_TLS)
-    client = _build_mqtt_client()
+    _mqtt_conn.publish(topic, payload)
 
-    connected = threading.Event()
 
-    def on_connect(client, userdata, flags, reason_code, properties):
-        if reason_code == 0:
-            connected.set()
-        else:
-            logger.error("MQTT connect failed: reason_code=%s", reason_code)
-
-    client.on_connect = on_connect
-    client.loop_start()
-    client.connect(MQTT_BROKER, MQTT_PORT, keepalive=30)
-
-    if not connected.wait(timeout=10):
-        client.loop_stop()
-        raise RuntimeError("MQTT connection timeout (no CONNACK within 10s)")
-
-    logger.info("MQTT connected")
-    msg_info = client.publish(topic, payload, qos=1)
-    logger.info("MQTT publish queued: mid=%d", msg_info.mid)
+def _tcp_check(host: str, port: int, timeout: float = 3.0) -> str:
     try:
-        msg_info.wait_for_publish(timeout=10)
+        with socket.create_connection((host, port), timeout=timeout):
+            return "ok"
     except Exception as e:
-        client.loop_stop()
-        client.disconnect()
-        raise RuntimeError(f"MQTT publish not acknowledged: {e}")
-    client.loop_stop()
-    client.disconnect()
-    logger.info("MQTT publish confirmed: topic=%s mid=%d payload=%s", topic, msg_info.mid, payload)
+        return f"{type(e).__name__}: {e}"
 
 
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+@app.get("/debug/connectivity")
+def debug_connectivity():
+    """コンテナ内からの外部サービス疎通確認。"""
+    from urllib.parse import urlparse
+
+    results: dict = {
+        "env": {
+            "OPENCLAW_BASE_URL": OPENCLAW_BASE_URL,
+            "OPENCLAW_MODEL": OPENCLAW_MODEL,
+            "SPEAKER_ID_URL": SPEAKER_ID_URL or "(not set)",
+            "MQTT_BROKER": MQTT_BROKER,
+            "MQTT_PORT": MQTT_PORT,
+            "VOICEVOX_URL": VOICEVOX_URL,
+        },
+        "tcp": {},
+    }
+
+    checks = []
+    for url_str in [OPENCLAW_BASE_URL, SPEAKER_ID_URL, VOICEVOX_URL]:
+        if url_str:
+            p = urlparse(url_str)
+            default_port = 443 if p.scheme == "https" else 80
+            checks.append((p.hostname, p.port or default_port))
+    checks.append((MQTT_BROKER, MQTT_PORT))
+
+    for host, port in checks:
+        if host:
+            results["tcp"][f"{host}:{port}"] = _tcp_check(host, port)
+
+    return results
 
 
 @app.post("/speak")
@@ -221,7 +235,7 @@ def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     """Transcribe audio bytes using OpenAI Whisper API."""
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
     buf = io.BytesIO(audio_bytes)
-    buf.name = filename or "audio.mp3"
+    buf.name = filename or "audio.wav"
     result = client.audio.transcriptions.create(
         model="whisper-1",
         file=buf,
@@ -230,20 +244,98 @@ def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     return result.text
 
 
-def chat_with_openclaw(text: str, system_prompt_append: str = "") -> str:
-    """Send transcribed text to OpenClaw and return the reply."""
-    client = openai.OpenAI(api_key=OPENAI_API_KEY, base_url=OPENCLAW_BASE_URL)
-    system_prompt = OPENCLAW_SYSTEM_PROMPT
+def identify_speaker(audio_bytes: bytes) -> str | None:
+    """Identify speaker via speaker-id service. Returns display name or None.
+
+    Non-fatal: returns None on any error or when SPEAKER_ID_URL is not configured.
+    """
+    if not SPEAKER_ID_URL:
+        return None
+    try:
+        headers = {}
+        if SPEAKER_ID_API_KEY:
+            headers["Authorization"] = f"Bearer {SPEAKER_ID_API_KEY}"
+        resp = requests.post(
+            f"{SPEAKER_ID_URL}/identify",
+            files={"audio": ("audio.wav", audio_bytes, "audio/wav")},
+            headers=headers,
+            timeout=10,
+        )
+        if not resp.ok:
+            logger.warning("Speaker ID HTTP %d: body=%s", resp.status_code, resp.text[:200])
+        resp.raise_for_status()
+        data = resp.json()
+        score = float(data.get("score", 0))
+        if score >= SPEAKER_ID_THRESHOLD:
+            name = data.get("kana") or data.get("name")
+            logger.info("Speaker identified: name=%s score=%.3f", name, score)
+            return name
+        logger.info("Speaker below threshold: score=%.3f threshold=%.3f", score, SPEAKER_ID_THRESHOLD)
+        return None
+    except Exception as e:
+        logger.warning("Speaker identification failed (non-fatal): %s", e)
+        return None
+
+
+def _build_datetime_context() -> str:
+    """Return current JST datetime as a context string for the system prompt."""
+    now = datetime.now(_JST)
+    weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+    weekday = weekdays[now.weekday()]
+    return f"【現在の日時】{now.year}年{now.month}月{now.day}日（{weekday}）{now.hour:02d}:{now.minute:02d} JST"
+
+
+def chat_with_openclaw(text: str, speaker: str | None = None, system_prompt_append: str = "") -> str:
+    """Send text to OpenClaw via OpenResponses API and return the reply."""
+    url = OPENCLAW_BASE_URL.rstrip("/") + "/responses"
+
+    headers: dict = {
+        "Content-Type": "application/json",
+        "x-openclaw-scopes": "operator.read,operator.write",
+    }
+    if OPENCLAW_GATEWAY_TOKEN:
+        headers["Authorization"] = f"Bearer {OPENCLAW_GATEWAY_TOKEN}"
+    if OPENCLAW_SESSION_KEY:
+        headers["x-openclaw-session-key"] = OPENCLAW_SESSION_KEY
+
+    user_input = f"[話者: {speaker}] {text}" if speaker else text
+
+    instructions_parts = [_build_datetime_context()]
     if system_prompt_append:
-        system_prompt = system_prompt + "\n\n" + system_prompt_append
-    response = client.chat.completions.create(
-        model=OPENCLAW_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": text},
-        ],
+        instructions_parts.append(system_prompt_append)
+
+    payload: dict = {
+        "model": OPENCLAW_MODEL,
+        "input": user_input,
+        "instructions": "\n\n".join(instructions_parts),
+    }
+
+    logger.info(
+        "OpenClaw request: url=%s model=%s session_key=%s",
+        url, OPENCLAW_MODEL, OPENCLAW_SESSION_KEY or "(none)",
     )
-    return response.choices[0].message.content
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=60)
+        if not resp.ok:
+            logger.error("OpenClaw HTTP %d: body=%s", resp.status_code, resp.text[:500])
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.error("OpenClaw error detail: type=%s message=%s", type(e).__name__, e)
+        raise
+
+    # output_text は OpenResponses の便利フィールド
+    if "output_text" in data:
+        return data["output_text"]
+
+    # フォールバック: output 配列を走査
+    for item in data.get("output", []):
+        for content in item.get("content", []):
+            if content.get("type") == "output_text":
+                return content["text"]
+
+    raise RuntimeError(f"OpenClaw response に返答テキストが見つかりません: {data}")
 
 
 @app.post("/ingest-audio")
@@ -253,32 +345,38 @@ async def ingest_audio(
     source: str = Form("stackchan"),
     priority: str = Form("normal"),
     request_id: str = Form(""),
+    mode: str = Form("async"),
 ):
     """
-    Receive audio from Stack-chan, run STT, call OpenClaw, speak the reply via VOICEVOX + MQTT.
+    Receive audio from Stack-chan, run STT, call OpenClaw, then deliver the reply.
 
     Form fields (all optional):
     - system_prompt_append: extra instructions appended to the base system prompt
     - source: label stored in the MQTT message (default: "stackchan")
     - priority: MQTT message priority (default: "normal")
     - request_id: caller-supplied idempotency key (auto-generated if omitted)
+    - mode: "async" (default) publishes via MQTT; "sync" returns audioUrl in the response body only
     """
     if not OPENAI_API_KEY:
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
 
     req_id = request_id or str(uuid.uuid4())
     audio_bytes = await file.read()
-    logger.info("Received audio: filename=%s size=%d request_id=%s", file.filename, len(audio_bytes), req_id)
+    filename = file.filename or "audio.wav"
+    logger.info("Received audio: filename=%s size=%d request_id=%s mode=%s", filename, len(audio_bytes), req_id, mode)
 
     try:
-        transcript = transcribe_audio(audio_bytes, file.filename or "audio.mp3")
+        transcript, speaker = await asyncio.gather(
+            asyncio.to_thread(transcribe_audio, audio_bytes, filename),
+            asyncio.to_thread(identify_speaker, audio_bytes),
+        )
     except Exception as e:
         logger.error("STT error: %s", e)
         raise HTTPException(status_code=502, detail=f"STT error: {e}")
-    logger.info("Transcript: request_id=%s text=%s", req_id, transcript[:80])
+    logger.info("Transcript: request_id=%s text=%s speaker=%s", req_id, transcript[:80], speaker)
 
     try:
-        reply = chat_with_openclaw(transcript, system_prompt_append)
+        reply = chat_with_openclaw(transcript, speaker, system_prompt_append)
     except Exception as e:
         logger.error("OpenClaw error: %s", e)
         raise HTTPException(status_code=502, detail=f"OpenClaw error: {e}")
@@ -290,15 +388,19 @@ async def ingest_audio(
         logger.error("VOICEVOX error: %s", e)
         raise HTTPException(status_code=502, detail=f"VOICEVOX error: {e}")
 
-    try:
-        publish_speak(audio_url, audio_streaming_url, reply, source, priority, req_id)
-    except Exception as e:
-        logger.error("MQTT error: %s", e)
-        raise HTTPException(status_code=502, detail=f"MQTT error: {e}")
+    if mode == "async":
+        try:
+            publish_speak(audio_url, audio_streaming_url, reply, source, priority, req_id)
+        except Exception as e:
+            logger.error("MQTT error: %s", e)
+            raise HTTPException(status_code=502, detail=f"MQTT error: {e}")
+        return {"requestId": req_id}
 
+    # sync: return full result in response body without MQTT
     resp: dict = {
         "requestId": req_id,
         "transcript": transcript,
+        "speaker": speaker,
         "reply": reply,
         "audioUrl": audio_url,
     }

@@ -34,6 +34,9 @@ audio/
 *.log
 logs/
 
+# Claude Code ローカル設定
+.claude/
+
 # IDE / エディタ
 .vscode/
 .idea/

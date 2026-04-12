@@ -14,7 +14,16 @@ Slack → OpenClaw → POST /speak → VOICEVOX → MQTT → Stack-chan
 ### Phase 2 — 音声会話
 
 ```
-Stack-chan(マイク) → POST /ingest-audio → Whisper STT → OpenClaw → VOICEVOX → MQTT → Stack-chan
+Stack-chan(マイク) → POST /ingest-audio
+  ├─ [並行] Whisper STT → テキスト
+  └─ [並行] speaker-id  → 話者名
+         ↓ 両方揃ったら
+  OpenClaw（日時コンテキスト + 話者名 + テキスト）
+         ↓
+  VOICEVOX
+         ↓
+  mode=async: MQTT → Stack-chan   （非同期、レスポンスは requestId のみ）
+  mode=sync:  HTTP レスポンスで audioUrl を返す（MQTT なし）
 ```
 
 ## セットアップ
@@ -25,6 +34,7 @@ Stack-chan(マイク) → POST /ingest-audio → Whisper STT → OpenClaw → VO
 - [VOICEVOX](https://voicevox.hiroshiba.jp/)（ローカル）または VOICEVOX Web API キー
 - MQTTブローカー（ローカル or HiveMQ Cloud等）
 - OpenAI API キー（Whisper STT + OpenClaw用）
+- [speaker-id](https://github.com/kanekoh/speaker-id)（話者識別、任意）
 
 ### インストール
 
@@ -53,12 +63,14 @@ cp .env.example .env
 | `MQTT_PASSWORD` | *(空)* | MQTT認証パスワード |
 | `MQTT_TLS` | `false` | TLS接続を使う場合は`true` |
 | `MQTT_DEVICE_ID` | `default` | Stack-chanのデバイスID |
-| `AUDIO_DIR` | `/tmp/bridge-audio` | 生成MP3の保存ディレクトリ |
-| `AUDIO_BASE_URL` | `http://localhost:8000` | MP3配信のベースURL（Raspberry PiのIP等） |
-| `OPENAI_API_KEY` | *(空)* | OpenAI APIキー（Whisper + OpenClaw用） |
-| `OPENCLAW_BASE_URL` | `https://api.openai.com/v1` | OpenAI互換エンドポイント |
-| `OPENCLAW_MODEL` | `gpt-4o` | 使用するモデル名 |
-| `OPENCLAW_SYSTEM_PROMPT` | *(スタックちゃん人格)* | ベースシステムプロンプト（省略時はデフォルト） |
+| `OPENAI_API_KEY` | *(空)* | OpenAI APIキー（Whisper STT用） |
+| `OPENCLAW_BASE_URL` | `http://localhost:18789/v1` | OpenClaw Gateway の URL（`/v1` まで含める） |
+| `OPENCLAW_MODEL` | `openclaw` | エージェントID（`openclaw` または `openclaw/<agentId>`） |
+| `OPENCLAW_GATEWAY_TOKEN` | *(空)* | Gateway の Bearer トークン |
+| `OPENCLAW_SESSION_KEY` | *(空)* | Slack チャンネルと会話履歴を共有する場合に設定（`agent:<agentId>:slack:channel:<channelId>`） |
+| `SPEAKER_ID_URL` | *(空)* | speaker-idサービスのURL。未設定なら話者識別をスキップ |
+| `SPEAKER_ID_API_KEY` | *(空)* | speaker-idのBearerトークン |
+| `SPEAKER_ID_THRESHOLD` | `0.75` | 識別スコアの閾値（0.0〜1.0）。未満は「不明」扱い |
 
 ### 起動
 
@@ -118,40 +130,61 @@ curl -X POST http://localhost:8000/speak \
 
 ### `POST /ingest-audio`
 
-M5StackからMP3を受け取り、Whisper STT → OpenClaw → VOICEVOX → MQTTのフルパイプラインを実行します。
+M5StackからWAVを受け取り、STT・話者識別を並行実行したうえで OpenClaw → VOICEVOX のパイプラインを実行します。
+`mode` パラメータで音声の配信方法を選択できます。
 
 **リクエスト（multipart/form-data）**
 
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
-| `file` | file | ✓ | M5Stackが録音したMP3 |
+| `file` | file | ✓ | M5Stackが録音したWAVファイル |
+| `mode` | string | | `"async"`（デフォルト）または `"sync"` |
 | `system_prompt_append` | string | | ベースプロンプトへの追記（文脈・状況の補足など） |
 | `source` | string | | 送信元ラベル（デフォルト: `"stackchan"`） |
 | `priority` | string | | 優先度（デフォルト: `"normal"`） |
 | `request_id` | string | | 冪等キー（省略時は自動生成） |
 
+**mode=async（デフォルト）**
+
+VOICEVOX で取得した音声 URL を MQTT で Stack-chan に配信します。
+レスポンスには `requestId` のみ返します。Stack-chan は MQTT メッセージを受信して再生します。
+
 ```bash
 curl -X POST http://localhost:8000/ingest-audio \
-  -F "file=@voice.mp3" \
-  -F "system_prompt_append=今日はパパの誕生日です。お祝いのひとことを添えてください。"
+  -F "file=@voice.wav"
 ```
 
-**レスポンス**
+```json
+{
+  "requestId": "abc-123"
+}
+```
+
+**mode=sync**
+
+MQTT を使わず、音声 URL を HTTP レスポンスで直接返します。
+Stack-chan が POST の応答を受け取り次第 `audioUrl` を再生できるため、MQTT のラウンドトリップがなく低レイテンシです。
+Stack-chan の会話フロー（音声入力 → 返答再生）に適しています。
+
+```bash
+curl -X POST http://localhost:8000/ingest-audio \
+  -F "file=@voice.wav" \
+  -F "mode=sync"
+```
 
 ```json
 {
   "requestId": "abc-123",
   "transcript": "今日の天気を教えて",
+  "speaker": "パパ",
   "reply": "今日はとってもいいお天気だよ〜！お出かけ日和だね。",
-  "audioUrl": "http://raspberry-pi:8000/audio/abc-123.mp3"
+  "audioUrl": "https://audio1.tts.quest/v1/data/.../audio.mp3",
+  "audioStreamingUrl": "https://audio1.tts.quest/v1/data/.../audio.mp3s"
 }
 ```
 
----
-
-### `GET /audio/{filename}.mp3`
-
-生成された音声ファイルの静的配信。Stack-chanがこのURLで音声を取得します。
+> `speaker` は話者識別できなかった場合 `null` になります。`SPEAKER_ID_URL` 未設定の場合も常に `null` です。
+> `audioStreamingUrl` は VOICEVOX Web API がストリーミング URL を返した場合のみ含まれます。
 
 ---
 
@@ -179,5 +212,5 @@ curl -X POST http://localhost:8000/ingest-audio \
 | フェーズ | 内容 | 状態 |
 |---|---|---|
 | Phase 1 | Slack → テキスト → スピーチ | 完了 |
-| Phase 2 | 音声入力 → STT → OpenClaw → スピーチ | 完了 |
+| Phase 2 | 音声入力 → STT + 話者識別（並行）→ OpenClaw → スピーチ | 完了 |
 | Phase 3 | Googleカレンダー・Trello連携、定期通知 | 未着手 |

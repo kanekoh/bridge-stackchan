@@ -20,6 +20,7 @@ fi
 echo "Starting container: $CONTAINER_NAME"
 docker run -d \
   --name "$CONTAINER_NAME" \
+  --network slirp4netns:allow_host_loopback=true \
   --env-file .env \
   -p "${PORT}:8000" \
   "$IMAGE_NAME"
