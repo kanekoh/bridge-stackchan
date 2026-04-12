@@ -6,10 +6,11 @@ import uuid
 import json
 import logging
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 
+import httpx
 import openai
-import requests
 import paho.mqtt.client as mqtt
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File
 from pydantic import BaseModel
@@ -43,10 +44,21 @@ SPEAKER_ID_THRESHOLD = float(os.getenv("SPEAKER_ID_THRESHOLD", "0.75"))
 
 _JST = timezone(timedelta(hours=9))
 
-_openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-_http_session = requests.Session()
+_openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+_http_client: httpx.AsyncClient = None  # type: ignore  # initialized in lifespan
 
-app = FastAPI(title="Bridge API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _http_client
+    _http_client = httpx.AsyncClient(timeout=60)
+    logger.info("httpx.AsyncClient initialized")
+    yield
+    await _http_client.aclose()
+    logger.info("httpx.AsyncClient closed")
+
+
+app = FastAPI(title="Bridge API", version="0.1.0", lifespan=lifespan)
 
 
 def _build_mqtt_client() -> mqtt.Client:
@@ -122,14 +134,13 @@ class SpeakRequest(BaseModel):
     request_id: str | None = None
 
 
-def get_audio_url_web(text: str) -> tuple[str, str | None]:
+async def get_audio_url_web(text: str) -> tuple[str, str | None]:
     """Get MP3 URLs from VOICEVOX Web高速版 (api.tts.quest) without downloading.
     Returns (mp3DownloadUrl, mp3StreamingUrl).
     """
-    resp = _http_session.get(
+    resp = await _http_client.get(
         f"{VOICEVOX_URL}/synthesis",
         params={"speaker": VOICEVOX_SPEAKER, "text": text, "key": VOICEVOX_API_KEY},
-        timeout=60,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -144,9 +155,9 @@ def get_audio_url_web(text: str) -> tuple[str, str | None]:
     return mp3_url, data.get("mp3StreamingUrl")
 
 
-def resolve_audio_url(text: str) -> tuple[str, str | None]:
+async def resolve_audio_url(text: str) -> tuple[str, str | None]:
     """Return (audioUrl, audioStreamingUrl) for the given text."""
-    return get_audio_url_web(text)
+    return await get_audio_url_web(text)
 
 
 def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, source: str, priority: str, request_id: str) -> None:
@@ -212,11 +223,11 @@ def debug_connectivity():
 
 
 @app.post("/speak")
-def speak(req: SpeakRequest):
+async def speak(req: SpeakRequest):
     request_id = req.request_id or str(uuid.uuid4())
 
     try:
-        audio_url, audio_streaming_url = resolve_audio_url(req.text)
+        audio_url, audio_streaming_url = await resolve_audio_url(req.text)
     except Exception as e:
         logger.error("VOICEVOX error: %s", e)
         raise HTTPException(status_code=502, detail=f"VOICEVOX error: {e}")
@@ -234,11 +245,11 @@ def speak(req: SpeakRequest):
     return resp
 
 
-def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
+async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     """Transcribe audio bytes using OpenAI Whisper API."""
     buf = io.BytesIO(audio_bytes)
     buf.name = filename or "audio.wav"
-    result = _openai_client.audio.transcriptions.create(
+    result = await _openai_client.audio.transcriptions.create(
         model="whisper-1",
         file=buf,
         language="ja",
@@ -246,7 +257,7 @@ def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     return result.text
 
 
-def identify_speaker(audio_bytes: bytes) -> str | None:
+async def identify_speaker(audio_bytes: bytes) -> str | None:
     """Identify speaker via speaker-id service. Returns display name or None.
 
     Non-fatal: returns None on any error or when SPEAKER_ID_URL is not configured.
@@ -257,13 +268,12 @@ def identify_speaker(audio_bytes: bytes) -> str | None:
         headers = {}
         if SPEAKER_ID_API_KEY:
             headers["Authorization"] = f"Bearer {SPEAKER_ID_API_KEY}"
-        resp = _http_session.post(
+        resp = await _http_client.post(
             f"{SPEAKER_ID_URL}/identify",
             files={"audio": ("audio.wav", audio_bytes, "audio/wav")},
             headers=headers,
-            timeout=10,
         )
-        if not resp.ok:
+        if not resp.is_success:
             logger.warning("Speaker ID HTTP %d: body=%s", resp.status_code, resp.text[:200])
         resp.raise_for_status()
         data = resp.json()
@@ -287,7 +297,7 @@ def _build_datetime_context() -> str:
     return f"【現在の日時】{now.year}年{now.month}月{now.day}日（{weekday}）{now.hour:02d}:{now.minute:02d} JST"
 
 
-def chat_with_openclaw(text: str, speaker: str | None = None, system_prompt_append: str = "") -> str:
+async def chat_with_openclaw(text: str, speaker: str | None = None, system_prompt_append: str = "") -> str:
     """Send text to OpenClaw via OpenResponses API and return the reply."""
     url = OPENCLAW_BASE_URL.rstrip("/") + "/responses"
 
@@ -318,8 +328,8 @@ def chat_with_openclaw(text: str, speaker: str | None = None, system_prompt_appe
     )
 
     try:
-        resp = _http_session.post(url, json=payload, headers=headers, timeout=60)
-        if not resp.ok:
+        resp = await _http_client.post(url, json=payload, headers=headers)
+        if not resp.is_success:
             logger.error("OpenClaw HTTP %d: body=%s", resp.status_code, resp.text[:500])
         resp.raise_for_status()
         data = resp.json()
@@ -369,8 +379,8 @@ async def ingest_audio(
 
     try:
         transcript, speaker = await asyncio.gather(
-            asyncio.to_thread(transcribe_audio, audio_bytes, filename),
-            asyncio.to_thread(identify_speaker, audio_bytes),
+            transcribe_audio(audio_bytes, filename),
+            identify_speaker(audio_bytes),
         )
     except Exception as e:
         logger.error("STT error: %s", e)
@@ -378,14 +388,14 @@ async def ingest_audio(
     logger.info("Transcript: request_id=%s text=%s speaker=%s", req_id, transcript[:80], speaker)
 
     try:
-        reply = chat_with_openclaw(transcript, speaker, system_prompt_append)
+        reply = await chat_with_openclaw(transcript, speaker, system_prompt_append)
     except Exception as e:
         logger.error("OpenClaw error: %s", e)
         raise HTTPException(status_code=502, detail=f"OpenClaw error: {e}")
     logger.info("OpenClaw reply: request_id=%s text=%s", req_id, reply[:80])
 
     try:
-        audio_url, audio_streaming_url = resolve_audio_url(reply)
+        audio_url, audio_streaming_url = await resolve_audio_url(reply)
     except Exception as e:
         logger.error("VOICEVOX error: %s", e)
         raise HTTPException(status_code=502, detail=f"VOICEVOX error: {e}")

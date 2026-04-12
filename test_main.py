@@ -11,7 +11,7 @@ Run:
 import io
 import os
 import wave
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 # Ensure required env vars exist before importing main
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 
+import main  # noqa: E402  (needed for patch.object on module-level clients)
 from main import (  # noqa: E402
     _build_datetime_context,
     app,
@@ -41,17 +42,23 @@ def _make_wav() -> bytes:
     return buf.getvalue()
 
 
-def _voicevox_web_mock(mp3_url: str = "https://example.com/audio/test.mp3",
-                       streaming_url: str | None = "https://example.com/audio/test-stream.mp3"):
-    """Build a mock response for the VOICEVOX Web API (GET /synthesis)."""
-    mock = MagicMock()
-    mock.raise_for_status = MagicMock()
-    mock.json.return_value = {
-        "success": True,
-        "mp3DownloadUrl": mp3_url,
-        "mp3StreamingUrl": streaming_url,
-    }
-    return mock
+def _make_mock_response(json_data, *, is_success=True):
+    """Build a mock httpx response object."""
+    resp = MagicMock()
+    resp.is_success = is_success
+    resp.status_code = 200 if is_success else 500
+    resp.json.return_value = json_data
+    resp.text = str(json_data)
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
+def _make_mock_http_client(*, post_response=None, get_response=None):
+    """Build a mock httpx.AsyncClient with async post/get methods."""
+    client = MagicMock()
+    client.post = AsyncMock(return_value=post_response)
+    client.get = AsyncMock(return_value=get_response)
+    return client
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -76,8 +83,7 @@ class TestSpeak:
     def test_web_voicevox_success(self, client):
         """VOICEVOX Web API (API key set): returns mp3DownloadUrl and mp3StreamingUrl."""
         with (
-            patch("main.VOICEVOX_API_KEY", "test-key"),
-            patch("main.requests.get", return_value=_voicevox_web_mock()),
+            patch("main.resolve_audio_url", return_value=("https://example.com/audio/test.mp3", "https://example.com/audio/test-stream.mp3")),
             patch("main.publish_speak") as mock_pub,
         ):
             resp = client.post("/speak", json={"text": "こんにちは", "source": "test"})
@@ -91,8 +97,7 @@ class TestSpeak:
     def test_web_voicevox_no_streaming_url(self, client):
         """audioStreamingUrl is absent from response when not returned by VOICEVOX."""
         with (
-            patch("main.VOICEVOX_API_KEY", "test-key"),
-            patch("main.requests.get", return_value=_voicevox_web_mock(streaming_url=None)),
+            patch("main.resolve_audio_url", return_value=("https://example.com/audio/test.mp3", None)),
             patch("main.publish_speak"),
         ):
             resp = client.post("/speak", json={"text": "こんにちは"})
@@ -101,7 +106,7 @@ class TestSpeak:
         assert "audioStreamingUrl" not in resp.json()
 
     def test_voicevox_error_returns_502(self, client):
-        with patch("main.requests.get", side_effect=RuntimeError("voicevox down")):
+        with patch("main.resolve_audio_url", side_effect=RuntimeError("voicevox down")):
             resp = client.post("/speak", json={"text": "こんにちは"})
 
         assert resp.status_code == 502
@@ -109,8 +114,7 @@ class TestSpeak:
 
     def test_mqtt_error_returns_502(self, client):
         with (
-            patch("main.VOICEVOX_API_KEY", "test-key"),
-            patch("main.requests.get", return_value=_voicevox_web_mock()),
+            patch("main.resolve_audio_url", return_value=("https://example.com/audio/test.mp3", "https://example.com/audio/test-stream.mp3")),
             patch("main.publish_speak", side_effect=RuntimeError("MQTT down")),
         ):
             resp = client.post("/speak", json={"text": "こんにちは"})
@@ -121,8 +125,7 @@ class TestSpeak:
     def test_request_id_preserved(self, client):
         """Caller-supplied request_id is echoed back."""
         with (
-            patch("main.VOICEVOX_API_KEY", "test-key"),
-            patch("main.requests.get", return_value=_voicevox_web_mock()),
+            patch("main.resolve_audio_url", return_value=("https://example.com/audio/test.mp3", None)),
             patch("main.publish_speak"),
         ):
             resp = client.post("/speak", json={"text": "テスト", "request_id": "my-req-123"})
@@ -339,205 +342,195 @@ class TestIngestAudio:
 # ── unit: transcribe_audio ────────────────────────────────────────────────────
 
 class TestTranscribeAudio:
-    def test_calls_whisper_and_returns_text(self):
-        mock_openai = MagicMock()
-        mock_openai.audio.transcriptions.create.return_value = MagicMock(text="こんにちは")
-
-        with patch("main.openai.OpenAI", return_value=mock_openai):
-            result = transcribe_audio(b"fake-audio", "test.wav")
-
+    async def test_calls_whisper_and_returns_text(self):
+        mock_create = AsyncMock(return_value=MagicMock(text="こんにちは"))
+        with patch("main._openai_client") as mock_client:
+            mock_client.audio.transcriptions.create = mock_create
+            result = await transcribe_audio(b"fake-audio", "test.wav")
         assert result == "こんにちは"
 
-    def test_uses_japanese_language(self):
-        mock_openai = MagicMock()
-        mock_openai.audio.transcriptions.create.return_value = MagicMock(text="テスト")
-
-        with patch("main.openai.OpenAI", return_value=mock_openai):
-            transcribe_audio(b"fake-audio", "test.wav")
-
-        kwargs = mock_openai.audio.transcriptions.create.call_args.kwargs
+    async def test_uses_japanese_language(self):
+        mock_create = AsyncMock(return_value=MagicMock(text="テスト"))
+        with patch("main._openai_client") as mock_client:
+            mock_client.audio.transcriptions.create = mock_create
+            await transcribe_audio(b"fake-audio", "test.wav")
+        kwargs = mock_create.call_args.kwargs
         assert kwargs["model"] == "whisper-1"
         assert kwargs["language"] == "ja"
 
-    def test_filename_used_as_buffer_name(self):
+    async def test_filename_used_as_buffer_name(self):
         """The filename is set on the BytesIO buffer (required by the OpenAI SDK)."""
-        mock_openai = MagicMock()
-        mock_openai.audio.transcriptions.create.return_value = MagicMock(text="テスト")
         captured = {}
 
-        def capture(*args, **kwargs):
+        async def capture_create(*args, **kwargs):
             captured["file"] = kwargs.get("file")
             return MagicMock(text="テスト")
 
-        mock_openai.audio.transcriptions.create.side_effect = capture
-
-        with patch("main.openai.OpenAI", return_value=mock_openai):
-            transcribe_audio(b"fake-audio", "myfile.wav")
-
+        mock_create = AsyncMock(side_effect=capture_create)
+        with patch("main._openai_client") as mock_client:
+            mock_client.audio.transcriptions.create = mock_create
+            await transcribe_audio(b"fake-audio", "myfile.wav")
         assert captured["file"].name == "myfile.wav"
 
 
 # ── unit: identify_speaker ────────────────────────────────────────────────────
 
 class TestIdentifySpeaker:
-    def test_returns_name_above_threshold(self):
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"name": "hiroyuki", "kana": "ひろゆき", "score": 0.90}
-
+    async def test_returns_name_above_threshold(self):
+        mock_resp = _make_mock_response({"name": "hiroyuki", "kana": "ひろゆき", "score": 0.90})
+        mock_http = _make_mock_http_client(post_response=mock_resp)
         with (
             patch("main.SPEAKER_ID_URL", "http://localhost:8082"),
             patch("main.SPEAKER_ID_THRESHOLD", 0.75),
-            patch("main.requests.post", return_value=mock_resp),
+            patch("main._http_client", mock_http),
         ):
-            result = identify_speaker(b"fake-audio")
-
+            result = await identify_speaker(b"fake-audio")
         assert result == "ひろゆき"
 
-    def test_returns_kana_over_name(self):
+    async def test_returns_kana_over_name(self):
         """kana があれば name より優先して返す。"""
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"name": "hiroyuki", "kana": "ひろゆき", "score": 0.90}
-
+        mock_resp = _make_mock_response({"name": "hiroyuki", "kana": "ひろゆき", "score": 0.90})
+        mock_http = _make_mock_http_client(post_response=mock_resp)
         with (
             patch("main.SPEAKER_ID_URL", "http://localhost:8082"),
             patch("main.SPEAKER_ID_THRESHOLD", 0.75),
-            patch("main.requests.post", return_value=mock_resp),
+            patch("main._http_client", mock_http),
         ):
-            result = identify_speaker(b"fake-audio")
-
+            result = await identify_speaker(b"fake-audio")
         assert result == "ひろゆき"
 
-    def test_returns_none_below_threshold(self):
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"name": "hiroyuki", "kana": "ひろゆき", "score": 0.50}
-
+    async def test_returns_none_below_threshold(self):
+        mock_resp = _make_mock_response({"name": "hiroyuki", "kana": "ひろゆき", "score": 0.50})
+        mock_http = _make_mock_http_client(post_response=mock_resp)
         with (
             patch("main.SPEAKER_ID_URL", "http://localhost:8082"),
             patch("main.SPEAKER_ID_THRESHOLD", 0.75),
-            patch("main.requests.post", return_value=mock_resp),
+            patch("main._http_client", mock_http),
         ):
-            result = identify_speaker(b"fake-audio")
-
+            result = await identify_speaker(b"fake-audio")
         assert result is None
 
-    def test_returns_none_when_not_configured(self):
+    async def test_returns_none_when_not_configured(self):
         with patch("main.SPEAKER_ID_URL", ""):
-            result = identify_speaker(b"fake-audio")
+            result = await identify_speaker(b"fake-audio")
         assert result is None
 
-    def test_returns_none_on_service_error(self):
+    async def test_returns_none_on_service_error(self):
         """Service errors are non-fatal; identify_speaker returns None."""
+        mock_http = _make_mock_http_client()
+        mock_http.post = AsyncMock(side_effect=ConnectionError("unreachable"))
         with (
             patch("main.SPEAKER_ID_URL", "http://localhost:8082"),
-            patch("main.requests.post", side_effect=ConnectionError("unreachable")),
+            patch("main._http_client", mock_http),
         ):
-            result = identify_speaker(b"fake-audio")
+            result = await identify_speaker(b"fake-audio")
         assert result is None
 
-    def test_falls_back_to_name_when_no_kana(self):
+    async def test_falls_back_to_name_when_no_kana(self):
         """kana がなければ name を返す。"""
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"name": "hiroyuki", "score": 0.80}
-
+        mock_resp = _make_mock_response({"name": "hiroyuki", "score": 0.80})
+        mock_http = _make_mock_http_client(post_response=mock_resp)
         with (
             patch("main.SPEAKER_ID_URL", "http://localhost:8082"),
             patch("main.SPEAKER_ID_THRESHOLD", 0.75),
-            patch("main.requests.post", return_value=mock_resp),
+            patch("main._http_client", mock_http),
         ):
-            result = identify_speaker(b"fake-audio")
-
+            result = await identify_speaker(b"fake-audio")
         assert result == "hiroyuki"
 
-    def test_sends_auth_header_when_api_key_set(self):
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"name": "hiroyuki", "similarity": 0.90}
-
+    async def test_sends_auth_header_when_api_key_set(self):
+        mock_resp = _make_mock_response({"name": "hiroyuki", "score": 0.90})
+        mock_http = _make_mock_http_client(post_response=mock_resp)
         with (
             patch("main.SPEAKER_ID_URL", "http://localhost:8082"),
             patch("main.SPEAKER_ID_API_KEY", "secret"),
             patch("main.SPEAKER_ID_THRESHOLD", 0.75),
-            patch("main.requests.post", return_value=mock_resp) as mock_post,
+            patch("main._http_client", mock_http),
         ):
-            identify_speaker(b"fake-audio")
-
-        headers = mock_post.call_args.kwargs.get("headers", {})
+            await identify_speaker(b"fake-audio")
+        headers = mock_http.post.call_args.kwargs.get("headers", {})
         assert headers.get("Authorization") == "Bearer secret"
 
 
 # ── unit: chat_with_openclaw ──────────────────────────────────────────────────
 
 class TestChatWithOpenclaw:
-    def _mock_post(self, text: str) -> MagicMock:
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"output_text": text}
-        return mock_resp
+    def _mock_http(self, text: str) -> MagicMock:
+        resp = _make_mock_response({"output_text": text})
+        return _make_mock_http_client(post_response=resp)
 
-    def test_returns_reply(self):
-        with patch("main.requests.post", return_value=self._mock_post("おはよう！")):
-            result = chat_with_openclaw("おはよう")
+    async def test_returns_reply(self):
+        with patch("main._http_client", self._mock_http("おはよう！")):
+            result = await chat_with_openclaw("おはよう")
         assert result == "おはよう！"
 
-    def test_speaker_prefixed_in_user_message(self):
-        with patch("main.requests.post", return_value=self._mock_post("やあ！")) as mock_post:
-            chat_with_openclaw("こんにちは", speaker="hiroyuki")
-        payload = mock_post.call_args.kwargs["json"]
+    async def test_speaker_prefixed_in_user_message(self):
+        mock_http = self._mock_http("やあ！")
+        with patch("main._http_client", mock_http):
+            await chat_with_openclaw("こんにちは", speaker="hiroyuki")
+        payload = mock_http.post.call_args.kwargs["json"]
         assert "hiroyuki" in payload["input"]
         assert "こんにちは" in payload["input"]
 
-    def test_no_speaker_prefix_when_none(self):
-        with patch("main.requests.post", return_value=self._mock_post("返事")) as mock_post:
-            chat_with_openclaw("テスト", speaker=None)
-        payload = mock_post.call_args.kwargs["json"]
+    async def test_no_speaker_prefix_when_none(self):
+        mock_http = self._mock_http("返事")
+        with patch("main._http_client", mock_http):
+            await chat_with_openclaw("テスト", speaker=None)
+        payload = mock_http.post.call_args.kwargs["json"]
         assert payload["input"] == "テスト"
 
-    def test_system_prompt_append_in_instructions(self):
-        with patch("main.requests.post", return_value=self._mock_post("返事")) as mock_post:
-            chat_with_openclaw("テスト", system_prompt_append="追加指示")
-        payload = mock_post.call_args.kwargs["json"]
+    async def test_system_prompt_append_in_instructions(self):
+        mock_http = self._mock_http("返事")
+        with patch("main._http_client", mock_http):
+            await chat_with_openclaw("テスト", system_prompt_append="追加指示")
+        payload = mock_http.post.call_args.kwargs["json"]
         assert "追加指示" in payload["instructions"]
 
-    def test_session_key_header_when_set(self):
-        with patch("main.OPENCLAW_SESSION_KEY", "agent:stackchan:slack:channel:C123"), \
-             patch("main.requests.post", return_value=self._mock_post("返事")) as mock_post:
-            chat_with_openclaw("テスト")
-        headers = mock_post.call_args.kwargs["headers"]
+    async def test_session_key_header_when_set(self):
+        mock_http = self._mock_http("返事")
+        with (
+            patch("main.OPENCLAW_SESSION_KEY", "agent:stackchan:slack:channel:C123"),
+            patch("main._http_client", mock_http),
+        ):
+            await chat_with_openclaw("テスト")
+        headers = mock_http.post.call_args.kwargs["headers"]
         assert headers["x-openclaw-session-key"] == "agent:stackchan:slack:channel:C123"
 
-    def test_session_key_header_absent_when_not_set(self):
-        with patch("main.OPENCLAW_SESSION_KEY", ""), \
-             patch("main.requests.post", return_value=self._mock_post("返事")) as mock_post:
-            chat_with_openclaw("テスト")
-        headers = mock_post.call_args.kwargs["headers"]
+    async def test_session_key_header_absent_when_not_set(self):
+        mock_http = self._mock_http("返事")
+        with (
+            patch("main.OPENCLAW_SESSION_KEY", ""),
+            patch("main._http_client", mock_http),
+        ):
+            await chat_with_openclaw("テスト")
+        headers = mock_http.post.call_args.kwargs["headers"]
         assert "x-openclaw-session-key" not in headers
 
-    def test_output_array_fallback(self):
+    async def test_output_array_fallback(self):
         """output_text がない場合 output 配列から取得する。"""
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {
+        resp = _make_mock_response({
             "output": [{"content": [{"type": "output_text", "text": "フォールバック"}]}]
-        }
-        with patch("main.requests.post", return_value=mock_resp):
-            result = chat_with_openclaw("テスト")
+        })
+        mock_http = _make_mock_http_client(post_response=resp)
+        with patch("main._http_client", mock_http):
+            result = await chat_with_openclaw("テスト")
         assert result == "フォールバック"
 
-    def test_gateway_token_in_auth_header(self):
-        with patch("main.OPENCLAW_GATEWAY_TOKEN", "secret-token"), \
-             patch("main.requests.post", return_value=self._mock_post("返事")) as mock_post:
-            chat_with_openclaw("テスト")
-        headers = mock_post.call_args.kwargs["headers"]
+    async def test_gateway_token_in_auth_header(self):
+        mock_http = self._mock_http("返事")
+        with (
+            patch("main.OPENCLAW_GATEWAY_TOKEN", "secret-token"),
+            patch("main._http_client", mock_http),
+        ):
+            await chat_with_openclaw("テスト")
+        headers = mock_http.post.call_args.kwargs["headers"]
         assert headers["Authorization"] == "Bearer secret-token"
 
-    def test_scopes_header_always_set(self):
-        with patch("main.requests.post", return_value=self._mock_post("返事")) as mock_post:
-            chat_with_openclaw("テスト")
-        headers = mock_post.call_args.kwargs["headers"]
+    async def test_scopes_header_always_set(self):
+        mock_http = self._mock_http("返事")
+        with patch("main._http_client", mock_http):
+            await chat_with_openclaw("テスト")
+        headers = mock_http.post.call_args.kwargs["headers"]
         assert headers["x-openclaw-scopes"] == "operator.read,operator.write"
 
 
