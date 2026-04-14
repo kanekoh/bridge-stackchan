@@ -37,6 +37,8 @@ OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789/v1")
 OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "openclaw")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 OPENCLAW_SESSION_KEY = os.getenv("OPENCLAW_SESSION_KEY", "")
+_raw = os.getenv("OPENCLAW_MAX_OUTPUT_TOKENS", "")
+OPENCLAW_MAX_OUTPUT_TOKENS: int | None = int(_raw) if _raw.strip() else None
 
 SPEAKER_ID_URL = os.getenv("SPEAKER_ID_URL", "")
 SPEAKER_ID_API_KEY = os.getenv("SPEAKER_ID_API_KEY", "")
@@ -321,6 +323,8 @@ async def chat_with_openclaw(text: str, speaker: str | None = None, system_promp
         "input": user_input,
         "instructions": "\n\n".join(instructions_parts),
     }
+    if OPENCLAW_MAX_OUTPUT_TOKENS is not None:
+        payload["max_output_tokens"] = OPENCLAW_MAX_OUTPUT_TOKENS
 
     logger.info(
         "OpenClaw request: url=%s model=%s session_key=%s",
