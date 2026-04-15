@@ -636,6 +636,30 @@ class TestChatWithOpenAIResponses:
             result = await chat_with_openai_responses("テスト", session_key="s")
         assert result == "フォールバック"
 
+    async def test_web_search_tool_included_when_enabled(self):
+        mock_http = self._mock_http("検索結果です")
+        with (
+            patch("main.OPENAI_RESPONSES_WEB_SEARCH", True),
+            patch("main._http_client", mock_http),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+        ):
+            await chat_with_openai_responses("今日の天気は？", session_key="s")
+        payload = mock_http.post.call_args.kwargs["json"]
+        assert payload["tools"] == [{"type": "web_search_preview"}]
+
+    async def test_web_search_tool_absent_when_disabled(self):
+        mock_http = self._mock_http("返事")
+        with (
+            patch("main.OPENAI_RESPONSES_WEB_SEARCH", False),
+            patch("main._http_client", mock_http),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+        ):
+            await chat_with_openai_responses("テスト", session_key="s")
+        payload = mock_http.post.call_args.kwargs["json"]
+        assert "tools" not in payload
+
 
 # ── unit: chat_with_llm ───────────────────────────────────────────────────────
 

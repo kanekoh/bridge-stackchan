@@ -51,6 +51,7 @@ OPENAI_RESPONSES_BASE_URL = os.getenv("OPENAI_RESPONSES_BASE_URL", "https://api.
 OPENAI_RESPONSES_MODEL = os.getenv("OPENAI_RESPONSES_MODEL", "gpt-4o-mini")
 _raw_or = os.getenv("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS", "")
 OPENAI_RESPONSES_MAX_OUTPUT_TOKENS: int | None = int(_raw_or) if _raw_or.strip() else None
+OPENAI_RESPONSES_WEB_SEARCH = os.getenv("OPENAI_RESPONSES_WEB_SEARCH", "false").lower() == "true"
 
 DB_PATH = os.getenv("DB_PATH", "data/bridge.db")
 
@@ -489,10 +490,12 @@ async def chat_with_openai_responses(
         payload["previous_response_id"] = previous_response_id
     if OPENAI_RESPONSES_MAX_OUTPUT_TOKENS is not None:
         payload["max_output_tokens"] = OPENAI_RESPONSES_MAX_OUTPUT_TOKENS
+    if OPENAI_RESPONSES_WEB_SEARCH:
+        payload["tools"] = [{"type": "web_search_preview"}]
 
     logger.info(
-        "OpenAI Responses request: model=%s session_key=%s previous_response_id=%s",
-        OPENAI_RESPONSES_MODEL, session_key or "(none)", previous_response_id or "(none)",
+        "OpenAI Responses request: model=%s session_key=%s previous_response_id=%s web_search=%s",
+        OPENAI_RESPONSES_MODEL, session_key or "(none)", previous_response_id or "(none)", OPENAI_RESPONSES_WEB_SEARCH,
     )
 
     try:
