@@ -79,62 +79,52 @@ _http_client: httpx.AsyncClient = None  # type: ignore  # initialized in lifespa
 # ── SQLite ────────────────────────────────────────────────────────────────────
 
 _db_lock = threading.Lock()
+_db_conn: sqlite3.Connection | None = None  # initialized in _init_db()
 
 
 def _init_db() -> None:
+    global _db_conn
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
-    with _db_lock:
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS llm_sessions (
-                    session_key  TEXT PRIMARY KEY,
-                    backend      TEXT NOT NULL,
-                    response_id  TEXT,
-                    metadata     TEXT DEFAULT '{}',
-                    updated_at   TEXT NOT NULL
-                )
-            """)
-            conn.commit()
-        finally:
-            conn.close()
+    _db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS llm_sessions (
+            session_key  TEXT PRIMARY KEY,
+            backend      TEXT NOT NULL,
+            response_id  TEXT,
+            metadata     TEXT DEFAULT '{}',
+            updated_at   TEXT NOT NULL
+        )
+    """)
+    _db_conn.commit()
     logger.info("DB initialized: path=%s", DB_PATH)
 
 
 def _get_previous_response_id(session_key: str) -> str | None:
     with _db_lock:
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            row = conn.execute(
-                "SELECT response_id FROM llm_sessions WHERE session_key = ?",
-                (session_key,),
-            ).fetchone()
-            return row[0] if row else None
-        finally:
-            conn.close()
+        row = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT response_id FROM llm_sessions WHERE session_key = ?",
+            (session_key,),
+        ).fetchone()
+        return row[0] if row else None
 
 
 def _save_response_id(session_key: str, response_id: str) -> None:
     now = datetime.now(_JST).isoformat()
     with _db_lock:
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            conn.execute(
-                """
-                INSERT INTO llm_sessions (session_key, backend, response_id, updated_at)
-                VALUES (?, 'openai', ?, ?)
-                ON CONFLICT(session_key) DO UPDATE SET
-                    response_id = excluded.response_id,
-                    backend     = excluded.backend,
-                    updated_at  = excluded.updated_at
-                """,
-                (session_key, response_id, now),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        _db_conn.execute(  # type: ignore[union-attr]
+            """
+            INSERT INTO llm_sessions (session_key, backend, response_id, updated_at)
+            VALUES (?, 'openai', ?, ?)
+            ON CONFLICT(session_key) DO UPDATE SET
+                response_id = excluded.response_id,
+                backend     = excluded.backend,
+                updated_at  = excluded.updated_at
+            """,
+            (session_key, response_id, now),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
 
 
 @asynccontextmanager
@@ -146,6 +136,9 @@ async def lifespan(app: FastAPI):
     yield
     await _http_client.aclose()
     logger.info("httpx.AsyncClient closed")
+    if _db_conn:
+        _db_conn.close()
+        logger.info("SQLite connection closed")
 
 
 app = FastAPI(title="Bridge API", version="0.1.0", lifespan=lifespan)
