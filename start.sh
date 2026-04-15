@@ -17,12 +17,15 @@ if docker ps -aq -f name="$CONTAINER_NAME" | grep -q .; then
   docker rm "$CONTAINER_NAME"
 fi
 
+mkdir -p data
+
 echo "Starting container: $CONTAINER_NAME"
 docker run -d \
   --name "$CONTAINER_NAME" \
   --network slirp4netns:allow_host_loopback=true \
   --env-file .env \
   -p "${PORT}:8000" \
+  -v "$(pwd)/data:/app/data" \
   "$IMAGE_NAME"
 
 echo "Started. Logs: docker logs -f $CONTAINER_NAME"

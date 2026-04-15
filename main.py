@@ -273,6 +273,26 @@ def healthz():
     return {"status": "ok"}
 
 
+@app.get("/debug/sessions")
+def debug_sessions():
+    """llm_sessions テーブルの全レコードを返す（デバッグ用）。"""
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT session_key, backend, response_id, metadata, updated_at FROM llm_sessions ORDER BY updated_at DESC"
+        ).fetchall()
+    sessions = [
+        {
+            "session_key": r[0],
+            "backend": r[1],
+            "response_id": r[2],
+            "metadata": json.loads(r[3]) if r[3] else {},
+            "updated_at": r[4],
+        }
+        for r in rows
+    ]
+    return {"sessions": sessions}
+
+
 @app.get("/debug/connectivity")
 def debug_connectivity():
     """コンテナ内からの外部サービス疎通確認。"""
