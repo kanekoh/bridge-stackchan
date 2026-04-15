@@ -23,6 +23,9 @@ env/
 .coverage
 htmlcov/
 
+# DB ファイル
+data/
+
 # 生成された音声ファイル
 audio/
 /tmp/bridge-audio/

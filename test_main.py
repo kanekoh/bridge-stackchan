@@ -18,12 +18,15 @@ from fastapi.testclient import TestClient
 
 # Ensure required env vars exist before importing main
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
+os.environ.setdefault("DB_PATH", "/tmp/test-bridge.db")
 
 import main  # noqa: E402  (needed for patch.object on module-level clients)
 from main import (  # noqa: E402
     _build_datetime_context,
     app,
+    chat_with_llm,
     chat_with_openclaw,
+    chat_with_openai_responses,
     identify_speaker,
     transcribe_audio,
 )
@@ -144,7 +147,7 @@ class TestIngestAudio:
             patch("main.OPENAI_API_KEY", "sk-test"),
             patch("main.transcribe_audio", return_value="おはよう"),
             patch("main.identify_speaker", return_value="hiroyuki"),
-            patch("main.chat_with_openclaw", return_value="おはよう！いい天気だね！"),
+            patch("main.chat_with_llm", return_value="おはよう！いい天気だね！"),
             patch("main.resolve_audio_url", return_value=("http://localhost:8000/audio/x.mp3", None)),
             patch("main.publish_speak") as mock_pub,
         ):
@@ -183,20 +186,20 @@ class TestIngestAudio:
         assert resp.status_code == 502
         assert "STT" in resp.json()["detail"]
 
-    def test_openclaw_error_returns_502(self, client):
+    def test_llm_error_returns_502(self, client):
         wav = _make_wav()
         with (
             patch("main.OPENAI_API_KEY", "sk-test"),
             patch("main.transcribe_audio", return_value="テスト"),
             patch("main.identify_speaker", return_value=None),
-            patch("main.chat_with_openclaw", side_effect=RuntimeError("llm down")),
+            patch("main.chat_with_llm", side_effect=RuntimeError("llm down")),
         ):
             resp = client.post(
                 "/ingest-audio",
                 files={"file": ("test.wav", wav, "audio/wav")},
             )
         assert resp.status_code == 502
-        assert "OpenClaw" in resp.json()["detail"]
+        assert "LLM" in resp.json()["detail"]
 
     def test_voicevox_error_returns_502(self, client):
         wav = _make_wav()
@@ -204,7 +207,7 @@ class TestIngestAudio:
             patch("main.OPENAI_API_KEY", "sk-test"),
             patch("main.transcribe_audio", return_value="テスト"),
             patch("main.identify_speaker", return_value=None),
-            patch("main.chat_with_openclaw", return_value="返事"),
+            patch("main.chat_with_llm", return_value="返事"),
             patch("main.resolve_audio_url", side_effect=RuntimeError("voicevox down")),
         ):
             resp = client.post(
@@ -214,14 +217,14 @@ class TestIngestAudio:
         assert resp.status_code == 502
         assert "VOICEVOX" in resp.json()["detail"]
 
-    def test_system_prompt_append_passed_to_openclaw(self, client):
-        """system_prompt_append form field is forwarded to chat_with_openclaw."""
+    def test_system_prompt_append_passed_to_llm(self, client):
+        """system_prompt_append form field is forwarded to chat_with_llm."""
         wav = _make_wav()
         with (
             patch("main.OPENAI_API_KEY", "sk-test"),
             patch("main.transcribe_audio", return_value="テスト"),
             patch("main.identify_speaker", return_value=None),
-            patch("main.chat_with_openclaw", return_value="返事") as mock_chat,
+            patch("main.chat_with_llm", return_value="返事") as mock_chat,
             patch("main.resolve_audio_url", return_value=("http://localhost:8000/audio/x.mp3", None)),
             patch("main.publish_speak"),
         ):
@@ -232,7 +235,10 @@ class TestIngestAudio:
             )
 
         assert resp.status_code == 200
-        mock_chat.assert_called_once_with("テスト", None, "追加指示テスト")
+        call_kwargs = mock_chat.call_args
+        assert call_kwargs.args[0] == "テスト"    # text
+        assert call_kwargs.args[1] is None         # speaker
+        assert call_kwargs.args[2] == "追加指示テスト"  # system_prompt_append
 
     def test_unknown_speaker_when_not_identified(self, client):
         """speaker field is None when identify_speaker returns None (sync mode)."""
@@ -241,7 +247,7 @@ class TestIngestAudio:
             patch("main.OPENAI_API_KEY", "sk-test"),
             patch("main.transcribe_audio", return_value="テスト"),
             patch("main.identify_speaker", return_value=None),
-            patch("main.chat_with_openclaw", return_value="返事"),
+            patch("main.chat_with_llm", return_value="返事"),
             patch("main.resolve_audio_url", return_value=("http://localhost:8000/audio/x.mp3", None)),
             patch("main.publish_speak"),
         ):
@@ -260,7 +266,7 @@ class TestIngestAudio:
             patch("main.OPENAI_API_KEY", "sk-test"),
             patch("main.transcribe_audio", return_value="テスト"),
             patch("main.identify_speaker", return_value=None),
-            patch("main.chat_with_openclaw", return_value="返事"),
+            patch("main.chat_with_llm", return_value="返事"),
             patch("main.resolve_audio_url", return_value=("http://example.com/audio.mp3", None)),
             patch("main.publish_speak") as mock_pub,
         ):
@@ -280,7 +286,7 @@ class TestIngestAudio:
             patch("main.OPENAI_API_KEY", "sk-test"),
             patch("main.transcribe_audio", return_value="テスト"),
             patch("main.identify_speaker", return_value=None),
-            patch("main.chat_with_openclaw", return_value="返事"),
+            patch("main.chat_with_llm", return_value="返事"),
             patch("main.resolve_audio_url", return_value=("http://example.com/audio.mp3", "http://example.com/audio.mp3s")),
             patch("main.publish_speak"),
         ):
@@ -303,7 +309,7 @@ class TestIngestAudio:
             patch("main.OPENAI_API_KEY", "sk-test"),
             patch("main.transcribe_audio", return_value="テスト"),
             patch("main.identify_speaker", return_value=None),
-            patch("main.chat_with_openclaw", return_value="返事"),
+            patch("main.chat_with_llm", return_value="返事"),
             patch("main.resolve_audio_url", return_value=("http://example.com/audio.mp3", None)),
             patch("main.publish_speak") as mock_pub,
         ):
@@ -326,7 +332,7 @@ class TestIngestAudio:
             patch("main.OPENAI_API_KEY", "sk-test"),
             patch("main.transcribe_audio", return_value="テスト"),
             patch("main.identify_speaker", return_value=None),
-            patch("main.chat_with_openclaw", return_value="返事"),
+            patch("main.chat_with_llm", return_value="返事"),
             patch("main.resolve_audio_url", return_value=("http://example.com/audio.mp3", None)),
             patch("main.publish_speak", side_effect=RuntimeError("MQTT down")),
         ):
@@ -532,6 +538,134 @@ class TestChatWithOpenclaw:
             await chat_with_openclaw("テスト")
         headers = mock_http.post.call_args.kwargs["headers"]
         assert headers["x-openclaw-scopes"] == "operator.read,operator.write"
+
+
+# ── unit: chat_with_openai_responses ─────────────────────────────────────────
+
+class TestChatWithOpenAIResponses:
+    def _mock_http(self, text: str, response_id: str = "resp_test123") -> MagicMock:
+        resp = _make_mock_response({"id": response_id, "output_text": text})
+        return _make_mock_http_client(post_response=resp)
+
+    async def test_returns_reply(self):
+        with (
+            patch("main._http_client", self._mock_http("こんにちは！")),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id") as mock_save,
+        ):
+            result = await chat_with_openai_responses("こんにちは", session_key="test-session")
+        assert result == "こんにちは！"
+        mock_save.assert_called_once_with("test-session", "resp_test123")
+
+    async def test_previous_response_id_included_in_payload(self):
+        mock_http = self._mock_http("返事")
+        with (
+            patch("main._http_client", mock_http),
+            patch("main._get_previous_response_id", return_value="resp_prev999"),
+            patch("main._save_response_id"),
+        ):
+            await chat_with_openai_responses("テスト", session_key="test-session")
+        payload = mock_http.post.call_args.kwargs["json"]
+        assert payload["previous_response_id"] == "resp_prev999"
+
+    async def test_no_previous_response_id_on_first_call(self):
+        mock_http = self._mock_http("返事")
+        with (
+            patch("main._http_client", mock_http),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+        ):
+            await chat_with_openai_responses("テスト", session_key="test-session")
+        payload = mock_http.post.call_args.kwargs["json"]
+        assert "previous_response_id" not in payload
+
+    async def test_speaker_prefixed_in_user_message(self):
+        mock_http = self._mock_http("やあ！")
+        with (
+            patch("main._http_client", mock_http),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+        ):
+            await chat_with_openai_responses("こんにちは", speaker="hiroyuki", session_key="s")
+        payload = mock_http.post.call_args.kwargs["json"]
+        assert "hiroyuki" in payload["input"]
+        assert "こんにちは" in payload["input"]
+
+    async def test_stackchan_system_prompt_in_instructions(self):
+        mock_http = self._mock_http("返事")
+        with (
+            patch("main._http_client", mock_http),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+        ):
+            await chat_with_openai_responses("テスト", session_key="s")
+        payload = mock_http.post.call_args.kwargs["json"]
+        assert "Stack-chan" in payload["instructions"]
+
+    async def test_system_prompt_append_in_instructions(self):
+        mock_http = self._mock_http("返事")
+        with (
+            patch("main._http_client", mock_http),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+        ):
+            await chat_with_openai_responses("テスト", system_prompt_append="追加指示", session_key="s")
+        payload = mock_http.post.call_args.kwargs["json"]
+        assert "追加指示" in payload["instructions"]
+
+    async def test_does_not_save_when_no_session_key(self):
+        with (
+            patch("main._http_client", self._mock_http("返事")),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id") as mock_save,
+        ):
+            await chat_with_openai_responses("テスト", session_key="")
+        mock_save.assert_not_called()
+
+    async def test_output_array_fallback(self):
+        resp = _make_mock_response({
+            "id": "resp_xyz",
+            "output": [{"content": [{"type": "output_text", "text": "フォールバック"}]}],
+        })
+        mock_http = _make_mock_http_client(post_response=resp)
+        with (
+            patch("main._http_client", mock_http),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+        ):
+            result = await chat_with_openai_responses("テスト", session_key="s")
+        assert result == "フォールバック"
+
+
+# ── unit: chat_with_llm ───────────────────────────────────────────────────────
+
+class TestChatWithLLM:
+    async def test_dispatches_to_openclaw_by_default(self):
+        with (
+            patch("main.LLM_BACKEND", "openclaw"),
+            patch("main.chat_with_openclaw", new_callable=AsyncMock, return_value="OpenClaw返事") as mock_oc,
+        ):
+            result = await chat_with_llm("テスト", session_key="s")
+        assert result == "OpenClaw返事"
+        mock_oc.assert_called_once()
+
+    async def test_dispatches_to_openai_when_configured(self):
+        with (
+            patch("main.LLM_BACKEND", "openai"),
+            patch("main.chat_with_openai_responses", new_callable=AsyncMock, return_value="OpenAI返事") as mock_oai,
+        ):
+            result = await chat_with_llm("テスト", session_key="s")
+        assert result == "OpenAI返事"
+        mock_oai.assert_called_once()
+
+    async def test_session_key_passed_to_openai(self):
+        with (
+            patch("main.LLM_BACKEND", "openai"),
+            patch("main.chat_with_openai_responses", new_callable=AsyncMock, return_value="返事") as mock_oai,
+        ):
+            await chat_with_llm("テスト", session_key="my-device")
+        _, kwargs = mock_oai.call_args
+        assert kwargs.get("session_key") == "my-device" or mock_oai.call_args.args[3] == "my-device"
 
 
 # ── unit: _build_datetime_context ─────────────────────────────────────────────

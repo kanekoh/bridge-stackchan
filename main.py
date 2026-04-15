@@ -2,6 +2,7 @@ import asyncio
 import io
 import os
 import socket
+import sqlite3
 import uuid
 import json
 import logging
@@ -44,15 +45,102 @@ SPEAKER_ID_URL = os.getenv("SPEAKER_ID_URL", "")
 SPEAKER_ID_API_KEY = os.getenv("SPEAKER_ID_API_KEY", "")
 SPEAKER_ID_THRESHOLD = float(os.getenv("SPEAKER_ID_THRESHOLD", "0.75"))
 
+# LLM バックエンド切り替え
+LLM_BACKEND = os.getenv("LLM_BACKEND", "openclaw")  # "openclaw" or "openai"
+OPENAI_RESPONSES_BASE_URL = os.getenv("OPENAI_RESPONSES_BASE_URL", "https://api.openai.com/v1")
+OPENAI_RESPONSES_MODEL = os.getenv("OPENAI_RESPONSES_MODEL", "gpt-4o-mini")
+_raw_or = os.getenv("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS", "")
+OPENAI_RESPONSES_MAX_OUTPUT_TOKENS: int | None = int(_raw_or) if _raw_or.strip() else None
+
+DB_PATH = os.getenv("DB_PATH", "data/bridge.db")
+
 _JST = timezone(timedelta(hours=9))
+
+_STACKCHAN_SYSTEM_PROMPT = """\
+あなたはStack-chan（スタックちゃん）という超かわいいアシスタントロボットです。
+
+性格と話し方:
+- 日本語で話す。英語で話しかけられても、かわいいカタカナ英語まじりの日本語で返す
+- 返答は短く、シンプルで、かわいく、話し言葉に適した表現を使う
+- 口調はあたたかく、明るく、やさしく、サポーティブ
+- ビジネス的な堅い表現は避ける
+- 長くて細かい説明は避ける（明示的に求められた場合を除く）
+- 技術的な説明も正確で実用的にまとめる
+
+利用者について:
+- 家族みんなが使うシステムです
+- 特定の一人に対応しすぎないようにする
+- 誰にでも分かりやすく、親しみやすい表現を心がける\
+"""
 
 _openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
 _http_client: httpx.AsyncClient = None  # type: ignore  # initialized in lifespan
+
+# ── SQLite ────────────────────────────────────────────────────────────────────
+
+_db_lock = threading.Lock()
+
+
+def _init_db() -> None:
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS llm_sessions (
+                    session_key  TEXT PRIMARY KEY,
+                    backend      TEXT NOT NULL,
+                    response_id  TEXT,
+                    metadata     TEXT DEFAULT '{}',
+                    updated_at   TEXT NOT NULL
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
+    logger.info("DB initialized: path=%s", DB_PATH)
+
+
+def _get_previous_response_id(session_key: str) -> str | None:
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT response_id FROM llm_sessions WHERE session_key = ?",
+                (session_key,),
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+
+def _save_response_id(session_key: str, response_id: str) -> None:
+    now = datetime.now(_JST).isoformat()
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            conn.execute(
+                """
+                INSERT INTO llm_sessions (session_key, backend, response_id, updated_at)
+                VALUES (?, 'openai', ?, ?)
+                ON CONFLICT(session_key) DO UPDATE SET
+                    response_id = excluded.response_id,
+                    backend     = excluded.backend,
+                    updated_at  = excluded.updated_at
+                """,
+                (session_key, response_id, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _http_client
+    _init_db()
     _http_client = httpx.AsyncClient(timeout=60)
     logger.info("httpx.AsyncClient initialized")
     yield
@@ -354,6 +442,84 @@ async def chat_with_openclaw(text: str, speaker: str | None = None, system_promp
     raise RuntimeError(f"OpenClaw response に返答テキストが見つかりません: {data}")
 
 
+async def chat_with_openai_responses(
+    text: str,
+    speaker: str | None = None,
+    system_prompt_append: str = "",
+    session_key: str = "",
+) -> str:
+    """Send text to OpenAI Responses API and return the reply.
+
+    Loads previous_response_id from DB to maintain conversation continuity,
+    and saves the new response_id after a successful call.
+    """
+    url = OPENAI_RESPONSES_BASE_URL.rstrip("/") + "/responses"
+    headers: dict = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+    }
+
+    user_input = f"[話者: {speaker}] {text}" if speaker else text
+
+    instructions_parts = [_STACKCHAN_SYSTEM_PROMPT, _build_datetime_context()]
+    if system_prompt_append:
+        instructions_parts.append(system_prompt_append)
+
+    previous_response_id = _get_previous_response_id(session_key) if session_key else None
+
+    payload: dict = {
+        "model": OPENAI_RESPONSES_MODEL,
+        "input": user_input,
+        "instructions": "\n\n".join(instructions_parts),
+    }
+    if previous_response_id:
+        payload["previous_response_id"] = previous_response_id
+    if OPENAI_RESPONSES_MAX_OUTPUT_TOKENS is not None:
+        payload["max_output_tokens"] = OPENAI_RESPONSES_MAX_OUTPUT_TOKENS
+
+    logger.info(
+        "OpenAI Responses request: model=%s session_key=%s previous_response_id=%s",
+        OPENAI_RESPONSES_MODEL, session_key or "(none)", previous_response_id or "(none)",
+    )
+
+    try:
+        resp = await _http_client.post(url, json=payload, headers=headers)
+        if not resp.is_success:
+            logger.error("OpenAI Responses HTTP %d: body=%s", resp.status_code, resp.text[:500])
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.error("OpenAI Responses error: type=%s message=%s", type(e).__name__, e)
+        raise
+
+    response_id = data.get("id")
+    if response_id and session_key:
+        _save_response_id(session_key, response_id)
+        logger.info("Session response_id saved: session_key=%s response_id=%s", session_key, response_id)
+
+    if "output_text" in data:
+        return data["output_text"]
+
+    for item in data.get("output", []):
+        for content in item.get("content", []):
+            if content.get("type") == "output_text":
+                return content["text"]
+
+    raise RuntimeError(f"OpenAI Responses response に返答テキストが見つかりません: {data}")
+
+
+async def chat_with_llm(
+    text: str,
+    speaker: str | None = None,
+    system_prompt_append: str = "",
+    session_key: str = "",
+) -> str:
+    """Dispatch to the configured LLM backend (LLM_BACKEND env)."""
+    if LLM_BACKEND == "openai":
+        return await chat_with_openai_responses(text, speaker, system_prompt_append, session_key)
+    return await chat_with_openclaw(text, speaker, system_prompt_append)
+
+
 @app.post("/ingest-audio")
 async def ingest_audio(
     file: UploadFile = File(...),
@@ -362,9 +528,10 @@ async def ingest_audio(
     priority: str = Form("normal"),
     request_id: str = Form(""),
     mode: str = Form("async"),
+    session_key: str = Form(""),
 ):
     """
-    Receive audio from Stack-chan, run STT, call OpenClaw, then deliver the reply.
+    Receive audio from Stack-chan, run STT, call LLM, then deliver the reply.
 
     Form fields (all optional):
     - system_prompt_append: extra instructions appended to the base system prompt
@@ -372,14 +539,19 @@ async def ingest_audio(
     - priority: MQTT message priority (default: "normal")
     - request_id: caller-supplied idempotency key (auto-generated if omitted)
     - mode: "async" (default) publishes via MQTT; "sync" returns audioUrl in the response body only
+    - session_key: conversation session identifier (defaults to MQTT_DEVICE_ID)
     """
     if not OPENAI_API_KEY:
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
 
+    effective_session_key = session_key or MQTT_DEVICE_ID
     req_id = request_id or str(uuid.uuid4())
     audio_bytes = await file.read()
     filename = file.filename or "audio.wav"
-    logger.info("Received audio: filename=%s size=%d request_id=%s mode=%s", filename, len(audio_bytes), req_id, mode)
+    logger.info(
+        "Received audio: filename=%s size=%d request_id=%s mode=%s session_key=%s",
+        filename, len(audio_bytes), req_id, mode, effective_session_key,
+    )
 
     try:
         transcript, speaker = await asyncio.gather(
@@ -392,10 +564,10 @@ async def ingest_audio(
     logger.info("Transcript: request_id=%s text=%s speaker=%s", req_id, transcript[:80], speaker)
 
     try:
-        reply = await chat_with_openclaw(transcript, speaker, system_prompt_append)
+        reply = await chat_with_llm(transcript, speaker, system_prompt_append, effective_session_key)
     except Exception as e:
-        logger.error("OpenClaw error: %s", e)
-        raise HTTPException(status_code=502, detail=f"OpenClaw error: {e}")
+        logger.error("LLM error: %s", e)
+        raise HTTPException(status_code=502, detail=f"LLM error: {e}")
     logger.info("OpenClaw reply: request_id=%s text=%s", req_id, reply[:80])
 
     try:
