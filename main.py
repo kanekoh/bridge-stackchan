@@ -780,6 +780,19 @@ async def chat_with_openai_responses(
 
         try:
             resp = await _http_client.post(url, json=payload, headers=headers)
+
+            # previous_response_id が壊れた状態（未解決の function_call が残っている）の場合、
+            # リセットして同じ入力で再試行する。会話の連続性は失われるが処理は継続できる。
+            if resp.status_code == 400 and previous_response_id and "tool" in resp.text.lower():
+                logger.warning(
+                    "previous_response_id has unresolved function call, resetting and retrying: "
+                    "session_key=%s previous_response_id=%s",
+                    session_key, previous_response_id,
+                )
+                previous_response_id = None
+                payload.pop("previous_response_id", None)
+                resp = await _http_client.post(url, json=payload, headers=headers)
+
             if not resp.is_success:
                 logger.error("OpenAI Responses HTTP %d: body=%s", resp.status_code, resp.text[:500])
             resp.raise_for_status()
@@ -789,16 +802,15 @@ async def chat_with_openai_responses(
             raise
 
         response_id = data.get("id")
-        if response_id and session_key:
-            _save_response_id(session_key, response_id)
-            previous_response_id = response_id
-            logger.info("Session response_id saved: session_key=%s response_id=%s", session_key, response_id)
-
         output = data.get("output", [])
         function_outputs = await _handle_function_calls(output, notify_context or {})
 
         if function_outputs is None:
-            # Function call なし → テキストを返す
+            # 最終テキストレスポンス → ここでのみ DB に保存する
+            # （function_call の中間レスポンス ID を保存すると次回の会話で 400 エラーになるため）
+            if response_id and session_key:
+                _save_response_id(session_key, response_id)
+                logger.info("Session response_id saved: session_key=%s response_id=%s", session_key, response_id)
             if "output_text" in data:
                 return data["output_text"]
             for item in output:
@@ -807,7 +819,10 @@ async def chat_with_openai_responses(
                         return content["text"]
             raise RuntimeError(f"OpenAI Responses response に返答テキストが見つかりません: {data}")
 
-        # Function call あり → 結果を渡して継続
+        # Function call あり → ループ内での previous_response_id を更新して継続
+        # （DB には保存しない。function_call の未解決状態を DB に残さないため）
+        if response_id:
+            previous_response_id = response_id
         user_input = function_outputs
 
     raise RuntimeError("OpenAI Responses function calling loop exceeded max iterations")

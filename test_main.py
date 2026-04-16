@@ -1076,7 +1076,7 @@ class TestFunctionCallingLoop:
         assert result == "こんにちは！"
 
     async def test_function_call_then_text(self):
-        """Function call → テキストの 2 ラウンドが正しく動く。"""
+        """Function call → テキストの 2 ラウンドが正しく動く。最終レスポンスの ID のみ保存される。"""
         fc_response = {
             "id": "resp_fc",
             "output": [{
@@ -1091,7 +1091,7 @@ class TestFunctionCallingLoop:
         with (
             patch("main._http_client", self._mock_http_multi([fc_response, text_response])),
             patch("main._get_previous_response_id", return_value=None),
-            patch("main._save_response_id"),
+            patch("main._save_response_id") as mock_save,
             patch("main._register_timer", return_value="tid-x"),
         ):
             result = await chat_with_openai_responses(
@@ -1100,6 +1100,35 @@ class TestFunctionCallingLoop:
                 notify_context={"session_key": "s", "slack_channel": "C001"},
             )
         assert result == "タイマーをセットしたよ！"
+        # 中間の function_call レスポンス (resp_fc) は保存されず、最終テキスト (resp_text) のみ保存される
+        mock_save.assert_called_once_with("s", "resp_text")
+
+    async def test_broken_previous_response_id_is_retried_without_it(self):
+        """previous_response_id が壊れている（400 + 'tool' エラー）場合、リセットして再試行する。"""
+        broken_resp = MagicMock()
+        broken_resp.status_code = 400
+        broken_resp.is_success = False
+        broken_resp.text = '{"error": {"message": "No tool output found for function call call_abc."}}'
+        broken_resp.raise_for_status = MagicMock(side_effect=Exception("400"))
+
+        ok_resp = _make_mock_response({"id": "resp_new", "output_text": "おはよう！"})
+
+        client = MagicMock()
+        client.post = AsyncMock(side_effect=[broken_resp, ok_resp])
+
+        with (
+            patch("main._http_client", client),
+            patch("main._get_previous_response_id", return_value="resp_broken"),
+            patch("main._save_response_id") as mock_save,
+        ):
+            result = await chat_with_openai_responses("おはよう", session_key="s")
+
+        assert result == "おはよう！"
+        assert client.post.call_count == 2
+        # 2 回目のリクエストには previous_response_id が含まれない
+        second_payload = client.post.call_args_list[1].kwargs["json"]
+        assert "previous_response_id" not in second_payload
+        mock_save.assert_called_once_with("s", "resp_new")
 
     async def test_use_functions_false_omits_timer_tools(self):
         """use_functions=False のとき _TIMER_TOOLS が payload に含まれない。"""
