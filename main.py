@@ -613,8 +613,13 @@ async def _slack_handle_speak(ack, body: dict, respond) -> None:
     logger.info("Slack /speak: channel=%s text=%s", body.get("channel_id"), text[:60])
 
     try:
-        # /speak は都度変換なのでセッション履歴を引き継がない
-        reply = await chat_with_llm(text)
+        # /speak は「みんなへの発信」なので、依頼者への返答にならないよう指示を加える
+        speak_instruction = (
+            "以下はスタックちゃんがその場にいるみんなに向けて話す内容の原文です。"
+            "この内容をスタックちゃんらしい口調に変換してください。"
+            "依頼した人への返答や呼びかけにはしないでください。"
+        )
+        reply = await chat_with_llm(text, system_prompt_append=speak_instruction)
     except Exception as e:
         logger.error("Slack /speak LLM error: %s", e)
         await respond("ごめん、うまく変換できなかったよ。もう一度試してね！")

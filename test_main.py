@@ -796,6 +796,20 @@ class TestSlackHandlers:
         mock_pub.assert_called_once()
         respond.assert_called_once()
 
+    async def test_speak_command_includes_broadcast_instruction(self):
+        """/speak は「みんなへの発信」であることを system_prompt_append で伝える。"""
+        ack = AsyncMock()
+        respond = AsyncMock()
+        body = {"text": "おはよう", "channel_id": "C001"}
+        with (
+            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="おはよう！") as mock_llm,
+            patch("main.resolve_audio_url", new_callable=AsyncMock, return_value=("http://x.com/a.mp3", None)),
+            patch("main.publish_speak"),
+        ):
+            await _slack_handle_speak(ack, body, respond)
+        system_prompt_append = mock_llm.call_args.kwargs.get("system_prompt_append", "")
+        assert "みんな" in system_prompt_append or "依頼" in system_prompt_append
+
     async def test_speak_command_no_text_returns_usage(self):
         ack = AsyncMock()
         respond = AsyncMock()
