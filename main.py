@@ -84,6 +84,11 @@ _STACKCHAN_SYSTEM_PROMPT = """\
 _openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
 _http_client: httpx.AsyncClient = None  # type: ignore  # initialized in lifespan
 
+# MQTT ACK 待機: requestId → asyncio.Event のマップ
+_pending_acks: dict[str, asyncio.Event] = {}
+# MQTT スレッドから asyncio へ通知するためのイベントループ参照（lifespan で設定）
+_main_loop: asyncio.AbstractEventLoop | None = None
+
 # ── SQLite ────────────────────────────────────────────────────────────────────
 
 _db_lock = threading.Lock()
@@ -137,7 +142,8 @@ def _save_response_id(session_key: str, response_id: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _http_client
+    global _http_client, _main_loop
+    _main_loop = asyncio.get_running_loop()
     _init_db()
     _http_client = httpx.AsyncClient(timeout=60)
     logger.info("httpx.AsyncClient initialized")
@@ -192,8 +198,21 @@ class _MqttConnection:
         def on_disconnect(client, userdata, flags, reason_code, properties):
             logger.warning("MQTT disconnected: reason_code=%s", reason_code)
 
+        def on_message(client, userdata, message):
+            try:
+                data = json.loads(message.payload)
+                req_id = data.get("id")
+                if req_id and _main_loop:
+                    event = _pending_acks.get(req_id)
+                    if event:
+                        _main_loop.call_soon_threadsafe(event.set)
+                        logger.info("MQTT ACK received: requestId=%s", req_id)
+            except Exception as e:
+                logger.warning("MQTT ACK parse error: %s", e)
+
         client.on_connect = on_connect
         client.on_disconnect = on_disconnect
+        client.on_message = on_message
         client.loop_start()
         client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
 
@@ -201,7 +220,8 @@ class _MqttConnection:
             client.loop_stop()
             raise RuntimeError("MQTT connection timeout (no CONNACK within 10s)")
 
-        logger.info("MQTT connected (persistent)")
+        client.subscribe("stackchan/ack", qos=1)
+        logger.info("MQTT connected (persistent), subscribed to stackchan/ack")
         return client
 
     def publish(self, topic: str, payload: str) -> None:
@@ -276,6 +296,23 @@ def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, so
         msg["audioStreamingUrl"] = audio_streaming_url
     payload = json.dumps(msg, ensure_ascii=False)
     _mqtt_conn.publish(topic, payload)
+
+
+async def wait_for_ack(request_id: str, timeout: float = 5.0) -> bool:
+    """stackchan/ack トピックで requestId に対応する ACK を待つ。
+
+    Returns True if ACK received within timeout, False otherwise.
+    """
+    event = asyncio.Event()
+    _pending_acks[request_id] = event
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        logger.warning("MQTT ACK timeout: requestId=%s", request_id)
+        return False
+    finally:
+        _pending_acks.pop(request_id, None)
 
 
 def _tcp_check(host: str, port: int, timeout: float = 3.0) -> str:
@@ -615,7 +652,7 @@ async def _slack_handle_speak(ack, body: dict, respond) -> None:
     try:
         # /speak は「みんなへの発信」なので、依頼者への返答にならないよう指示を加える
         speak_instruction = (
-            "以下はスタックちゃんがその場にいるみんなに向けて話す内容の原文です。"
+            "以下はスタックちゃんがその場にいる人に向けて話す内容の原文です。"
             "この内容をスタックちゃんらしい口調に変換してください。"
             "依頼した人への返答や呼びかけにはしないでください。"
         )
@@ -627,11 +664,18 @@ async def _slack_handle_speak(ack, body: dict, respond) -> None:
 
     try:
         audio_url, streaming_url = await resolve_audio_url(reply)
-        publish_speak(audio_url, streaming_url, reply, "slack", "normal", str(uuid.uuid4()))
-        await respond(f"話すよ！「{reply}」", response_type="in_channel")
+        req_id = str(uuid.uuid4())
+        publish_speak(audio_url, streaming_url, reply, "slack", "normal", req_id)
     except Exception as e:
         logger.error("Slack /speak speak error: %s", e)
         await respond(f"音声の送信に失敗したよ。テキストはこれ：「{reply}」")
+        return
+
+    ack_ok = await wait_for_ack(req_id)
+    if ack_ok:
+        await respond(f"話すよ！「{reply}」", response_type="in_channel")
+    else:
+        await respond(f"⚠️ スタックちゃんから応答がなかったよ。届いてないかも。「{reply}」", response_type="in_channel")
 
 
 def _setup_slack():

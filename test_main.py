@@ -32,6 +32,7 @@ from main import (  # noqa: E402
     chat_with_openai_responses,
     identify_speaker,
     transcribe_audio,
+    wait_for_ack,
 )
 
 
@@ -787,9 +788,10 @@ class TestSlackHandlers:
         respond = AsyncMock()
         body = {"text": "おはようございます", "channel_id": "C001"}
         with (
-            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="おはよう！") as mock_llm,
+            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="おはよう！"),
             patch("main.resolve_audio_url", new_callable=AsyncMock, return_value=("http://x.com/a.mp3", None)),
             patch("main.publish_speak") as mock_pub,
+            patch("main.wait_for_ack", new_callable=AsyncMock, return_value=True),
         ):
             await _slack_handle_speak(ack, body, respond)
         ack.assert_called_once()
@@ -805,6 +807,7 @@ class TestSlackHandlers:
             patch("main.chat_with_llm", new_callable=AsyncMock, return_value="おはよう！") as mock_llm,
             patch("main.resolve_audio_url", new_callable=AsyncMock, return_value=("http://x.com/a.mp3", None)),
             patch("main.publish_speak"),
+            patch("main.wait_for_ack", new_callable=AsyncMock, return_value=True),
         ):
             await _slack_handle_speak(ack, body, respond)
         system_prompt_append = mock_llm.call_args.kwargs.get("system_prompt_append", "")
@@ -829,12 +832,40 @@ class TestSlackHandlers:
             patch("main.chat_with_llm", new_callable=AsyncMock, return_value="テスト！") as mock_llm,
             patch("main.resolve_audio_url", new_callable=AsyncMock, return_value=("http://x.com/a.mp3", None)),
             patch("main.publish_speak"),
+            patch("main.wait_for_ack", new_callable=AsyncMock, return_value=True),
         ):
             await _slack_handle_speak(ack, body, respond)
-        # session_key は空文字またはデフォルト値
         call_args = mock_llm.call_args
         session_key = call_args.kwargs.get("session_key", call_args.args[3] if len(call_args.args) > 3 else "")
         assert session_key == ""
+
+    async def test_speak_command_ack_ok_sends_success_message(self):
+        """ACK 受信 → 「話すよ！」メッセージを送信。"""
+        ack = AsyncMock()
+        respond = AsyncMock()
+        body = {"text": "おはよう", "channel_id": "C001"}
+        with (
+            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="おはよう！"),
+            patch("main.resolve_audio_url", new_callable=AsyncMock, return_value=("http://x.com/a.mp3", None)),
+            patch("main.publish_speak"),
+            patch("main.wait_for_ack", new_callable=AsyncMock, return_value=True),
+        ):
+            await _slack_handle_speak(ack, body, respond)
+        assert "話すよ" in respond.call_args.args[0]
+
+    async def test_speak_command_ack_timeout_sends_warning(self):
+        """ACK タイムアウト → 警告メッセージを Slack に送信。"""
+        ack = AsyncMock()
+        respond = AsyncMock()
+        body = {"text": "おはよう", "channel_id": "C001"}
+        with (
+            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="おはよう！"),
+            patch("main.resolve_audio_url", new_callable=AsyncMock, return_value=("http://x.com/a.mp3", None)),
+            patch("main.publish_speak"),
+            patch("main.wait_for_ack", new_callable=AsyncMock, return_value=False),
+        ):
+            await _slack_handle_speak(ack, body, respond)
+        assert "応答がなかった" in respond.call_args.args[0]
 
 
 # ── unit: _build_datetime_context ─────────────────────────────────────────────
