@@ -301,10 +301,14 @@ def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, so
 async def wait_for_ack(request_id: str, timeout: float = 5.0) -> bool:
     """stackchan/ack トピックで requestId に対応する ACK を待つ。
 
+    publish_speak より前に _pending_acks に event を登録しておくと、
+    ACK が先に届いた場合も取りこぼさない。
     Returns True if ACK received within timeout, False otherwise.
     """
-    event = asyncio.Event()
-    _pending_acks[request_id] = event
+    event = _pending_acks.get(request_id)
+    if event is None:
+        event = asyncio.Event()
+        _pending_acks[request_id] = event
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout)
         return True
@@ -665,8 +669,11 @@ async def _slack_handle_speak(ack, body: dict, respond) -> None:
     try:
         audio_url, streaming_url = await resolve_audio_url(reply)
         req_id = str(uuid.uuid4())
+        # ACK が publish_speak より先に届いても取りこぼさないよう、先に event を登録する
+        _pending_acks[req_id] = asyncio.Event()
         publish_speak(audio_url, streaming_url, reply, "slack", "normal", req_id)
     except Exception as e:
+        _pending_acks.pop(req_id, None)
         logger.error("Slack /speak speak error: %s", e)
         await respond(f"音声の送信に失敗したよ。テキストはこれ：「{reply}」")
         return
