@@ -751,15 +751,22 @@ class TestSlackHandlers:
     async def test_dm_calls_llm_with_user_session(self):
         say = AsyncMock()
         event = {"text": "こんにちは", "channel_type": "im", "user": "U001"}
-        with (
-            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="こんにちは！") as mock_llm,
-            patch("main.resolve_audio_url", new_callable=AsyncMock, return_value=("http://x.com/a.mp3", None)),
-            patch("main.publish_speak"),
-        ):
+        with patch("main.chat_with_llm", new_callable=AsyncMock, return_value="こんにちは！") as mock_llm:
             await _slack_handle_dm(event, say)
         mock_llm.assert_called_once()
         assert mock_llm.call_args.kwargs.get("session_key") == "slack:dm:U001" or \
                mock_llm.call_args.args[3] == "slack:dm:U001"
+
+    async def test_dm_does_not_publish_mqtt(self):
+        """DM 応答は Slack 返信のみ。MQTT 発話は行わない。"""
+        say = AsyncMock()
+        event = {"text": "こんにちは", "channel_type": "im", "user": "U001"}
+        with (
+            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="こんにちは！"),
+            patch("main.publish_speak") as mock_pub,
+        ):
+            await _slack_handle_dm(event, say)
+        mock_pub.assert_not_called()
 
     async def test_dm_ignores_non_im_events(self):
         say = AsyncMock()

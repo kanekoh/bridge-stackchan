@@ -578,7 +578,7 @@ async def _slack_handle_mention(event: dict, say) -> None:
 
 
 async def _slack_handle_dm(event: dict, say) -> None:
-    """message.im: スタックちゃんへの DM に応答する。"""
+    """message.im: スタックちゃんへの DM に Slack テキストで返信する（MQTT 発話なし）。"""
     if event.get("channel_type") != "im":
         return
     if event.get("bot_id"):  # ボット自身の発言は無視
@@ -599,12 +599,6 @@ async def _slack_handle_dm(event: dict, say) -> None:
         return
 
     await say(reply)
-
-    try:
-        audio_url, streaming_url = await resolve_audio_url(reply)
-        publish_speak(audio_url, streaming_url, reply, "slack", "normal", str(uuid.uuid4()))
-    except Exception as e:
-        logger.error("Slack DM speak error: %s", e)
 
 
 async def _slack_handle_speak(ack, body: dict, respond) -> None:
