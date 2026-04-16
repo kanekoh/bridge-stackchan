@@ -9,6 +9,7 @@ import json
 import logging
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 
 import httpx
@@ -88,6 +89,10 @@ _http_client: httpx.AsyncClient = None  # type: ignore  # initialized in lifespa
 _pending_acks: dict[str, asyncio.Event] = {}
 # MQTT スレッドから asyncio へ通知するためのイベントループ参照（lifespan で設定）
 _main_loop: asyncio.AbstractEventLoop | None = None
+# タイマー管理: timer_id → asyncio.Task
+_active_timers: dict[str, asyncio.Task] = {}
+# Slack アプリ参照（_setup_slack で設定、タイマー発火時の通知に使用）
+_slack_app = None  # type: ignore
 
 # ── SQLite ────────────────────────────────────────────────────────────────────
 
@@ -138,6 +143,189 @@ def _save_response_id(session_key: str, response_id: str) -> None:
             (session_key, response_id, now),
         )
         _db_conn.commit()  # type: ignore[union-attr]
+
+
+# ── Timer ─────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _TimerInfo:
+    timer_id: str
+    label: str
+    fire_at: datetime
+    session_key: str
+    slack_channel: str | None  # 設定元が Slack の場合に発火後通知するチャンネル
+    snooze_seconds: int | None  # スヌーズ秒数（None = スヌーズなし）
+
+
+_TIMER_TOOLS = [
+    {
+        "type": "function",
+        "name": "set_timer",
+        "description": (
+            "タイマーを設定する。指定した秒数後にStack-chanが声で知らせる。"
+            "スヌーズ秒数を指定すると、発火後に一度だけ再通知できる。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "description": "タイマーのラベル（例：宿題確認、おやつの時間）",
+                },
+                "seconds": {
+                    "type": "integer",
+                    "description": "何秒後に発火するか",
+                },
+                "snooze_seconds": {
+                    "type": "integer",
+                    "description": "スヌーズの秒数（省略可）。指定すると発火後にもう一度声かけする",
+                },
+            },
+            "required": ["label", "seconds"],
+        },
+    }
+]
+
+
+async def _fire_timer(info: _TimerInfo) -> None:
+    """タイマー発火処理: LLMで声かけ文を生成 → VOICEVOX → MQTT、Slack 経由なら Slack にも通知。"""
+    prompt = f"タイマー「{info.label}」の時間になりました。短く明るく声かけしてください。"
+    timer_instruction = (
+        "これはタイマーの発火通知です。"
+        "スタックちゃんとして、その場にいる家族に向けて声かけしてください。"
+        "依頼者への返答にはしないでください。"
+    )
+    try:
+        message = await chat_with_llm(
+            prompt,
+            system_prompt_append=timer_instruction,
+            session_key=info.session_key,
+            use_functions=False,  # タイマー発火中は新たなタイマーを受け付けない
+        )
+    except Exception as e:
+        logger.error("Timer LLM error: timer_id=%s error=%s", info.timer_id, e)
+        message = f"{info.label}の時間だよ！"
+
+    # MQTT で発話（常に実行）
+    try:
+        audio_url, streaming_url = await resolve_audio_url(message)
+        req_id = str(uuid.uuid4())
+        publish_speak(audio_url, streaming_url, message, "timer", "normal", req_id)
+        logger.info("Timer fired: timer_id=%s label=%s message=%s", info.timer_id, info.label, message[:60])
+    except Exception as e:
+        logger.error("Timer speak error: timer_id=%s error=%s", info.timer_id, e)
+        return
+
+    # Slack 経由で設定された場合は Slack にも完了通知
+    if info.slack_channel and _slack_app:
+        try:
+            await _slack_app.client.chat_postMessage(
+                channel=info.slack_channel,
+                text=f"⏰ タイマー「{info.label}」が発火しました：「{message}」",
+            )
+            logger.info("Timer Slack notified: channel=%s", info.slack_channel)
+        except Exception as e:
+            logger.warning("Timer Slack notify error: %s", e)
+
+    # スヌーズが設定されている場合は次のタイマーを登録（一回のみ）
+    if info.snooze_seconds:
+        snooze_id = _register_timer(
+            label=f"{info.label}（スヌーズ）",
+            seconds=info.snooze_seconds,
+            session_key=info.session_key,
+            slack_channel=info.slack_channel,
+            snooze_seconds=None,
+        )
+        logger.info("Timer snooze registered: original=%s snooze=%s", info.timer_id, snooze_id)
+
+
+async def _run_timer(info: _TimerInfo) -> None:
+    """asyncio.Task として動作するタイマー。delay 後に _fire_timer を呼ぶ。"""
+    delay = (info.fire_at - datetime.now(_JST)).total_seconds()
+    if delay > 0:
+        await asyncio.sleep(delay)
+    _active_timers.pop(info.timer_id, None)
+    try:
+        await _fire_timer(info)
+    except Exception as e:
+        logger.error("Timer _run_timer error: timer_id=%s error=%s", info.timer_id, e)
+
+
+def _register_timer(
+    label: str,
+    seconds: int,
+    session_key: str = "",
+    slack_channel: str | None = None,
+    snooze_seconds: int | None = None,
+) -> str:
+    """タイマーを登録して asyncio.Task を起動し、timer_id を返す。"""
+    timer_id = str(uuid.uuid4())
+    fire_at = datetime.now(_JST) + timedelta(seconds=seconds)
+    info = _TimerInfo(
+        timer_id=timer_id,
+        label=label,
+        fire_at=fire_at,
+        session_key=session_key,
+        slack_channel=slack_channel,
+        snooze_seconds=snooze_seconds,
+    )
+    task = asyncio.create_task(_run_timer(info))
+    _active_timers[timer_id] = task
+    logger.info(
+        "Timer registered: timer_id=%s label=%s fire_at=%s slack_channel=%s snooze=%s",
+        timer_id, label, fire_at.isoformat(), slack_channel, snooze_seconds,
+    )
+    return timer_id
+
+
+async def _handle_function_calls(
+    output: list,
+    notify_context: dict,
+) -> list | None:
+    """output 配列に function_call があれば実行して function_call_output リストを返す。なければ None。"""
+    function_calls = [item for item in output if item.get("type") == "function_call"]
+    if not function_calls:
+        return None
+
+    results = []
+    for fc in function_calls:
+        name = fc.get("name", "")
+        call_id = fc.get("id", "")  # OpenResponses では id が call_id として機能する
+        try:
+            args = json.loads(fc.get("arguments", "{}"))
+        except json.JSONDecodeError:
+            args = {}
+
+        if name == "set_timer":
+            timer_id = _register_timer(
+                label=args.get("label", "タイマー"),
+                seconds=int(args.get("seconds", 60)),
+                session_key=notify_context.get("session_key", ""),
+                slack_channel=notify_context.get("slack_channel"),
+                snooze_seconds=args.get("snooze_seconds"),
+            )
+            result: dict = {
+                "status": "ok",
+                "timer_id": timer_id,
+                "label": args.get("label"),
+                "seconds": args.get("seconds"),
+            }
+            logger.info(
+                "Function call set_timer: label=%s seconds=%s timer_id=%s",
+                args.get("label"), args.get("seconds"), timer_id,
+            )
+        else:
+            result = {"status": "error", "message": f"Unknown function: {name}"}
+            logger.warning("Unknown function call: name=%s", name)
+
+        results.append({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": json.dumps(result, ensure_ascii=False),
+        })
+
+    return results
 
 
 @asynccontextmanager
@@ -352,6 +540,15 @@ def debug_sessions():
     return {"sessions": sessions}
 
 
+@app.get("/debug/timers")
+def debug_timers():
+    """アクティブなタイマー一覧を返す（デバッグ用）。"""
+    return {
+        "active_count": len(_active_timers),
+        "timer_ids": list(_active_timers.keys()),
+    }
+
+
 @app.get("/debug/connectivity")
 def debug_connectivity():
     """コンテナ内からの外部サービス疎通確認。"""
@@ -459,7 +656,13 @@ def _build_datetime_context() -> str:
     return f"【現在の日時】{now.year}年{now.month}月{now.day}日（{weekday}）{now.hour:02d}:{now.minute:02d} JST"
 
 
-async def chat_with_openclaw(text: str, speaker: str | None = None, system_prompt_append: str = "") -> str:
+async def chat_with_openclaw(
+    text: str,
+    speaker: str | None = None,
+    system_prompt_append: str = "",
+    notify_context: dict | None = None,
+    use_functions: bool = True,
+) -> str:
     """Send text to OpenClaw via OpenResponses API and return the reply."""
     url = OPENCLAW_BASE_URL.rstrip("/") + "/responses"
 
@@ -472,46 +675,57 @@ async def chat_with_openclaw(text: str, speaker: str | None = None, system_promp
     if OPENCLAW_SESSION_KEY:
         headers["x-openclaw-session-key"] = OPENCLAW_SESSION_KEY
 
-    user_input = f"[話者: {speaker}] {text}" if speaker else text
+    user_input: str | list = f"[話者: {speaker}] {text}" if speaker else text
 
     instructions_parts = [_build_datetime_context()]
     if system_prompt_append:
         instructions_parts.append(system_prompt_append)
 
-    payload: dict = {
-        "model": OPENCLAW_MODEL,
-        "input": user_input,
-        "instructions": "\n\n".join(instructions_parts),
-    }
-    if OPENCLAW_MAX_OUTPUT_TOKENS is not None:
-        payload["max_output_tokens"] = OPENCLAW_MAX_OUTPUT_TOKENS
+    tools = list(_TIMER_TOOLS) if use_functions else []
 
     logger.info(
         "OpenClaw request: url=%s model=%s session_key=%s",
         url, OPENCLAW_MODEL, OPENCLAW_SESSION_KEY or "(none)",
     )
 
-    try:
-        resp = await _http_client.post(url, json=payload, headers=headers)
-        if not resp.is_success:
-            logger.error("OpenClaw HTTP %d: body=%s", resp.status_code, resp.text[:500])
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        logger.error("OpenClaw error detail: type=%s message=%s", type(e).__name__, e)
-        raise
+    for _ in range(5):  # Function calling ループ（最大 5 回）
+        payload: dict = {
+            "model": OPENCLAW_MODEL,
+            "input": user_input,
+            "instructions": "\n\n".join(instructions_parts),
+        }
+        if OPENCLAW_MAX_OUTPUT_TOKENS is not None:
+            payload["max_output_tokens"] = OPENCLAW_MAX_OUTPUT_TOKENS
+        if tools:
+            payload["tools"] = tools
 
-    # output_text は OpenResponses の便利フィールド
-    if "output_text" in data:
-        return data["output_text"]
+        try:
+            resp = await _http_client.post(url, json=payload, headers=headers)
+            if not resp.is_success:
+                logger.error("OpenClaw HTTP %d: body=%s", resp.status_code, resp.text[:500])
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.error("OpenClaw error detail: type=%s message=%s", type(e).__name__, e)
+            raise
 
-    # フォールバック: output 配列を走査
-    for item in data.get("output", []):
-        for content in item.get("content", []):
-            if content.get("type") == "output_text":
-                return content["text"]
+        output = data.get("output", [])
+        function_outputs = await _handle_function_calls(output, notify_context or {})
 
-    raise RuntimeError(f"OpenClaw response に返答テキストが見つかりません: {data}")
+        if function_outputs is None:
+            # Function call なし → テキストを返す
+            if "output_text" in data:
+                return data["output_text"]
+            for item in output:
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text":
+                        return content["text"]
+            raise RuntimeError(f"OpenClaw response に返答テキストが見つかりません: {data}")
+
+        # Function call あり → 結果を渡して継続
+        user_input = function_outputs
+
+    raise RuntimeError("OpenClaw function calling loop exceeded max iterations")
 
 
 async def chat_with_openai_responses(
@@ -519,11 +733,14 @@ async def chat_with_openai_responses(
     speaker: str | None = None,
     system_prompt_append: str = "",
     session_key: str = "",
+    notify_context: dict | None = None,
+    use_functions: bool = True,
 ) -> str:
     """Send text to OpenAI Responses API and return the reply.
 
     Loads previous_response_id from DB to maintain conversation continuity,
     and saves the new response_id after a successful call.
+    Supports function calling loop for set_timer and other tools.
     """
     url = OPENAI_RESPONSES_BASE_URL.rstrip("/") + "/responses"
     headers: dict = {
@@ -531,7 +748,7 @@ async def chat_with_openai_responses(
         "Authorization": f"Bearer {OPENAI_API_KEY}",
     }
 
-    user_input = f"[話者: {speaker}] {text}" if speaker else text
+    user_input: str | list = f"[話者: {speaker}] {text}" if speaker else text
 
     instructions_parts = [_STACKCHAN_SYSTEM_PROMPT, _build_datetime_context()]
     if system_prompt_append:
@@ -539,47 +756,61 @@ async def chat_with_openai_responses(
 
     previous_response_id = _get_previous_response_id(session_key) if session_key else None
 
-    payload: dict = {
-        "model": OPENAI_RESPONSES_MODEL,
-        "input": user_input,
-        "instructions": "\n\n".join(instructions_parts),
-    }
-    if previous_response_id:
-        payload["previous_response_id"] = previous_response_id
-    if OPENAI_RESPONSES_MAX_OUTPUT_TOKENS is not None:
-        payload["max_output_tokens"] = OPENAI_RESPONSES_MAX_OUTPUT_TOKENS
+    tools = list(_TIMER_TOOLS) if use_functions else []
     if OPENAI_RESPONSES_WEB_SEARCH:
-        payload["tools"] = [{"type": "web_search_preview"}]
+        tools.append({"type": "web_search_preview"})
 
     logger.info(
         "OpenAI Responses request: model=%s session_key=%s previous_response_id=%s web_search=%s",
         OPENAI_RESPONSES_MODEL, session_key or "(none)", previous_response_id or "(none)", OPENAI_RESPONSES_WEB_SEARCH,
     )
 
-    try:
-        resp = await _http_client.post(url, json=payload, headers=headers)
-        if not resp.is_success:
-            logger.error("OpenAI Responses HTTP %d: body=%s", resp.status_code, resp.text[:500])
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        logger.error("OpenAI Responses error: type=%s message=%s", type(e).__name__, e)
-        raise
+    for _ in range(5):  # Function calling ループ（最大 5 回）
+        payload: dict = {
+            "model": OPENAI_RESPONSES_MODEL,
+            "input": user_input,
+            "instructions": "\n\n".join(instructions_parts),
+        }
+        if previous_response_id:
+            payload["previous_response_id"] = previous_response_id
+        if OPENAI_RESPONSES_MAX_OUTPUT_TOKENS is not None:
+            payload["max_output_tokens"] = OPENAI_RESPONSES_MAX_OUTPUT_TOKENS
+        if tools:
+            payload["tools"] = tools
 
-    response_id = data.get("id")
-    if response_id and session_key:
-        _save_response_id(session_key, response_id)
-        logger.info("Session response_id saved: session_key=%s response_id=%s", session_key, response_id)
+        try:
+            resp = await _http_client.post(url, json=payload, headers=headers)
+            if not resp.is_success:
+                logger.error("OpenAI Responses HTTP %d: body=%s", resp.status_code, resp.text[:500])
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.error("OpenAI Responses error: type=%s message=%s", type(e).__name__, e)
+            raise
 
-    if "output_text" in data:
-        return data["output_text"]
+        response_id = data.get("id")
+        if response_id and session_key:
+            _save_response_id(session_key, response_id)
+            previous_response_id = response_id
+            logger.info("Session response_id saved: session_key=%s response_id=%s", session_key, response_id)
 
-    for item in data.get("output", []):
-        for content in item.get("content", []):
-            if content.get("type") == "output_text":
-                return content["text"]
+        output = data.get("output", [])
+        function_outputs = await _handle_function_calls(output, notify_context or {})
 
-    raise RuntimeError(f"OpenAI Responses response に返答テキストが見つかりません: {data}")
+        if function_outputs is None:
+            # Function call なし → テキストを返す
+            if "output_text" in data:
+                return data["output_text"]
+            for item in output:
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text":
+                        return content["text"]
+            raise RuntimeError(f"OpenAI Responses response に返答テキストが見つかりません: {data}")
+
+        # Function call あり → 結果を渡して継続
+        user_input = function_outputs
+
+    raise RuntimeError("OpenAI Responses function calling loop exceeded max iterations")
 
 
 async def chat_with_llm(
@@ -587,11 +818,21 @@ async def chat_with_llm(
     speaker: str | None = None,
     system_prompt_append: str = "",
     session_key: str = "",
+    notify_context: dict | None = None,
+    use_functions: bool = True,
 ) -> str:
-    """Dispatch to the configured LLM backend (LLM_BACKEND env)."""
+    """Dispatch to the configured LLM backend (LLM_BACKEND env).
+
+    notify_context: {"session_key": str, "slack_channel": str | None}
+        - session_key: タイマー発火時に LLM が使うセッションキー
+        - slack_channel: タイマー発火時に Slack 通知するチャンネル（None = MQTT のみ）
+    use_functions: False にすると Function Calling ツールを含めない（タイマー発火時など）
+    """
     if LLM_BACKEND == "openai":
-        return await chat_with_openai_responses(text, speaker, system_prompt_append, session_key)
-    return await chat_with_openclaw(text, speaker, system_prompt_append)
+        return await chat_with_openai_responses(
+            text, speaker, system_prompt_append, session_key, notify_context, use_functions
+        )
+    return await chat_with_openclaw(text, speaker, system_prompt_append, notify_context, use_functions)
 
 
 # ── Slack Bot (Socket Mode) ───────────────────────────────────────────────────
@@ -605,11 +846,16 @@ async def _slack_handle_mention(event: dict, say) -> None:
     if not text:
         return
 
-    session_key = f"slack:channel:{event['channel']}"
-    logger.info("Slack mention: channel=%s text=%s", event["channel"], text[:60])
+    channel = event["channel"]
+    session_key = f"slack:channel:{channel}"
+    logger.info("Slack mention: channel=%s text=%s", channel, text[:60])
 
     try:
-        reply = await chat_with_llm(text, session_key=session_key)
+        reply = await chat_with_llm(
+            text,
+            session_key=session_key,
+            notify_context={"session_key": session_key, "slack_channel": channel},
+        )
     except Exception as e:
         logger.error("Slack mention LLM error: %s", e)
         await say("ごめんね、うまく考えられなかったよ〜 もう一度試してみて！")
@@ -629,11 +875,17 @@ async def _slack_handle_dm(event: dict, say) -> None:
     if not text:
         return
 
-    session_key = f"slack:dm:{event['user']}"
-    logger.info("Slack DM: user=%s text=%s", event["user"], text[:60])
+    channel = event.get("channel", "")
+    user = event["user"]
+    session_key = f"slack:dm:{user}"
+    logger.info("Slack DM: user=%s text=%s", user, text[:60])
 
     try:
-        reply = await chat_with_llm(text, session_key=session_key)
+        reply = await chat_with_llm(
+            text,
+            session_key=session_key,
+            notify_context={"session_key": session_key, "slack_channel": channel},
+        )
     except Exception as e:
         logger.error("Slack DM LLM error: %s", e)
         await say("ごめんね、うまく考えられなかったよ〜 もう一度試してみて！")
@@ -660,7 +912,7 @@ async def _slack_handle_speak(ack, body: dict, respond) -> None:
             "この内容をスタックちゃんらしい口調に変換してください。"
             "依頼した人への返答や呼びかけにはしないでください。"
         )
-        reply = await chat_with_llm(text, system_prompt_append=speak_instruction)
+        reply = await chat_with_llm(text, system_prompt_append=speak_instruction, use_functions=False)
     except Exception as e:
         logger.error("Slack /speak LLM error: %s", e)
         await respond("ごめん、うまく変換できなかったよ。もう一度試してね！")
@@ -685,8 +937,109 @@ async def _slack_handle_speak(ack, body: dict, respond) -> None:
         await respond(f"⚠️ スタックちゃんから応答がなかったよ。届いてないかも。「{reply}」", response_type="in_channel")
 
 
+_DURATION_RE = re.compile(
+    r"^(?:(\d{1,2}):(\d{2}))"       # HH:MM
+    r"|(?:(\d+)\s*(h|m|s|時間|分|秒))"  # 数値 + 単位
+    r"|(\d+)$",                       # 数値のみ（分とみなす）
+    re.IGNORECASE,
+)
+
+
+def _parse_duration(token: str) -> int | None:
+    """時間指定トークンを秒数に変換する。解析不能の場合は None を返す。
+    例: '3m' → 180, '1h' → 3600, '10s' → 10, '14:30' → 今日の 14:30 JST まで, '30' → 1800
+    """
+    m = _DURATION_RE.match(token.strip())
+    if not m:
+        return None
+
+    hh, mm, num, unit, bare = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
+
+    if hh is not None:
+        # 絶対時刻 HH:MM
+        now = datetime.now(_JST)
+        target = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return max(1, int((target - now).total_seconds()))
+
+    if num is not None:
+        n = int(num)
+        u = unit.lower()
+        if u in ("h", "時間"):
+            return n * 3600
+        if u in ("m", "分"):
+            return n * 60
+        if u in ("s", "秒"):
+            return n
+        return None
+
+    if bare is not None:
+        return int(bare) * 60  # 数値のみ → 分
+
+    return None
+
+
+async def _slack_handle_timer(ack, body: dict, respond) -> None:
+    """/timer コマンド: 構造化フォーマットでタイマーを設定する。
+
+    書式: /timer <時間> <ラベル>
+      時間例: 3m, 1h, 30s, 14:30, 90（分）
+      ラベル例: 宿題確認, おやつの時間
+    """
+    await ack()
+
+    raw = body.get("text", "").strip()
+    if not raw:
+        await respond(
+            "使い方: `/timer <時間> <ラベル>`\n"
+            "時間の例: `3m`（3分）, `1h`（1時間）, `30s`（30秒）, `14:30`（14時30分）\n"
+            "例: `/timer 30m 宿題確認`"
+        )
+        return
+
+    parts = raw.split(None, 1)
+    duration_token = parts[0]
+    label = parts[1].strip() if len(parts) > 1 else duration_token
+
+    seconds = _parse_duration(duration_token)
+    if seconds is None:
+        await respond(
+            f"⚠️ 時間の指定が解析できなかったよ：`{duration_token}`\n"
+            "例: `3m`, `1h`, `30s`, `14:30`, `90`（分）"
+        )
+        return
+
+    channel_id = body.get("channel_id", "")
+    timer_id = _register_timer(
+        label=label,
+        seconds=seconds,
+        session_key="",
+        slack_channel=channel_id,
+    )
+
+    minutes, secs = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        human = f"{hours}時間{minutes}分後" if minutes else f"{hours}時間後"
+    elif minutes:
+        human = f"{minutes}分{secs}秒後" if secs else f"{minutes}分後"
+    else:
+        human = f"{secs}秒後"
+
+    await respond(
+        f"⏰ タイマーをセットしたよ！\n"
+        f"・ラベル: {label}\n"
+        f"・時間: {human}\n"
+        f"・ID: `{timer_id}`",
+        response_type="in_channel",
+    )
+    logger.info("Slack /timer: channel=%s label=%s seconds=%d timer_id=%s", channel_id, label, seconds, timer_id)
+
+
 def _setup_slack():
     """Slack アプリを初期化してハンドラを登録する。トークン未設定時は None を返す。"""
+    global _slack_app
     if not SLACK_BOT_TOKEN or not SLACK_APP_TOKEN:
         logger.info("Slack tokens not set — Slack Bot disabled")
         return None
@@ -694,12 +1047,13 @@ def _setup_slack():
     from slack_bolt.async_app import AsyncApp
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-    slack_app = AsyncApp(token=SLACK_BOT_TOKEN)
-    slack_app.event("app_mention")(_slack_handle_mention)
-    slack_app.event("message")(_slack_handle_dm)
-    slack_app.command("/speak")(_slack_handle_speak)
+    _slack_app = AsyncApp(token=SLACK_BOT_TOKEN)
+    _slack_app.event("app_mention")(_slack_handle_mention)
+    _slack_app.event("message")(_slack_handle_dm)
+    _slack_app.command("/speak")(_slack_handle_speak)
+    _slack_app.command("/timer")(_slack_handle_timer)
 
-    return AsyncSocketModeHandler(slack_app, SLACK_APP_TOKEN)
+    return AsyncSocketModeHandler(_slack_app, SLACK_APP_TOKEN)
 
 
 @app.post("/ingest-audio")
@@ -746,7 +1100,13 @@ async def ingest_audio(
     logger.info("Transcript: request_id=%s text=%s speaker=%s", req_id, transcript[:80], speaker)
 
     try:
-        reply = await chat_with_llm(transcript, speaker, system_prompt_append, effective_session_key)
+        reply = await chat_with_llm(
+            transcript,
+            speaker,
+            system_prompt_append,
+            effective_session_key,
+            notify_context={"session_key": effective_session_key, "slack_channel": None},
+        )
     except Exception as e:
         logger.error("LLM error: %s", e)
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")

@@ -9,6 +9,7 @@ Run:
     pytest test_main.py -v
 """
 import io
+import json
 import os
 import wave
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,9 +24,13 @@ os.environ.setdefault("DB_PATH", "/tmp/test-bridge.db")
 import main  # noqa: E402  (needed for patch.object on module-level clients)
 from main import (  # noqa: E402
     _build_datetime_context,
+    _handle_function_calls,
+    _parse_duration,
+    _register_timer,
     _slack_handle_dm,
     _slack_handle_mention,
     _slack_handle_speak,
+    _slack_handle_timer,
     app,
     chat_with_llm,
     chat_with_openclaw,
@@ -641,6 +646,7 @@ class TestChatWithOpenAIResponses:
         assert result == "フォールバック"
 
     async def test_web_search_tool_included_when_enabled(self):
+        """web_search が有効のとき web_search_preview ツールが tools に含まれる。"""
         mock_http = self._mock_http("検索結果です")
         with (
             patch("main.OPENAI_RESPONSES_WEB_SEARCH", True),
@@ -650,9 +656,11 @@ class TestChatWithOpenAIResponses:
         ):
             await chat_with_openai_responses("今日の天気は？", session_key="s")
         payload = mock_http.post.call_args.kwargs["json"]
-        assert payload["tools"] == [{"type": "web_search_preview"}]
+        tool_types = [t.get("type") for t in payload["tools"]]
+        assert "web_search_preview" in tool_types
 
     async def test_web_search_tool_absent_when_disabled(self):
+        """web_search が無効のとき web_search_preview は tools に含まれない（timer tools は含まれる）。"""
         mock_http = self._mock_http("返事")
         with (
             patch("main.OPENAI_RESPONSES_WEB_SEARCH", False),
@@ -662,7 +670,8 @@ class TestChatWithOpenAIResponses:
         ):
             await chat_with_openai_responses("テスト", session_key="s")
         payload = mock_http.post.call_args.kwargs["json"]
-        assert "tools" not in payload
+        tool_types = [t.get("type") for t in payload.get("tools", [])]
+        assert "web_search_preview" not in tool_types
 
 
 # ── unit: chat_with_llm ───────────────────────────────────────────────────────
@@ -882,3 +891,279 @@ class TestBuildDatetimeContext:
     def test_contains_current_date_label(self):
         result = _build_datetime_context()
         assert "現在の日時" in result
+
+
+# ── unit: _parse_duration ─────────────────────────────────────────────────────
+
+class TestParseDuration:
+    def test_minutes_with_m(self):
+        assert _parse_duration("3m") == 180
+
+    def test_hours_with_h(self):
+        assert _parse_duration("1h") == 3600
+
+    def test_seconds_with_s(self):
+        assert _parse_duration("10s") == 10
+
+    def test_bare_number_is_minutes(self):
+        assert _parse_duration("30") == 1800
+
+    def test_japanese_minutes(self):
+        assert _parse_duration("5分") == 300
+
+    def test_japanese_hours(self):
+        assert _parse_duration("2時間") == 7200
+
+    def test_japanese_seconds(self):
+        assert _parse_duration("15秒") == 15
+
+    def test_absolute_time_hhmm(self):
+        """HH:MM は将来の秒数になる（正の値かつ 1 日以内）。"""
+        seconds = _parse_duration("23:59")
+        assert seconds is not None
+        assert 0 < seconds <= 86400
+
+    def test_invalid_returns_none(self):
+        assert _parse_duration("abc") is None
+
+    def test_uppercase_h(self):
+        assert _parse_duration("2H") == 7200
+
+
+# ── unit: _handle_function_calls ─────────────────────────────────────────────
+
+class TestHandleFunctionCalls:
+    async def test_returns_none_when_no_function_calls(self):
+        output = [{"type": "message", "content": [{"type": "output_text", "text": "hello"}]}]
+        result = await _handle_function_calls(output, {})
+        assert result is None
+
+    async def test_set_timer_registers_and_returns_output(self):
+        output = [{
+            "type": "function_call",
+            "id": "fc_001",
+            "name": "set_timer",
+            "arguments": '{"label": "宿題確認", "seconds": 1800}',
+        }]
+        with patch("main._register_timer", return_value="timer-abc") as mock_reg:
+            result = await _handle_function_calls(output, {"session_key": "s", "slack_channel": "C001"})
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["type"] == "function_call_output"
+        assert result[0]["call_id"] == "fc_001"
+        mock_reg.assert_called_once_with(
+            label="宿題確認",
+            seconds=1800,
+            session_key="s",
+            slack_channel="C001",
+            snooze_seconds=None,
+        )
+
+    async def test_set_timer_passes_snooze_seconds(self):
+        output = [{
+            "type": "function_call",
+            "id": "fc_002",
+            "name": "set_timer",
+            "arguments": '{"label": "おやつ", "seconds": 600, "snooze_seconds": 120}',
+        }]
+        with patch("main._register_timer", return_value="timer-xyz") as mock_reg:
+            await _handle_function_calls(output, {})
+        mock_reg.assert_called_once()
+        _, kwargs = mock_reg.call_args
+        assert kwargs["snooze_seconds"] == 120
+
+    async def test_unknown_function_returns_error_output(self):
+        output = [{
+            "type": "function_call",
+            "id": "fc_003",
+            "name": "unknown_func",
+            "arguments": "{}",
+        }]
+        result = await _handle_function_calls(output, {})
+        assert result is not None
+        output_json = json.loads(result[0]["output"])
+        assert output_json["status"] == "error"
+
+    async def test_slack_channel_none_when_not_in_context(self):
+        output = [{
+            "type": "function_call",
+            "id": "fc_004",
+            "name": "set_timer",
+            "arguments": '{"label": "テスト", "seconds": 60}',
+        }]
+        with patch("main._register_timer", return_value="t") as mock_reg:
+            await _handle_function_calls(output, {"session_key": "sk"})
+        _, kwargs = mock_reg.call_args
+        assert kwargs["slack_channel"] is None
+
+
+# ── unit: _slack_handle_timer ─────────────────────────────────────────────────
+
+class TestSlackHandleTimer:
+    async def test_registers_timer_and_responds(self):
+        ack = AsyncMock()
+        respond = AsyncMock()
+        body = {"text": "3m 宿題確認", "channel_id": "C001"}
+        with patch("main._register_timer", return_value="tid-001") as mock_reg:
+            await _slack_handle_timer(ack, body, respond)
+        ack.assert_called_once()
+        mock_reg.assert_called_once_with(
+            label="宿題確認",
+            seconds=180,
+            session_key="",
+            slack_channel="C001",
+        )
+        assert "宿題確認" in respond.call_args.args[0]
+
+    async def test_no_text_returns_usage(self):
+        ack = AsyncMock()
+        respond = AsyncMock()
+        body = {"text": "", "channel_id": "C001"}
+        with patch("main._register_timer") as mock_reg:
+            await _slack_handle_timer(ack, body, respond)
+        mock_reg.assert_not_called()
+        assert "/timer" in respond.call_args.args[0]
+
+    async def test_invalid_duration_returns_error(self):
+        ack = AsyncMock()
+        respond = AsyncMock()
+        body = {"text": "abc ラベル", "channel_id": "C001"}
+        with patch("main._register_timer") as mock_reg:
+            await _slack_handle_timer(ack, body, respond)
+        mock_reg.assert_not_called()
+        assert "解析" in respond.call_args.args[0]
+
+    async def test_hour_duration(self):
+        ack = AsyncMock()
+        respond = AsyncMock()
+        body = {"text": "1h お昼ご飯", "channel_id": "C002"}
+        with patch("main._register_timer", return_value="tid-002") as mock_reg:
+            await _slack_handle_timer(ack, body, respond)
+        _, kwargs = mock_reg.call_args
+        assert kwargs["seconds"] == 3600
+        assert kwargs["label"] == "お昼ご飯"
+
+    async def test_slack_channel_passed_to_register(self):
+        ack = AsyncMock()
+        respond = AsyncMock()
+        body = {"text": "10m テスト", "channel_id": "C999"}
+        with patch("main._register_timer", return_value="tid-003") as mock_reg:
+            await _slack_handle_timer(ack, body, respond)
+        _, kwargs = mock_reg.call_args
+        assert kwargs["slack_channel"] == "C999"
+
+
+# ── unit: Function calling loop (chat_with_openai_responses) ──────────────────
+
+class TestFunctionCallingLoop:
+    def _mock_http_multi(self, responses: list) -> MagicMock:
+        """複数の HTTP レスポンスを順番に返す mock を作る。"""
+        client = MagicMock()
+        client.post = AsyncMock(side_effect=[_make_mock_response(r) for r in responses])
+        return client
+
+    async def test_no_function_call_returns_text_directly(self):
+        """Function call がない場合は 1 回の HTTP 呼び出しでテキストを返す。"""
+        with (
+            patch("main._http_client", self._mock_http_multi([
+                {"id": "resp_1", "output_text": "こんにちは！"},
+            ])),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+        ):
+            result = await chat_with_openai_responses("こんにちは", session_key="s")
+        assert result == "こんにちは！"
+
+    async def test_function_call_then_text(self):
+        """Function call → テキストの 2 ラウンドが正しく動く。"""
+        fc_response = {
+            "id": "resp_fc",
+            "output": [{
+                "type": "function_call",
+                "id": "fc_001",
+                "name": "set_timer",
+                "arguments": '{"label": "テスト", "seconds": 60}',
+            }],
+        }
+        text_response = {"id": "resp_text", "output_text": "タイマーをセットしたよ！"}
+
+        with (
+            patch("main._http_client", self._mock_http_multi([fc_response, text_response])),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+            patch("main._register_timer", return_value="tid-x"),
+        ):
+            result = await chat_with_openai_responses(
+                "1分後にテストして",
+                session_key="s",
+                notify_context={"session_key": "s", "slack_channel": "C001"},
+            )
+        assert result == "タイマーをセットしたよ！"
+
+    async def test_use_functions_false_omits_timer_tools(self):
+        """use_functions=False のとき _TIMER_TOOLS が payload に含まれない。"""
+        mock_http = self._mock_http_multi([{"id": "r", "output_text": "返事"}])
+        with (
+            patch("main._http_client", mock_http),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+            patch("main.OPENAI_RESPONSES_WEB_SEARCH", False),
+        ):
+            await chat_with_openai_responses("テスト", session_key="s", use_functions=False)
+        payload = mock_http.post.call_args.kwargs["json"]
+        assert "tools" not in payload
+
+    async def test_notify_context_slack_channel_passed_to_register(self):
+        """notify_context の slack_channel が _register_timer に渡る。"""
+        fc_response = {
+            "id": "resp_fc",
+            "output": [{
+                "type": "function_call",
+                "id": "fc_x",
+                "name": "set_timer",
+                "arguments": '{"label": "確認", "seconds": 300}',
+            }],
+        }
+        text_response = {"id": "resp_text", "output_text": "セットしたよ！"}
+
+        with (
+            patch("main._http_client", self._mock_http_multi([fc_response, text_response])),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+            patch("main._register_timer", return_value="tid-y") as mock_reg,
+        ):
+            await chat_with_openai_responses(
+                "5分後に確認",
+                session_key="s",
+                notify_context={"session_key": "s", "slack_channel": "C_SLACK"},
+            )
+        _, kwargs = mock_reg.call_args
+        assert kwargs["slack_channel"] == "C_SLACK"
+
+    async def test_ingest_audio_no_slack_channel(self):
+        """ingest-audio 経由のタイマーは slack_channel=None で登録される。"""
+        fc_response = {
+            "id": "resp_fc",
+            "output": [{
+                "type": "function_call",
+                "id": "fc_z",
+                "name": "set_timer",
+                "arguments": '{"label": "宿題", "seconds": 900}',
+            }],
+        }
+        text_response = {"id": "resp_text", "output_text": "タイマーセットしたよ！"}
+
+        with (
+            patch("main._http_client", self._mock_http_multi([fc_response, text_response])),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+            patch("main._register_timer", return_value="tid-z") as mock_reg,
+        ):
+            await chat_with_openai_responses(
+                "15分後に宿題",
+                session_key="s",
+                notify_context={"session_key": "s", "slack_channel": None},
+            )
+        _, kwargs = mock_reg.call_args
+        assert kwargs["slack_channel"] is None
