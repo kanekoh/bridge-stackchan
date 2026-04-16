@@ -6,3 +6,4 @@ paho-mqtt>=2.0.0
 python-dotenv>=1.0.0
 python-multipart>=0.0.9
 openai>=1.0.0
+slack-bolt>=1.18.0

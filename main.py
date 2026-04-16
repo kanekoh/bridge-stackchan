@@ -1,6 +1,7 @@
 import asyncio
 import io
 import os
+import re
 import socket
 import sqlite3
 import uuid
@@ -54,6 +55,10 @@ OPENAI_RESPONSES_MAX_OUTPUT_TOKENS: int | None = int(_raw_or) if _raw_or.strip()
 OPENAI_RESPONSES_WEB_SEARCH = os.getenv("OPENAI_RESPONSES_WEB_SEARCH", "false").lower() == "true"
 
 DB_PATH = os.getenv("DB_PATH", "data/bridge.db")
+
+# Slack (Socket Mode — 両方設定されている場合のみ有効)
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
+SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN", "")
 
 _JST = timezone(timedelta(hours=9))
 
@@ -136,7 +141,17 @@ async def lifespan(app: FastAPI):
     _init_db()
     _http_client = httpx.AsyncClient(timeout=60)
     logger.info("httpx.AsyncClient initialized")
+
+    slack_handler = _setup_slack()
+    if slack_handler:
+        asyncio.create_task(slack_handler.start_async())
+        logger.info("Slack Socket Mode handler started")
+
     yield
+
+    if slack_handler:
+        await slack_handler.close_async()
+        logger.info("Slack Socket Mode handler stopped")
     await _http_client.aclose()
     logger.info("httpx.AsyncClient closed")
     if _db_conn:
@@ -536,6 +551,105 @@ async def chat_with_llm(
     if LLM_BACKEND == "openai":
         return await chat_with_openai_responses(text, speaker, system_prompt_append, session_key)
     return await chat_with_openclaw(text, speaker, system_prompt_append)
+
+
+# ── Slack Bot (Socket Mode) ───────────────────────────────────────────────────
+
+_MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
+
+
+async def _slack_handle_mention(event: dict, say) -> None:
+    """app_mention: チャンネルで @stackchan されたときに Slack へテキストで返信する（MQTT 発話なし）。"""
+    text = _MENTION_RE.sub("", event.get("text", "")).strip()
+    if not text:
+        return
+
+    session_key = f"slack:channel:{event['channel']}"
+    logger.info("Slack mention: channel=%s text=%s", event["channel"], text[:60])
+
+    try:
+        reply = await chat_with_llm(text, session_key=session_key)
+    except Exception as e:
+        logger.error("Slack mention LLM error: %s", e)
+        await say("ごめんね、うまく考えられなかったよ〜 もう一度試してみて！")
+        return
+
+    await say(reply)
+
+
+async def _slack_handle_dm(event: dict, say) -> None:
+    """message.im: スタックちゃんへの DM に応答する。"""
+    if event.get("channel_type") != "im":
+        return
+    if event.get("bot_id"):  # ボット自身の発言は無視
+        return
+
+    text = event.get("text", "").strip()
+    if not text:
+        return
+
+    session_key = f"slack:dm:{event['user']}"
+    logger.info("Slack DM: user=%s text=%s", event["user"], text[:60])
+
+    try:
+        reply = await chat_with_llm(text, session_key=session_key)
+    except Exception as e:
+        logger.error("Slack DM LLM error: %s", e)
+        await say("ごめんね、うまく考えられなかったよ〜 もう一度試してみて！")
+        return
+
+    await say(reply)
+
+    try:
+        audio_url, streaming_url = await resolve_audio_url(reply)
+        publish_speak(audio_url, streaming_url, reply, "slack", "normal", str(uuid.uuid4()))
+    except Exception as e:
+        logger.error("Slack DM speak error: %s", e)
+
+
+async def _slack_handle_speak(ack, body: dict, respond) -> None:
+    """/speak コマンド: テキストをスタックちゃん口調に変換して MQTT 送信。"""
+    await ack()
+
+    text = body.get("text", "").strip()
+    if not text:
+        await respond("話す内容を入力してください。例: `/speak おはようございます`")
+        return
+
+    logger.info("Slack /speak: channel=%s text=%s", body.get("channel_id"), text[:60])
+
+    try:
+        # /speak は都度変換なのでセッション履歴を引き継がない
+        reply = await chat_with_llm(text)
+    except Exception as e:
+        logger.error("Slack /speak LLM error: %s", e)
+        await respond("ごめん、うまく変換できなかったよ。もう一度試してね！")
+        return
+
+    try:
+        audio_url, streaming_url = await resolve_audio_url(reply)
+        publish_speak(audio_url, streaming_url, reply, "slack", "normal", str(uuid.uuid4()))
+        await respond(f"話すよ！「{reply}」", response_type="in_channel")
+    except Exception as e:
+        logger.error("Slack /speak speak error: %s", e)
+        await respond(f"音声の送信に失敗したよ。テキストはこれ：「{reply}」")
+
+
+def _setup_slack():
+    """Slack アプリを初期化してハンドラを登録する。トークン未設定時は None を返す。"""
+    if not SLACK_BOT_TOKEN or not SLACK_APP_TOKEN:
+        logger.info("Slack tokens not set — Slack Bot disabled")
+        return None
+
+    from slack_bolt.async_app import AsyncApp
+    from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+
+    slack_app = AsyncApp(token=SLACK_BOT_TOKEN)
+    slack_app.event("app_mention")(_slack_handle_mention)
+    slack_app.event("message")(_slack_handle_dm)
+    slack_app.command("/speak")(_slack_handle_speak)
+
+    return AsyncSocketModeHandler(slack_app, SLACK_APP_TOKEN)
 
 
 @app.post("/ingest-audio")

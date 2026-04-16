@@ -23,6 +23,9 @@ os.environ.setdefault("DB_PATH", "/tmp/test-bridge.db")
 import main  # noqa: E402  (needed for patch.object on module-level clients)
 from main import (  # noqa: E402
     _build_datetime_context,
+    _slack_handle_dm,
+    _slack_handle_mention,
+    _slack_handle_speak,
     app,
     chat_with_llm,
     chat_with_openclaw,
@@ -690,6 +693,127 @@ class TestChatWithLLM:
             await chat_with_llm("テスト", session_key="my-device")
         _, kwargs = mock_oai.call_args
         assert kwargs.get("session_key") == "my-device" or mock_oai.call_args.args[3] == "my-device"
+
+
+# ── unit: Slack handlers ──────────────────────────────────────────────────────
+
+class TestSlackHandlers:
+    async def test_mention_calls_llm_with_channel_session(self):
+        say = AsyncMock()
+        event = {"text": "<@UBOT123> おはよう", "channel": "C001"}
+        with patch("main.chat_with_llm", new_callable=AsyncMock, return_value="おはよう！") as mock_llm:
+            await _slack_handle_mention(event, say)
+        mock_llm.assert_called_once()
+        assert mock_llm.call_args.kwargs.get("session_key") == "slack:channel:C001" or \
+               mock_llm.call_args.args[3] == "slack:channel:C001"
+        say.assert_called_once_with("おはよう！")
+
+    async def test_mention_does_not_publish_mqtt(self):
+        """メンション応答は Slack 返信のみ。MQTT 発話は行わない。"""
+        say = AsyncMock()
+        event = {"text": "<@UBOT123> おはよう", "channel": "C001"}
+        with (
+            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="おはよう！"),
+            patch("main.publish_speak") as mock_pub,
+        ):
+            await _slack_handle_mention(event, say)
+        mock_pub.assert_not_called()
+
+    async def test_mention_strips_bot_mention_from_text(self):
+        say = AsyncMock()
+        event = {"text": "<@UBOT123> 今日の天気は？", "channel": "C001"}
+        with (
+            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="晴れだよ！") as mock_llm,
+            patch("main.resolve_audio_url", new_callable=AsyncMock, return_value=("http://x.com/a.mp3", None)),
+            patch("main.publish_speak"),
+        ):
+            await _slack_handle_mention(event, say)
+        text_arg = mock_llm.call_args.args[0]
+        assert "<@" not in text_arg
+        assert "今日の天気は？" in text_arg
+
+    async def test_mention_empty_text_after_strip_does_nothing(self):
+        say = AsyncMock()
+        event = {"text": "<@UBOT123>", "channel": "C001"}
+        with patch("main.chat_with_llm", new_callable=AsyncMock) as mock_llm:
+            await _slack_handle_mention(event, say)
+        mock_llm.assert_not_called()
+        say.assert_not_called()
+
+    async def test_mention_llm_error_replies_with_apology(self):
+        say = AsyncMock()
+        event = {"text": "<@UBOT123> テスト", "channel": "C001"}
+        with patch("main.chat_with_llm", new_callable=AsyncMock, side_effect=RuntimeError("down")):
+            await _slack_handle_mention(event, say)
+        say.assert_called_once()
+        assert "ごめん" in say.call_args.args[0]
+
+    async def test_dm_calls_llm_with_user_session(self):
+        say = AsyncMock()
+        event = {"text": "こんにちは", "channel_type": "im", "user": "U001"}
+        with (
+            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="こんにちは！") as mock_llm,
+            patch("main.resolve_audio_url", new_callable=AsyncMock, return_value=("http://x.com/a.mp3", None)),
+            patch("main.publish_speak"),
+        ):
+            await _slack_handle_dm(event, say)
+        mock_llm.assert_called_once()
+        assert mock_llm.call_args.kwargs.get("session_key") == "slack:dm:U001" or \
+               mock_llm.call_args.args[3] == "slack:dm:U001"
+
+    async def test_dm_ignores_non_im_events(self):
+        say = AsyncMock()
+        event = {"text": "hello", "channel_type": "channel", "user": "U001"}
+        with patch("main.chat_with_llm", new_callable=AsyncMock) as mock_llm:
+            await _slack_handle_dm(event, say)
+        mock_llm.assert_not_called()
+
+    async def test_dm_ignores_bot_messages(self):
+        say = AsyncMock()
+        event = {"text": "hello", "channel_type": "im", "user": "U001", "bot_id": "B001"}
+        with patch("main.chat_with_llm", new_callable=AsyncMock) as mock_llm:
+            await _slack_handle_dm(event, say)
+        mock_llm.assert_not_called()
+
+    async def test_speak_command_publishes_mqtt(self):
+        ack = AsyncMock()
+        respond = AsyncMock()
+        body = {"text": "おはようございます", "channel_id": "C001"}
+        with (
+            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="おはよう！") as mock_llm,
+            patch("main.resolve_audio_url", new_callable=AsyncMock, return_value=("http://x.com/a.mp3", None)),
+            patch("main.publish_speak") as mock_pub,
+        ):
+            await _slack_handle_speak(ack, body, respond)
+        ack.assert_called_once()
+        mock_pub.assert_called_once()
+        respond.assert_called_once()
+
+    async def test_speak_command_no_text_returns_usage(self):
+        ack = AsyncMock()
+        respond = AsyncMock()
+        body = {"text": "", "channel_id": "C001"}
+        with patch("main.chat_with_llm", new_callable=AsyncMock) as mock_llm:
+            await _slack_handle_speak(ack, body, respond)
+        mock_llm.assert_not_called()
+        respond.assert_called_once()
+        assert "/speak" in respond.call_args.args[0]
+
+    async def test_speak_command_no_session_key(self):
+        """/speak は会話履歴を引き継がない（session_key なし）。"""
+        ack = AsyncMock()
+        respond = AsyncMock()
+        body = {"text": "テスト", "channel_id": "C001"}
+        with (
+            patch("main.chat_with_llm", new_callable=AsyncMock, return_value="テスト！") as mock_llm,
+            patch("main.resolve_audio_url", new_callable=AsyncMock, return_value=("http://x.com/a.mp3", None)),
+            patch("main.publish_speak"),
+        ):
+            await _slack_handle_speak(ack, body, respond)
+        # session_key は空文字またはデフォルト値
+        call_args = mock_llm.call_args
+        session_key = call_args.kwargs.get("session_key", call_args.args[3] if len(call_args.args) > 3 else "")
+        assert session_key == ""
 
 
 # ── unit: _build_datetime_context ─────────────────────────────────────────────
