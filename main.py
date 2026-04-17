@@ -54,6 +54,7 @@ OPENAI_RESPONSES_MODEL = os.getenv("OPENAI_RESPONSES_MODEL", "gpt-4o-mini")
 _raw_or = os.getenv("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS", "")
 OPENAI_RESPONSES_MAX_OUTPUT_TOKENS: int | None = int(_raw_or) if _raw_or.strip() else None
 OPENAI_RESPONSES_WEB_SEARCH = os.getenv("OPENAI_RESPONSES_WEB_SEARCH", "false").lower() == "true"
+OPENAI_RESPONSES_WEB_SEARCH_TOOL = os.getenv("OPENAI_RESPONSES_WEB_SEARCH_TOOL", "web_search_preview")
 
 DB_PATH = os.getenv("DB_PATH", "data/bridge.db")
 
@@ -291,7 +292,10 @@ async def _handle_function_calls(
     results = []
     for fc in function_calls:
         name = fc.get("name", "")
-        call_id = fc.get("id", "")  # OpenResponses では id が call_id として機能する
+        # OpenAI Responses API: function_call には id（アイテムID: fc_xxx）と
+        # call_id（参照用: call_xxx）の 2 フィールドがある。function_call_output には
+        # call_id を使う必要がある。id と call_id が同じ場合のフォールバックも持つ。
+        call_id = fc.get("call_id") or fc.get("id", "")
         try:
             args = json.loads(fc.get("arguments", "{}"))
         except json.JSONDecodeError:
@@ -758,7 +762,7 @@ async def chat_with_openai_responses(
 
     tools = list(_TIMER_TOOLS) if use_functions else []
     if OPENAI_RESPONSES_WEB_SEARCH:
-        tools.append({"type": "web_search_preview"})
+        tools.append({"type": OPENAI_RESPONSES_WEB_SEARCH_TOOL})
 
     logger.info(
         "OpenAI Responses request: model=%s session_key=%s previous_response_id=%s web_search=%s",
@@ -783,7 +787,15 @@ async def chat_with_openai_responses(
 
             # previous_response_id が壊れた状態（未解決の function_call が残っている）の場合、
             # リセットして同じ入力で再試行する。会話の連続性は失われるが処理は継続できる。
-            if resp.status_code == 400 and previous_response_id and "tool" in resp.text.lower():
+            # 注意: function_call_output 送信中（user_input がリスト）はリセットしない。
+            #       そこで 400 が出るのは call_id の不一致など別の問題であり、
+            #       リセットすると function_call_output だけが残って状況が悪化する。
+            if (
+                resp.status_code == 400
+                and previous_response_id
+                and isinstance(user_input, str)
+                and "tool" in resp.text.lower()
+            ):
                 logger.warning(
                     "previous_response_id has unresolved function call, resetting and retrying: "
                     "session_key=%s previous_response_id=%s",

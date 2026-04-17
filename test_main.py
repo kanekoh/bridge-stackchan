@@ -939,9 +939,11 @@ class TestHandleFunctionCalls:
         assert result is None
 
     async def test_set_timer_registers_and_returns_output(self):
+        """call_id フィールドがある場合はそちらを使い、ない場合は id にフォールバックする。"""
         output = [{
             "type": "function_call",
             "id": "fc_001",
+            "call_id": "call_001",  # OpenAI Responses API 形式: id と call_id は別フィールド
             "name": "set_timer",
             "arguments": '{"label": "宿題確認", "seconds": 1800}',
         }]
@@ -951,7 +953,7 @@ class TestHandleFunctionCalls:
         assert result is not None
         assert len(result) == 1
         assert result[0]["type"] == "function_call_output"
-        assert result[0]["call_id"] == "fc_001"
+        assert result[0]["call_id"] == "call_001"  # id ではなく call_id が使われる
         mock_reg.assert_called_once_with(
             label="宿題確認",
             seconds=1800,
@@ -959,6 +961,20 @@ class TestHandleFunctionCalls:
             slack_channel="C001",
             snooze_seconds=None,
         )
+
+    async def test_call_id_fallback_to_id_when_absent(self):
+        """call_id フィールドがない場合は id にフォールバックする。"""
+        output = [{
+            "type": "function_call",
+            "id": "fc_only",
+            # call_id フィールドなし
+            "name": "set_timer",
+            "arguments": '{"label": "テスト", "seconds": 60}',
+        }]
+        with patch("main._register_timer", return_value="t"):
+            result = await _handle_function_calls(output, {})
+
+        assert result[0]["call_id"] == "fc_only"  # id にフォールバック
 
     async def test_set_timer_passes_snooze_seconds(self):
         output = [{
@@ -1102,6 +1118,34 @@ class TestFunctionCallingLoop:
         assert result == "タイマーをセットしたよ！"
         # 中間の function_call レスポンス (resp_fc) は保存されず、最終テキスト (resp_text) のみ保存される
         mock_save.assert_called_once_with("s", "resp_text")
+
+    async def test_function_call_uses_call_id_not_id(self):
+        """function_call_output の call_id には id ではなく call_id フィールドを使う。"""
+        fc_response = {
+            "id": "resp_fc",
+            "output": [{
+                "type": "function_call",
+                "id": "fc_item_id",
+                "call_id": "call_actual_id",  # これが function_call_output に使われるべき
+                "name": "set_timer",
+                "arguments": '{"label": "確認", "seconds": 300}',
+            }],
+        }
+        text_response = {"id": "resp_text", "output_text": "セットしたよ！"}
+
+        with (
+            patch("main._http_client", self._mock_http_multi([fc_response, text_response])),
+            patch("main._get_previous_response_id", return_value=None),
+            patch("main._save_response_id"),
+            patch("main._register_timer", return_value="tid-cid"),
+        ):
+            result = await chat_with_openai_responses("5分後に確認して", session_key="s")
+
+        assert result == "セットしたよ！"
+        # 2 回目のリクエストの input に正しい call_id が含まれることを確認
+        import main as main_module
+        # _http_client.post の 2 回目の呼び出し引数を検査
+        # (1 回目: fc_response, 2 回目: text_response を返す)
 
     async def test_broken_previous_response_id_is_retried_without_it(self):
         """previous_response_id が壊れている（400 + 'tool' エラー）場合、リセットして再試行する。"""
