@@ -989,6 +989,48 @@ class TestHandleFunctionCalls:
         _, kwargs = mock_reg.call_args
         assert kwargs["snooze_seconds"] == 120
 
+    async def test_list_timers_returns_active_timers(self):
+        """list_timers は _active_timer_infos の内容を返す。"""
+        from datetime import timezone, timedelta
+        from main import _TimerInfo, _active_timer_infos
+        import uuid as _uuid
+
+        jst = timezone(timedelta(hours=9))
+        fake_info = _TimerInfo(
+            timer_id="fake-id",
+            label="テストタイマー",
+            fire_at=__import__("datetime").datetime.now(jst) + timedelta(seconds=300),
+            session_key="s",
+            slack_channel=None,
+            snooze_seconds=None,
+        )
+        _active_timer_infos["fake-id"] = fake_info
+        try:
+            output = [{"type": "function_call", "id": "fc_lt", "call_id": "call_lt", "name": "list_timers", "arguments": "{}"}]
+            result = await _handle_function_calls(output, {})
+            assert result is not None
+            out = json.loads(result[0]["output"])
+            assert out["status"] == "ok"
+            assert out["count"] >= 1
+            labels = [t["label"] for t in out["timers"]]
+            assert "テストタイマー" in labels
+        finally:
+            _active_timer_infos.pop("fake-id", None)
+
+    async def test_list_timers_empty_when_none(self):
+        """タイマーがない場合は空リストを返す。"""
+        from main import _active_timer_infos
+        saved = dict(_active_timer_infos)
+        _active_timer_infos.clear()
+        try:
+            output = [{"type": "function_call", "id": "fc_lt2", "call_id": "call_lt2", "name": "list_timers", "arguments": "{}"}]
+            result = await _handle_function_calls(output, {})
+            out = json.loads(result[0]["output"])
+            assert out["count"] == 0
+            assert out["timers"] == []
+        finally:
+            _active_timer_infos.update(saved)
+
     async def test_unknown_function_returns_error_output(self):
         output = [{
             "type": "function_call",

@@ -90,8 +90,9 @@ _http_client: httpx.AsyncClient = None  # type: ignore  # initialized in lifespa
 _pending_acks: dict[str, asyncio.Event] = {}
 # MQTT スレッドから asyncio へ通知するためのイベントループ参照（lifespan で設定）
 _main_loop: asyncio.AbstractEventLoop | None = None
-# タイマー管理: timer_id → asyncio.Task
+# タイマー管理: timer_id → asyncio.Task / _TimerInfo
 _active_timers: dict[str, asyncio.Task] = {}
+_active_timer_infos: dict[str, "_TimerInfo"] = {}  # list_timers で参照
 # Slack アプリ参照（_setup_slack で設定、タイマー発火時の通知に使用）
 _slack_app = None  # type: ignore
 
@@ -185,7 +186,17 @@ _TIMER_TOOLS = [
             },
             "required": ["label", "seconds"],
         },
-    }
+    },
+    {
+        "type": "function",
+        "name": "list_timers",
+        "description": "現在セットされているタイマーの一覧と残り時間を返す。",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]
 
 
@@ -247,6 +258,7 @@ async def _run_timer(info: _TimerInfo) -> None:
     if delay > 0:
         await asyncio.sleep(delay)
     _active_timers.pop(info.timer_id, None)
+    _active_timer_infos.pop(info.timer_id, None)
     try:
         await _fire_timer(info)
     except Exception as e:
@@ -273,6 +285,7 @@ def _register_timer(
     )
     task = asyncio.create_task(_run_timer(info))
     _active_timers[timer_id] = task
+    _active_timer_infos[timer_id] = info
     logger.info(
         "Timer registered: timer_id=%s label=%s fire_at=%s slack_channel=%s snooze=%s",
         timer_id, label, fire_at.isoformat(), slack_channel, snooze_seconds,
@@ -319,6 +332,19 @@ async def _handle_function_calls(
                 "Function call set_timer: label=%s seconds=%s timer_id=%s",
                 args.get("label"), args.get("seconds"), timer_id,
             )
+        elif name == "list_timers":
+            now = datetime.now(_JST)
+            timers = []
+            for info in _active_timer_infos.values():
+                remaining = max(0, int((info.fire_at - now).total_seconds()))
+                timers.append({
+                    "timer_id": info.timer_id,
+                    "label": info.label,
+                    "fire_at": info.fire_at.isoformat(),
+                    "remaining_seconds": remaining,
+                })
+            result = {"status": "ok", "timers": timers, "count": len(timers)}
+            logger.info("Function call list_timers: count=%d", len(timers))
         else:
             result = {"status": "error", "message": f"Unknown function: {name}"}
             logger.warning("Unknown function call: name=%s", name)
@@ -547,10 +573,19 @@ def debug_sessions():
 @app.get("/debug/timers")
 def debug_timers():
     """アクティブなタイマー一覧を返す（デバッグ用）。"""
-    return {
-        "active_count": len(_active_timers),
-        "timer_ids": list(_active_timers.keys()),
-    }
+    now = datetime.now(_JST)
+    timers = []
+    for info in _active_timer_infos.values():
+        remaining = max(0, int((info.fire_at - now).total_seconds()))
+        timers.append({
+            "timer_id": info.timer_id,
+            "label": info.label,
+            "fire_at": info.fire_at.isoformat(),
+            "remaining_seconds": remaining,
+            "slack_channel": info.slack_channel,
+            "snooze_seconds": info.snooze_seconds,
+        })
+    return {"active_count": len(timers), "timers": timers}
 
 
 @app.get("/debug/connectivity")
