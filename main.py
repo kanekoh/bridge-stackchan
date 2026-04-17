@@ -34,6 +34,7 @@ MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 MQTT_TLS = os.getenv("MQTT_TLS", "false").lower() == "true"
 MQTT_DEVICE_ID = os.getenv("MQTT_DEVICE_ID", "default")
+MQTT_QOS = int(os.getenv("MQTT_QOS", "1"))
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789/v1")
@@ -438,8 +439,8 @@ class _MqttConnection:
             client.loop_stop()
             raise RuntimeError("MQTT connection timeout (no CONNACK within 10s)")
 
-        client.subscribe("stackchan/ack", qos=1)
-        logger.info("MQTT connected (persistent), subscribed to stackchan/ack")
+        client.subscribe("stackchan/ack", qos=MQTT_QOS)
+        logger.info("MQTT connected (persistent), subscribed to stackchan/ack qos=%d", MQTT_QOS)
         return client
 
     def publish(self, topic: str, payload: str) -> None:
@@ -449,7 +450,7 @@ class _MqttConnection:
                     self._client = self._connect()
                 client = self._client
 
-            msg_info = client.publish(topic, payload, qos=1)
+            msg_info = client.publish(topic, payload, qos=MQTT_QOS)
             logger.info("MQTT publish queued: mid=%d", msg_info.mid)
             try:
                 msg_info.wait_for_publish(timeout=10)
