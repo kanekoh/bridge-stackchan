@@ -1173,7 +1173,7 @@ async def ingest_audio(
     except Exception as e:
         logger.error("LLM error: %s", e)
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
-    logger.info("OpenClaw reply: request_id=%s text=%s", req_id, reply[:80])
+    logger.info("LLM reply: backend=%s request_id=%s text=%s", LLM_BACKEND, req_id, reply[:80])
 
     try:
         audio_url, audio_streaming_url = await resolve_audio_url(reply)
