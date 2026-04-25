@@ -56,6 +56,9 @@ _raw_or = os.getenv("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS", "")
 OPENAI_RESPONSES_MAX_OUTPUT_TOKENS: int | None = int(_raw_or) if _raw_or.strip() else None
 OPENAI_RESPONSES_WEB_SEARCH = os.getenv("OPENAI_RESPONSES_WEB_SEARCH", "false").lower() == "true"
 OPENAI_RESPONSES_WEB_SEARCH_TOOL = os.getenv("OPENAI_RESPONSES_WEB_SEARCH_TOOL", "web_search_preview")
+# 実験: True にすると Pass 1 では request_web_search のみ提示し、LLM が必要と判断したときだけ
+# Pass 2 で web_search_preview を有効化する。雑談ターンの平均レイテンシを短縮できる。
+OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND = os.getenv("OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND", "false").lower() == "true"
 
 DB_PATH = os.getenv("DB_PATH", "data/bridge.db")
 
@@ -75,7 +78,7 @@ _STACKCHAN_SYSTEM_PROMPT = """\
 - ビジネス的な堅い表現は避ける
 - 長くて細かい説明は避ける（明示的に求められた場合を除く）
 - 技術的な説明も正確で実用的にまとめる
-- ウェブ検索で調べた内容も、要点を2〜3文で話し言葉にまとめる
+- ウェブ検索した内容は要点を2〜3文で話し言葉にまとめる
 - URL や出典、「〜によると」などの引用表現は読み上げない
 
 利用者について:
@@ -199,6 +202,27 @@ _TIMER_TOOLS = [
         },
     },
 ]
+
+# ON_DEMAND モード時のみ Pass 1 のツール一覧に追加される。
+# LLM がこれを呼ぶと notify_context に enable_web_search フラグが立ち、
+# 次のループで本物の web_search_preview に差し替えられる。
+_REQUEST_WEB_SEARCH_TOOL = {
+    "type": "function",
+    "name": "request_web_search",
+    "description": (
+        "最新情報・天気・ニュース・株価・スポーツ結果など、"
+        "学習データに含まれていない可能性が高い事実を答えるために"
+        "Web 検索が必要なときだけ呼び出すこと。"
+        "雑談・感情表現・既に知っている内容では呼ばないこと。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "検索したい内容を簡潔に"},
+        },
+        "required": ["query"],
+    },
+}
 
 
 async def _fire_timer(info: _TimerInfo) -> None:
@@ -346,6 +370,15 @@ async def _handle_function_calls(
                 })
             result = {"status": "ok", "timers": timers, "count": len(timers)}
             logger.info("Function call list_timers: count=%d", len(timers))
+        elif name == "request_web_search":
+            query = args.get("query", "")
+            notify_context["enable_web_search"] = True
+            result = {
+                "status": "ok",
+                "message": "Web検索が有効になりました。次のターンで検索を実行して回答してください。",
+                "query": query,
+            }
+            logger.info("LLM requested web search: query=%s", query[:80])
         else:
             result = {"status": "error", "message": f"Unknown function: {name}"}
             logger.warning("Unknown function call: name=%s", name)
@@ -790,7 +823,17 @@ async def chat_with_openai_responses(
 
     user_input: str | list = f"[話者: {speaker}] {text}" if speaker else text
 
+    # _handle_function_calls から enable_web_search フラグを書き戻すため、ここで必ず辞書化する
+    notify_ctx: dict = notify_context if notify_context is not None else {}
+
     instructions_parts = [_STACKCHAN_SYSTEM_PROMPT, _build_datetime_context()]
+    if OPENAI_RESPONSES_WEB_SEARCH and OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
+        instructions_parts.append(
+            "Web検索ガイドライン:\n"
+            "- 雑談・感情表現・既に知っている内容ではWeb検索を使わない\n"
+            "- 「最新」「今日」「いま」「天気」「ニュース」など現在の情報が必要なときだけ "
+            "request_web_search を呼ぶ"
+        )
     if system_prompt_append:
         instructions_parts.append(system_prompt_append)
 
@@ -798,14 +841,30 @@ async def chat_with_openai_responses(
 
     tools = list(_TIMER_TOOLS) if use_functions else []
     if OPENAI_RESPONSES_WEB_SEARCH:
-        tools.append({"type": OPENAI_RESPONSES_WEB_SEARCH_TOOL})
+        if OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
+            tools.append(_REQUEST_WEB_SEARCH_TOOL)
+        else:
+            tools.append({"type": OPENAI_RESPONSES_WEB_SEARCH_TOOL})
 
     logger.info(
-        "OpenAI Responses request: model=%s session_key=%s previous_response_id=%s web_search=%s",
-        OPENAI_RESPONSES_MODEL, session_key or "(none)", previous_response_id or "(none)", OPENAI_RESPONSES_WEB_SEARCH,
+        "OpenAI Responses request: model=%s session_key=%s previous_response_id=%s web_search=%s on_demand=%s",
+        OPENAI_RESPONSES_MODEL, session_key or "(none)", previous_response_id or "(none)",
+        OPENAI_RESPONSES_WEB_SEARCH, OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND,
     )
 
     for _ in range(5):  # Function calling ループ（最大 5 回）
+        # ON_DEMAND モードで LLM が前ターンに request_web_search を呼んでいたら、
+        # ここで本物の web_search_preview に差し替える（Pass 2 への昇格）
+        if (
+            OPENAI_RESPONSES_WEB_SEARCH
+            and OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND
+            and notify_ctx.get("enable_web_search")
+        ):
+            tools = [t for t in tools if t.get("name") != "request_web_search"]
+            if not any(t.get("type") == OPENAI_RESPONSES_WEB_SEARCH_TOOL for t in tools):
+                tools.append({"type": OPENAI_RESPONSES_WEB_SEARCH_TOOL})
+                logger.info("Web search promoted to Pass 2")
+            notify_ctx["enable_web_search"] = False  # 多重昇格防止
         payload: dict = {
             "model": OPENAI_RESPONSES_MODEL,
             "input": user_input,
@@ -851,7 +910,7 @@ async def chat_with_openai_responses(
 
         response_id = data.get("id")
         output = data.get("output", [])
-        function_outputs = await _handle_function_calls(output, notify_context or {})
+        function_outputs = await _handle_function_calls(output, notify_ctx)
 
         if function_outputs is None:
             # 最終テキストレスポンス → ここでのみ DB に保存する
