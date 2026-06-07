@@ -64,6 +64,9 @@ OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND = os.getenv("OPENAI_RESPONSES_WEB_SEARCH_O
 # 切り分け用フラグ (デフォルト false = 通常動作)
 DISABLE_SESSION_HISTORY = os.getenv("DISABLE_SESSION_HISTORY", "false").lower() == "true"
 DISABLE_TOOLS = os.getenv("DISABLE_TOOLS", "false").lower() == "true"
+# 会話サマリ: 合計文字数がこの閾値を超えたら会話を要約してリセットする
+SESSION_SUMMARY_THRESHOLD = int(os.getenv("SESSION_SUMMARY_THRESHOLD", "3000"))
+SESSION_SUMMARY_MAX_TOKENS = int(os.getenv("SESSION_SUMMARY_MAX_TOKENS", "500"))
 
 DB_PATH = os.getenv("DB_PATH", "data/bridge.db")
 
@@ -156,13 +159,26 @@ def _init_db() -> None:
     _db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS llm_sessions (
-            session_key  TEXT PRIMARY KEY,
-            backend      TEXT NOT NULL,
-            response_id  TEXT,
-            metadata     TEXT DEFAULT '{}',
-            updated_at   TEXT NOT NULL
+            session_key    TEXT PRIMARY KEY,
+            backend        TEXT NOT NULL,
+            response_id    TEXT,
+            metadata       TEXT DEFAULT '{}',
+            updated_at     TEXT NOT NULL,
+            char_count_in  INTEGER DEFAULT 0,
+            char_count_out INTEGER DEFAULT 0,
+            summary        TEXT
         )
     """)
+    # 既存 DB へのカラム追加（エラーは無視）
+    for col_def in [
+        "ALTER TABLE llm_sessions ADD COLUMN char_count_in  INTEGER DEFAULT 0",
+        "ALTER TABLE llm_sessions ADD COLUMN char_count_out INTEGER DEFAULT 0",
+        "ALTER TABLE llm_sessions ADD COLUMN summary        TEXT",
+    ]:
+        try:
+            _db_conn.execute(col_def)
+        except sqlite3.OperationalError:
+            pass  # already exists
     _db_conn.commit()
     logger.info("DB initialized: path=%s", DB_PATH)
 
@@ -191,6 +207,108 @@ def _save_response_id(session_key: str, response_id: str) -> None:
             (session_key, response_id, now),
         )
         _db_conn.commit()  # type: ignore[union-attr]
+
+
+@dataclass
+class _SessionData:
+    response_id: str | None
+    char_count_in: int
+    char_count_out: int
+    summary: str | None
+
+
+def _get_session_data(session_key: str) -> _SessionData:
+    with _db_lock:
+        row = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT response_id, char_count_in, char_count_out, summary FROM llm_sessions WHERE session_key = ?",
+            (session_key,),
+        ).fetchone()
+        if row:
+            return _SessionData(
+                response_id=row[0],
+                char_count_in=row[1] or 0,
+                char_count_out=row[2] or 0,
+                summary=row[3],
+            )
+        return _SessionData(response_id=None, char_count_in=0, char_count_out=0, summary=None)
+
+
+def _save_session(
+    session_key: str,
+    response_id: str | None,
+    char_count_in: int,
+    char_count_out: int,
+    summary: str | None,
+) -> None:
+    now = datetime.now(_JST).isoformat()
+    with _db_lock:
+        _db_conn.execute(  # type: ignore[union-attr]
+            """
+            INSERT INTO llm_sessions
+                (session_key, backend, response_id, char_count_in, char_count_out, summary, updated_at)
+            VALUES (?, 'openai', ?, ?, ?, ?, ?)
+            ON CONFLICT(session_key) DO UPDATE SET
+                response_id    = excluded.response_id,
+                backend        = excluded.backend,
+                char_count_in  = excluded.char_count_in,
+                char_count_out = excluded.char_count_out,
+                summary        = excluded.summary,
+                updated_at     = excluded.updated_at
+            """,
+            (session_key, response_id, char_count_in, char_count_out, summary, now),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+
+
+async def _summarize_and_reset_session(session_key: str, previous_response_id: str) -> None:
+    """Responses API で会話を要約し、セッションをリセットする。
+    次回リクエスト時にサマリをコンテキストとして注入するため DB に保存する。
+    """
+    url = OPENAI_RESPONSES_BASE_URL.rstrip("/") + "/responses"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+    }
+    payload = {
+        "model": OPENAI_RESPONSES_MODEL,
+        "previous_response_id": previous_response_id,
+        "input": (
+            "これまでの会話を日本語で要約してください。"
+            "重要な情報（タスク、約束、ユーザーの好み、進行中のトピック、決定事項）を含め、"
+            "次回の会話で文脈として使えるように簡潔にまとめてください。"
+        ),
+        "max_output_tokens": SESSION_SUMMARY_MAX_TOKENS,
+    }
+    try:
+        resp = await _http_client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        summary = data.get("output_text") or ""
+        if not summary:
+            for item in data.get("output", []):
+                for content in item.get("content", []):
+                    if content.get("type") == "output_text":
+                        summary = content["text"]
+                        break
+                if summary:
+                    break
+    except Exception as e:
+        logger.error("Session summarization failed: session_key=%s error=%s", session_key, e)
+        return
+
+    # リセット: response_id をクリア、文字数カウンタをサマリの長さで初期化
+    summary_len = len(summary)
+    _save_session(
+        session_key=session_key,
+        response_id=None,
+        char_count_in=summary_len,
+        char_count_out=0,
+        summary=summary,
+    )
+    logger.info(
+        "Session summarized and reset: session_key=%s summary_len=%d",
+        session_key, summary_len,
+    )
 
 
 # ── Timer ─────────────────────────────────────────────────────────────────────
@@ -883,11 +1001,14 @@ class OpenAIResponsesBackend:
         if system_prompt_append:
             instructions_parts.append(system_prompt_append)
 
-        previous_response_id = (
-            _get_previous_response_id(session_key)
-            if session_key and not DISABLE_SESSION_HISTORY
-            else None
-        )
+        session = _get_session_data(session_key) if session_key else _SessionData(None, 0, 0, None)
+        previous_response_id = session.response_id if not DISABLE_SESSION_HISTORY else None
+
+        # previous_response_id がない（新規 or リセット後）かつサマリがあれば過去の文脈として注入
+        if not previous_response_id and session.summary:
+            instructions_parts.append(
+                f"【過去の会話の要約】\n{session.summary}"
+            )
 
         tools = list(_TIMER_TOOLS) if (use_functions and not DISABLE_TOOLS) else []
         if OPENAI_RESPONSES_WEB_SEARCH and not DISABLE_TOOLS:
@@ -897,8 +1018,10 @@ class OpenAIResponsesBackend:
                 tools.append({"type": OPENAI_RESPONSES_WEB_SEARCH_TOOL})
 
         logger.info(
-            "OpenAI Responses request: model=%s session_key=%s previous_response_id=%s web_search=%s on_demand=%s",
+            "OpenAI Responses request: model=%s session_key=%s previous_response_id=%s "
+            "char_in=%d char_out=%d has_summary=%s web_search=%s on_demand=%s",
             OPENAI_RESPONSES_MODEL, session_key or "(none)", previous_response_id or "(none)",
+            session.char_count_in, session.char_count_out, bool(session.summary),
             OPENAI_RESPONSES_WEB_SEARCH, OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND,
         )
 
@@ -966,16 +1089,41 @@ class OpenAIResponsesBackend:
             if function_outputs is None:
                 # 最終テキストレスポンス → ここでのみ DB に保存する
                 # （function_call の中間レスポンス ID を保存すると次回の会話で 400 エラーになるため）
-                if response_id and session_key:
-                    _save_response_id(session_key, response_id)
-                    logger.info("Session response_id saved: session_key=%s response_id=%s", session_key, response_id)
-                if "output_text" in data:
-                    return data["output_text"]
-                for item in output:
-                    for content in item.get("content", []):
-                        if content.get("type") == "output_text":
-                            return content["text"]
-                raise RuntimeError(f"OpenAI Responses response に返答テキストが見つかりません: {data}")
+                reply_text = data.get("output_text") or ""
+                if not reply_text:
+                    for item in output:
+                        for content in item.get("content", []):
+                            if content.get("type") == "output_text":
+                                reply_text = content["text"]
+                                break
+                        if reply_text:
+                            break
+                if not reply_text:
+                    raise RuntimeError(f"OpenAI Responses response に返答テキストが見つかりません: {data}")
+
+                if session_key:
+                    new_in  = session.char_count_in  + len(text)
+                    new_out = session.char_count_out + len(reply_text)
+                    _save_session(
+                        session_key=session_key,
+                        response_id=response_id,
+                        char_count_in=new_in,
+                        char_count_out=new_out,
+                        summary=session.summary,
+                    )
+                    logger.info(
+                        "Session saved: session_key=%s response_id=%s char_in=%d char_out=%d total=%d",
+                        session_key, response_id, new_in, new_out, new_in + new_out,
+                    )
+                    # 閾値を超えたら要約してリセット（次回リクエストからクリーンな状態になる）
+                    if response_id and (new_in + new_out) >= SESSION_SUMMARY_THRESHOLD:
+                        logger.info(
+                            "Session char threshold reached (%d >= %d), summarizing: session_key=%s",
+                            new_in + new_out, SESSION_SUMMARY_THRESHOLD, session_key,
+                        )
+                        asyncio.create_task(_summarize_and_reset_session(session_key, response_id))
+
+                return reply_text
 
             # Function call あり → ループ内での previous_response_id を更新して継続
             # （DB には保存しない。function_call の未解決状態を DB に残さないため）
