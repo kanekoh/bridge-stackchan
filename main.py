@@ -10,6 +10,7 @@ import logging
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Protocol
 from datetime import datetime, timezone, timedelta
 
 import httpx
@@ -89,6 +90,43 @@ _STACKCHAN_SYSTEM_PROMPT = """\
 
 _openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
 _http_client: httpx.AsyncClient = None  # type: ignore  # initialized in lifespan
+
+_OPENAI_ERROR_REPLIES: dict[str, str] = {
+    "insufficient_quota": "ごめんね〜、いまわたしのおさいふがからっぽで…あとでまた話しかけてね！",
+    "rate_limit_exceeded": "いまちょっとこんでるみたい！少し待ってからまた話しかけてね〜",
+}
+
+
+def _classify_api_error(e: Exception) -> str | None:
+    """Known OpenAI API error → Stack-chan message. Unknown error → None."""
+    if isinstance(e, openai.RateLimitError):
+        err_str = str(e)
+        if "insufficient_quota" in err_str:
+            return _OPENAI_ERROR_REPLIES["insufficient_quota"]
+        return _OPENAI_ERROR_REPLIES["rate_limit_exceeded"]
+    if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
+        return "ごめんね、いまうまく動けなくて…ちょっと待ってね！"
+    if isinstance(e, openai.APIConnectionError):
+        return "ネットワークにつながれないみたい…また後で話しかけてね！"
+    return None
+
+
+async def _deliver_error_reply(
+    error_reply: str,
+    source: str,
+    priority: str,
+    req_id: str,
+    mode: str,
+) -> dict:
+    """Speak an error message via MQTT (async) or return audioUrl (sync)."""
+    audio_url, streaming_url = await resolve_audio_url(error_reply)
+    if mode != "sync":
+        publish_speak(audio_url, streaming_url, error_reply, source, priority, req_id)
+        return {"requestId": req_id}
+    resp: dict = {"requestId": req_id, "reply": error_reply, "audioUrl": audio_url}
+    if streaming_url:
+        resp["audioStreamingUrl"] = streaming_url
+    return resp
 
 # MQTT ACK 待機: requestId → asyncio.Event のマップ
 _pending_acks: dict[str, asyncio.Event] = {}
@@ -318,11 +356,52 @@ def _register_timer(
     return timer_id
 
 
+async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
+    """Execute a named tool and return the raw result dict (protocol-agnostic)."""
+    if name == "set_timer":
+        timer_id = _register_timer(
+            label=args.get("label", "タイマー"),
+            seconds=int(args.get("seconds", 60)),
+            session_key=notify_context.get("session_key", ""),
+            slack_channel=notify_context.get("slack_channel"),
+            snooze_seconds=args.get("snooze_seconds"),
+        )
+        logger.info(
+            "Function call set_timer: label=%s seconds=%s timer_id=%s",
+            args.get("label"), args.get("seconds"), timer_id,
+        )
+        return {"status": "ok", "timer_id": timer_id, "label": args.get("label"), "seconds": args.get("seconds")}
+    if name == "list_timers":
+        now = datetime.now(_JST)
+        timers = [
+            {
+                "timer_id": info.timer_id,
+                "label": info.label,
+                "fire_at": info.fire_at.isoformat(),
+                "remaining_seconds": max(0, int((info.fire_at - now).total_seconds())),
+            }
+            for info in _active_timer_infos.values()
+        ]
+        logger.info("Function call list_timers: count=%d", len(timers))
+        return {"status": "ok", "timers": timers, "count": len(timers)}
+    if name == "request_web_search":
+        query = args.get("query", "")
+        notify_context["enable_web_search"] = True
+        logger.info("LLM requested web search: query=%s", query[:80])
+        return {
+            "status": "ok",
+            "message": "Web検索が有効になりました。次のターンで検索を実行して回答してください。",
+            "query": query,
+        }
+    logger.warning("Unknown function call: name=%s", name)
+    return {"status": "error", "message": f"Unknown function: {name}"}
+
+
 async def _handle_function_calls(
     output: list,
     notify_context: dict,
 ) -> list | None:
-    """output 配列に function_call があれば実行して function_call_output リストを返す。なければ None。"""
+    """output 配列に function_call があれば実行して function_call_output リストを返す（Responses API 形式）。なければ None。"""
     function_calls = [item for item in output if item.get("type") == "function_call"]
     if not function_calls:
         return None
@@ -338,51 +417,7 @@ async def _handle_function_calls(
             args = json.loads(fc.get("arguments", "{}"))
         except json.JSONDecodeError:
             args = {}
-
-        if name == "set_timer":
-            timer_id = _register_timer(
-                label=args.get("label", "タイマー"),
-                seconds=int(args.get("seconds", 60)),
-                session_key=notify_context.get("session_key", ""),
-                slack_channel=notify_context.get("slack_channel"),
-                snooze_seconds=args.get("snooze_seconds"),
-            )
-            result: dict = {
-                "status": "ok",
-                "timer_id": timer_id,
-                "label": args.get("label"),
-                "seconds": args.get("seconds"),
-            }
-            logger.info(
-                "Function call set_timer: label=%s seconds=%s timer_id=%s",
-                args.get("label"), args.get("seconds"), timer_id,
-            )
-        elif name == "list_timers":
-            now = datetime.now(_JST)
-            timers = []
-            for info in _active_timer_infos.values():
-                remaining = max(0, int((info.fire_at - now).total_seconds()))
-                timers.append({
-                    "timer_id": info.timer_id,
-                    "label": info.label,
-                    "fire_at": info.fire_at.isoformat(),
-                    "remaining_seconds": remaining,
-                })
-            result = {"status": "ok", "timers": timers, "count": len(timers)}
-            logger.info("Function call list_timers: count=%d", len(timers))
-        elif name == "request_web_search":
-            query = args.get("query", "")
-            notify_context["enable_web_search"] = True
-            result = {
-                "status": "ok",
-                "message": "Web検索が有効になりました。次のターンで検索を実行して回答してください。",
-                "query": query,
-            }
-            logger.info("LLM requested web search: query=%s", query[:80])
-        else:
-            result = {"status": "error", "message": f"Unknown function: {name}"}
-            logger.warning("Unknown function call: name=%s", name)
-
+        result = await _execute_tool(name, args, notify_context)
         results.append({
             "type": "function_call_output",
             "call_id": call_id,
@@ -729,6 +764,226 @@ def _build_datetime_context() -> str:
     return f"【現在の日時】{now.year}年{now.month}月{now.day}日（{weekday}）{now.hour:02d}:{now.minute:02d} JST"
 
 
+# ── LLM Backend Protocol + implementations ───────────────────────────────────
+
+class LLMBackend(Protocol):
+    async def chat(
+        self,
+        text: str,
+        audio: bytes | None,
+        speaker: str | None,
+        system_prompt_append: str,
+        session_key: str,
+        notify_context: dict | None,
+        use_functions: bool,
+    ) -> str: ...
+
+
+class OpenClawResponsesBackend:
+    async def chat(
+        self,
+        text: str,
+        audio: bytes | None,
+        speaker: str | None,
+        system_prompt_append: str,
+        session_key: str,
+        notify_context: dict | None,
+        use_functions: bool,
+    ) -> str:
+        url = OPENCLAW_BASE_URL.rstrip("/") + "/responses"
+        headers: dict = {
+            "Content-Type": "application/json",
+            "x-openclaw-scopes": "operator.read,operator.write",
+        }
+        if OPENCLAW_GATEWAY_TOKEN:
+            headers["Authorization"] = f"Bearer {OPENCLAW_GATEWAY_TOKEN}"
+        if OPENCLAW_SESSION_KEY:
+            headers["x-openclaw-session-key"] = OPENCLAW_SESSION_KEY
+
+        user_input: str | list = f"[話者: {speaker}] {text}" if speaker else text
+        instructions_parts = [_build_datetime_context()]
+        if system_prompt_append:
+            instructions_parts.append(system_prompt_append)
+        tools = list(_TIMER_TOOLS) if use_functions else []
+
+        logger.info(
+            "OpenClaw request: url=%s model=%s session_key=%s",
+            url, OPENCLAW_MODEL, OPENCLAW_SESSION_KEY or "(none)",
+        )
+
+        for _ in range(5):  # Function calling ループ（最大 5 回）
+            payload: dict = {
+                "model": OPENCLAW_MODEL,
+                "input": user_input,
+                "instructions": "\n\n".join(instructions_parts),
+            }
+            if OPENCLAW_MAX_OUTPUT_TOKENS is not None:
+                payload["max_output_tokens"] = OPENCLAW_MAX_OUTPUT_TOKENS
+            if tools:
+                payload["tools"] = tools
+            try:
+                resp = await _http_client.post(url, json=payload, headers=headers)
+                if not resp.is_success:
+                    logger.error("OpenClaw HTTP %d: body=%s", resp.status_code, resp.text[:500])
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                logger.error("OpenClaw error detail: type=%s message=%s", type(e).__name__, e)
+                raise
+
+            output = data.get("output", [])
+            function_outputs = await _handle_function_calls(output, notify_context or {})
+            if function_outputs is None:
+                if "output_text" in data:
+                    return data["output_text"]
+                for item in output:
+                    for content in item.get("content", []):
+                        if content.get("type") == "output_text":
+                            return content["text"]
+                raise RuntimeError(f"OpenClaw response に返答テキストが見つかりません: {data}")
+            user_input = function_outputs
+
+        raise RuntimeError("OpenClaw function calling loop exceeded max iterations")
+
+
+class OpenAIResponsesBackend:
+    async def chat(
+        self,
+        text: str,
+        audio: bytes | None,
+        speaker: str | None,
+        system_prompt_append: str,
+        session_key: str,
+        notify_context: dict | None,
+        use_functions: bool,
+    ) -> str:
+        url = OPENAI_RESPONSES_BASE_URL.rstrip("/") + "/responses"
+        headers: dict = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+        }
+
+        user_input: str | list = f"[話者: {speaker}] {text}" if speaker else text
+
+        # _handle_function_calls から enable_web_search フラグを書き戻すため、ここで必ず辞書化する
+        notify_ctx: dict = notify_context if notify_context is not None else {}
+
+        instructions_parts = [_STACKCHAN_SYSTEM_PROMPT, _build_datetime_context()]
+        if OPENAI_RESPONSES_WEB_SEARCH and OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
+            instructions_parts.append(
+                "Web検索ガイドライン:\n"
+                "- 雑談・感情表現・既に知っている内容ではWeb検索を使わない\n"
+                "- 「最新」「今日」「いま」「天気」「ニュース」など現在の情報が必要なときだけ "
+                "request_web_search を呼ぶ"
+            )
+        if system_prompt_append:
+            instructions_parts.append(system_prompt_append)
+
+        previous_response_id = _get_previous_response_id(session_key) if session_key else None
+
+        tools = list(_TIMER_TOOLS) if use_functions else []
+        if OPENAI_RESPONSES_WEB_SEARCH:
+            if OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
+                tools.append(_REQUEST_WEB_SEARCH_TOOL)
+            else:
+                tools.append({"type": OPENAI_RESPONSES_WEB_SEARCH_TOOL})
+
+        logger.info(
+            "OpenAI Responses request: model=%s session_key=%s previous_response_id=%s web_search=%s on_demand=%s",
+            OPENAI_RESPONSES_MODEL, session_key or "(none)", previous_response_id or "(none)",
+            OPENAI_RESPONSES_WEB_SEARCH, OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND,
+        )
+
+        for _ in range(5):  # Function calling ループ（最大 5 回）
+            # ON_DEMAND モードで LLM が前ターンに request_web_search を呼んでいたら、
+            # ここで本物の web_search_preview に差し替える（Pass 2 への昇格）
+            if (
+                OPENAI_RESPONSES_WEB_SEARCH
+                and OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND
+                and notify_ctx.get("enable_web_search")
+            ):
+                tools = [t for t in tools if t.get("name") != "request_web_search"]
+                if not any(t.get("type") == OPENAI_RESPONSES_WEB_SEARCH_TOOL for t in tools):
+                    tools.append({"type": OPENAI_RESPONSES_WEB_SEARCH_TOOL})
+                    logger.info("Web search promoted to Pass 2")
+                notify_ctx["enable_web_search"] = False  # 多重昇格防止
+
+            payload: dict = {
+                "model": OPENAI_RESPONSES_MODEL,
+                "input": user_input,
+                "instructions": "\n\n".join(instructions_parts),
+            }
+            if previous_response_id:
+                payload["previous_response_id"] = previous_response_id
+            if OPENAI_RESPONSES_MAX_OUTPUT_TOKENS is not None:
+                payload["max_output_tokens"] = OPENAI_RESPONSES_MAX_OUTPUT_TOKENS
+            if tools:
+                payload["tools"] = tools
+
+            try:
+                resp = await _http_client.post(url, json=payload, headers=headers)
+
+                # previous_response_id が壊れた状態（未解決の function_call が残っている）の場合、
+                # リセットして同じ入力で再試行する。会話の連続性は失われるが処理は継続できる。
+                # 注意: function_call_output 送信中（user_input がリスト）はリセットしない。
+                #       そこで 400 が出るのは call_id の不一致など別の問題であり、
+                #       リセットすると function_call_output だけが残って状況が悪化する。
+                if (
+                    resp.status_code == 400
+                    and previous_response_id
+                    and isinstance(user_input, str)
+                    and "tool" in resp.text.lower()
+                ):
+                    logger.warning(
+                        "previous_response_id has unresolved function call, resetting and retrying: "
+                        "session_key=%s previous_response_id=%s",
+                        session_key, previous_response_id,
+                    )
+                    previous_response_id = None
+                    payload.pop("previous_response_id", None)
+                    resp = await _http_client.post(url, json=payload, headers=headers)
+
+                if not resp.is_success:
+                    logger.error("OpenAI Responses HTTP %d: body=%s", resp.status_code, resp.text[:500])
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                logger.error("OpenAI Responses error: type=%s message=%s", type(e).__name__, e)
+                raise
+
+            response_id = data.get("id")
+            output = data.get("output", [])
+            function_outputs = await _handle_function_calls(output, notify_ctx)
+
+            if function_outputs is None:
+                # 最終テキストレスポンス → ここでのみ DB に保存する
+                # （function_call の中間レスポンス ID を保存すると次回の会話で 400 エラーになるため）
+                if response_id and session_key:
+                    _save_response_id(session_key, response_id)
+                    logger.info("Session response_id saved: session_key=%s response_id=%s", session_key, response_id)
+                if "output_text" in data:
+                    return data["output_text"]
+                for item in output:
+                    for content in item.get("content", []):
+                        if content.get("type") == "output_text":
+                            return content["text"]
+                raise RuntimeError(f"OpenAI Responses response に返答テキストが見つかりません: {data}")
+
+            # Function call あり → ループ内での previous_response_id を更新して継続
+            # （DB には保存しない。function_call の未解決状態を DB に残さないため）
+            if response_id:
+                previous_response_id = response_id
+            user_input = function_outputs
+
+        raise RuntimeError("OpenAI Responses function calling loop exceeded max iterations")
+
+
+_BACKENDS: dict[str, LLMBackend] = {
+    "openclaw": OpenClawResponsesBackend(),
+    "openai": OpenAIResponsesBackend(),
+}
+
+
 async def chat_with_openclaw(
     text: str,
     speaker: str | None = None,
@@ -736,69 +991,9 @@ async def chat_with_openclaw(
     notify_context: dict | None = None,
     use_functions: bool = True,
 ) -> str:
-    """Send text to OpenClaw via OpenResponses API and return the reply."""
-    url = OPENCLAW_BASE_URL.rstrip("/") + "/responses"
-
-    headers: dict = {
-        "Content-Type": "application/json",
-        "x-openclaw-scopes": "operator.read,operator.write",
-    }
-    if OPENCLAW_GATEWAY_TOKEN:
-        headers["Authorization"] = f"Bearer {OPENCLAW_GATEWAY_TOKEN}"
-    if OPENCLAW_SESSION_KEY:
-        headers["x-openclaw-session-key"] = OPENCLAW_SESSION_KEY
-
-    user_input: str | list = f"[話者: {speaker}] {text}" if speaker else text
-
-    instructions_parts = [_build_datetime_context()]
-    if system_prompt_append:
-        instructions_parts.append(system_prompt_append)
-
-    tools = list(_TIMER_TOOLS) if use_functions else []
-
-    logger.info(
-        "OpenClaw request: url=%s model=%s session_key=%s",
-        url, OPENCLAW_MODEL, OPENCLAW_SESSION_KEY or "(none)",
+    return await _BACKENDS["openclaw"].chat(
+        text, None, speaker, system_prompt_append, "", notify_context, use_functions
     )
-
-    for _ in range(5):  # Function calling ループ（最大 5 回）
-        payload: dict = {
-            "model": OPENCLAW_MODEL,
-            "input": user_input,
-            "instructions": "\n\n".join(instructions_parts),
-        }
-        if OPENCLAW_MAX_OUTPUT_TOKENS is not None:
-            payload["max_output_tokens"] = OPENCLAW_MAX_OUTPUT_TOKENS
-        if tools:
-            payload["tools"] = tools
-
-        try:
-            resp = await _http_client.post(url, json=payload, headers=headers)
-            if not resp.is_success:
-                logger.error("OpenClaw HTTP %d: body=%s", resp.status_code, resp.text[:500])
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            logger.error("OpenClaw error detail: type=%s message=%s", type(e).__name__, e)
-            raise
-
-        output = data.get("output", [])
-        function_outputs = await _handle_function_calls(output, notify_context or {})
-
-        if function_outputs is None:
-            # Function call なし → テキストを返す
-            if "output_text" in data:
-                return data["output_text"]
-            for item in output:
-                for content in item.get("content", []):
-                    if content.get("type") == "output_text":
-                        return content["text"]
-            raise RuntimeError(f"OpenClaw response に返答テキストが見つかりません: {data}")
-
-        # Function call あり → 結果を渡して継続
-        user_input = function_outputs
-
-    raise RuntimeError("OpenClaw function calling loop exceeded max iterations")
 
 
 async def chat_with_openai_responses(
@@ -809,130 +1004,9 @@ async def chat_with_openai_responses(
     notify_context: dict | None = None,
     use_functions: bool = True,
 ) -> str:
-    """Send text to OpenAI Responses API and return the reply.
-
-    Loads previous_response_id from DB to maintain conversation continuity,
-    and saves the new response_id after a successful call.
-    Supports function calling loop for set_timer and other tools.
-    """
-    url = OPENAI_RESPONSES_BASE_URL.rstrip("/") + "/responses"
-    headers: dict = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-    }
-
-    user_input: str | list = f"[話者: {speaker}] {text}" if speaker else text
-
-    # _handle_function_calls から enable_web_search フラグを書き戻すため、ここで必ず辞書化する
-    notify_ctx: dict = notify_context if notify_context is not None else {}
-
-    instructions_parts = [_STACKCHAN_SYSTEM_PROMPT, _build_datetime_context()]
-    if OPENAI_RESPONSES_WEB_SEARCH and OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
-        instructions_parts.append(
-            "Web検索ガイドライン:\n"
-            "- 雑談・感情表現・既に知っている内容ではWeb検索を使わない\n"
-            "- 「最新」「今日」「いま」「天気」「ニュース」など現在の情報が必要なときだけ "
-            "request_web_search を呼ぶ"
-        )
-    if system_prompt_append:
-        instructions_parts.append(system_prompt_append)
-
-    previous_response_id = _get_previous_response_id(session_key) if session_key else None
-
-    tools = list(_TIMER_TOOLS) if use_functions else []
-    if OPENAI_RESPONSES_WEB_SEARCH:
-        if OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
-            tools.append(_REQUEST_WEB_SEARCH_TOOL)
-        else:
-            tools.append({"type": OPENAI_RESPONSES_WEB_SEARCH_TOOL})
-
-    logger.info(
-        "OpenAI Responses request: model=%s session_key=%s previous_response_id=%s web_search=%s on_demand=%s",
-        OPENAI_RESPONSES_MODEL, session_key or "(none)", previous_response_id or "(none)",
-        OPENAI_RESPONSES_WEB_SEARCH, OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND,
+    return await _BACKENDS["openai"].chat(
+        text, None, speaker, system_prompt_append, session_key, notify_context, use_functions
     )
-
-    for _ in range(5):  # Function calling ループ（最大 5 回）
-        # ON_DEMAND モードで LLM が前ターンに request_web_search を呼んでいたら、
-        # ここで本物の web_search_preview に差し替える（Pass 2 への昇格）
-        if (
-            OPENAI_RESPONSES_WEB_SEARCH
-            and OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND
-            and notify_ctx.get("enable_web_search")
-        ):
-            tools = [t for t in tools if t.get("name") != "request_web_search"]
-            if not any(t.get("type") == OPENAI_RESPONSES_WEB_SEARCH_TOOL for t in tools):
-                tools.append({"type": OPENAI_RESPONSES_WEB_SEARCH_TOOL})
-                logger.info("Web search promoted to Pass 2")
-            notify_ctx["enable_web_search"] = False  # 多重昇格防止
-        payload: dict = {
-            "model": OPENAI_RESPONSES_MODEL,
-            "input": user_input,
-            "instructions": "\n\n".join(instructions_parts),
-        }
-        if previous_response_id:
-            payload["previous_response_id"] = previous_response_id
-        if OPENAI_RESPONSES_MAX_OUTPUT_TOKENS is not None:
-            payload["max_output_tokens"] = OPENAI_RESPONSES_MAX_OUTPUT_TOKENS
-        if tools:
-            payload["tools"] = tools
-
-        try:
-            resp = await _http_client.post(url, json=payload, headers=headers)
-
-            # previous_response_id が壊れた状態（未解決の function_call が残っている）の場合、
-            # リセットして同じ入力で再試行する。会話の連続性は失われるが処理は継続できる。
-            # 注意: function_call_output 送信中（user_input がリスト）はリセットしない。
-            #       そこで 400 が出るのは call_id の不一致など別の問題であり、
-            #       リセットすると function_call_output だけが残って状況が悪化する。
-            if (
-                resp.status_code == 400
-                and previous_response_id
-                and isinstance(user_input, str)
-                and "tool" in resp.text.lower()
-            ):
-                logger.warning(
-                    "previous_response_id has unresolved function call, resetting and retrying: "
-                    "session_key=%s previous_response_id=%s",
-                    session_key, previous_response_id,
-                )
-                previous_response_id = None
-                payload.pop("previous_response_id", None)
-                resp = await _http_client.post(url, json=payload, headers=headers)
-
-            if not resp.is_success:
-                logger.error("OpenAI Responses HTTP %d: body=%s", resp.status_code, resp.text[:500])
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            logger.error("OpenAI Responses error: type=%s message=%s", type(e).__name__, e)
-            raise
-
-        response_id = data.get("id")
-        output = data.get("output", [])
-        function_outputs = await _handle_function_calls(output, notify_ctx)
-
-        if function_outputs is None:
-            # 最終テキストレスポンス → ここでのみ DB に保存する
-            # （function_call の中間レスポンス ID を保存すると次回の会話で 400 エラーになるため）
-            if response_id and session_key:
-                _save_response_id(session_key, response_id)
-                logger.info("Session response_id saved: session_key=%s response_id=%s", session_key, response_id)
-            if "output_text" in data:
-                return data["output_text"]
-            for item in output:
-                for content in item.get("content", []):
-                    if content.get("type") == "output_text":
-                        return content["text"]
-            raise RuntimeError(f"OpenAI Responses response に返答テキストが見つかりません: {data}")
-
-        # Function call あり → ループ内での previous_response_id を更新して継続
-        # （DB には保存しない。function_call の未解決状態を DB に残さないため）
-        if response_id:
-            previous_response_id = response_id
-        user_input = function_outputs
-
-    raise RuntimeError("OpenAI Responses function calling loop exceeded max iterations")
 
 
 async def chat_with_llm(
@@ -946,15 +1020,12 @@ async def chat_with_llm(
     """Dispatch to the configured LLM backend (LLM_BACKEND env).
 
     notify_context: {"session_key": str, "slack_channel": str | None}
-        - session_key: タイマー発火時に LLM が使うセッションキー
-        - slack_channel: タイマー発火時に Slack 通知するチャンネル（None = MQTT のみ）
     use_functions: False にすると Function Calling ツールを含めない（タイマー発火時など）
     """
-    if LLM_BACKEND == "openai":
-        return await chat_with_openai_responses(
-            text, speaker, system_prompt_append, session_key, notify_context, use_functions
-        )
-    return await chat_with_openclaw(text, speaker, system_prompt_append, notify_context, use_functions)
+    backend = _BACKENDS.get(LLM_BACKEND)
+    if backend is None:
+        raise ValueError(f"Unknown LLM_BACKEND: {LLM_BACKEND!r}")
+    return await backend.chat(text, None, speaker, system_prompt_append, session_key, notify_context, use_functions)
 
 
 # ── Slack Bot (Socket Mode) ───────────────────────────────────────────────────
@@ -980,7 +1051,7 @@ async def _slack_handle_mention(event: dict, say) -> None:
         )
     except Exception as e:
         logger.error("Slack mention LLM error: %s", e)
-        await say("ごめんね、うまく考えられなかったよ〜 もう一度試してみて！")
+        await say(_classify_api_error(e) or "ごめんね、うまく考えられなかったよ〜 もう一度試してみて！")
         return
 
     await say(reply)
@@ -1010,7 +1081,7 @@ async def _slack_handle_dm(event: dict, say) -> None:
         )
     except Exception as e:
         logger.error("Slack DM LLM error: %s", e)
-        await say("ごめんね、うまく考えられなかったよ〜 もう一度試してみて！")
+        await say(_classify_api_error(e) or "ごめんね、うまく考えられなかったよ〜 もう一度試してみて！")
         return
 
     await say(reply)
@@ -1218,6 +1289,12 @@ async def ingest_audio(
         )
     except Exception as e:
         logger.error("STT error: %s", e)
+        error_reply = _classify_api_error(e)
+        if error_reply:
+            try:
+                return await _deliver_error_reply(error_reply, source, priority, req_id, mode)
+            except Exception as speak_e:
+                logger.error("STT error fallback speak failed: %s", speak_e)
         raise HTTPException(status_code=502, detail=f"STT error: {e}")
     logger.info("Transcript: request_id=%s text=%s speaker=%s", req_id, transcript[:80], speaker)
 
@@ -1231,6 +1308,12 @@ async def ingest_audio(
         )
     except Exception as e:
         logger.error("LLM error: %s", e)
+        error_reply = _classify_api_error(e)
+        if error_reply:
+            try:
+                return await _deliver_error_reply(error_reply, source, priority, req_id, mode)
+            except Exception as speak_e:
+                logger.error("LLM error fallback speak failed: %s", speak_e)
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
     logger.info("LLM reply: backend=%s request_id=%s text=%s", LLM_BACKEND, req_id, reply[:80])
 

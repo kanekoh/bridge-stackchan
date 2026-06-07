@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 os.environ.setdefault("DB_PATH", "/tmp/test-bridge.db")
 
-import main  # noqa: E402  (needed for patch.object on module-level clients)
+import main  # noqa: E402  (needed for patch.object on module-level objects)
 from main import (  # noqa: E402
     _build_datetime_context,
     _handle_function_calls,
@@ -680,7 +680,7 @@ class TestChatWithLLM:
     async def test_dispatches_to_openclaw_by_default(self):
         with (
             patch("main.LLM_BACKEND", "openclaw"),
-            patch("main.chat_with_openclaw", new_callable=AsyncMock, return_value="OpenClaw返事") as mock_oc,
+            patch.object(main._BACKENDS["openclaw"], "chat", new_callable=AsyncMock, return_value="OpenClaw返事") as mock_oc,
         ):
             result = await chat_with_llm("テスト", session_key="s")
         assert result == "OpenClaw返事"
@@ -689,7 +689,7 @@ class TestChatWithLLM:
     async def test_dispatches_to_openai_when_configured(self):
         with (
             patch("main.LLM_BACKEND", "openai"),
-            patch("main.chat_with_openai_responses", new_callable=AsyncMock, return_value="OpenAI返事") as mock_oai,
+            patch.object(main._BACKENDS["openai"], "chat", new_callable=AsyncMock, return_value="OpenAI返事") as mock_oai,
         ):
             result = await chat_with_llm("テスト", session_key="s")
         assert result == "OpenAI返事"
@@ -698,11 +698,13 @@ class TestChatWithLLM:
     async def test_session_key_passed_to_openai(self):
         with (
             patch("main.LLM_BACKEND", "openai"),
-            patch("main.chat_with_openai_responses", new_callable=AsyncMock, return_value="返事") as mock_oai,
+            patch.object(main._BACKENDS["openai"], "chat", new_callable=AsyncMock, return_value="返事") as mock_oai,
         ):
             await chat_with_llm("テスト", session_key="my-device")
-        _, kwargs = mock_oai.call_args
-        assert kwargs.get("session_key") == "my-device" or mock_oai.call_args.args[3] == "my-device"
+        # chat(self, text, audio, speaker, system_prompt_append, session_key, ...)
+        call_args = mock_oai.call_args
+        session_key_arg = call_args.args[4] if len(call_args.args) > 4 else call_args.kwargs.get("session_key")
+        assert session_key_arg == "my-device"
 
 
 # ── unit: Slack handlers ──────────────────────────────────────────────────────
