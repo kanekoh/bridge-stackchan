@@ -48,6 +48,7 @@ OPENCLAW_MAX_OUTPUT_TOKENS: int | None = int(_raw) if _raw.strip() else None
 SPEAKER_ID_URL = os.getenv("SPEAKER_ID_URL", "")
 SPEAKER_ID_API_KEY = os.getenv("SPEAKER_ID_API_KEY", "")
 SPEAKER_ID_THRESHOLD = float(os.getenv("SPEAKER_ID_THRESHOLD", "0.75"))
+STT_MODEL = os.getenv("STT_MODEL", "whisper-1")
 
 # LLM バックエンド切り替え
 LLM_BACKEND = os.getenv("LLM_BACKEND", "openclaw")  # "openclaw" or "openai"
@@ -717,7 +718,7 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     buf = io.BytesIO(audio_bytes)
     buf.name = filename or "audio.wav"
     result = await _openai_client.audio.transcriptions.create(
-        model="whisper-1",
+        model=STT_MODEL,
         file=buf,
         language="ja",
     )
