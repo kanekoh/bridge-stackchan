@@ -61,6 +61,9 @@ OPENAI_RESPONSES_WEB_SEARCH_TOOL = os.getenv("OPENAI_RESPONSES_WEB_SEARCH_TOOL",
 # 実験: True にすると Pass 1 では request_web_search のみ提示し、LLM が必要と判断したときだけ
 # Pass 2 で web_search_preview を有効化する。雑談ターンの平均レイテンシを短縮できる。
 OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND = os.getenv("OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND", "false").lower() == "true"
+# 切り分け用フラグ (デフォルト false = 通常動作)
+DISABLE_SESSION_HISTORY = os.getenv("DISABLE_SESSION_HISTORY", "false").lower() == "true"
+DISABLE_TOOLS = os.getenv("DISABLE_TOOLS", "false").lower() == "true"
 
 DB_PATH = os.getenv("DB_PATH", "data/bridge.db")
 
@@ -880,10 +883,14 @@ class OpenAIResponsesBackend:
         if system_prompt_append:
             instructions_parts.append(system_prompt_append)
 
-        previous_response_id = _get_previous_response_id(session_key) if session_key else None
+        previous_response_id = (
+            _get_previous_response_id(session_key)
+            if session_key and not DISABLE_SESSION_HISTORY
+            else None
+        )
 
-        tools = list(_TIMER_TOOLS) if use_functions else []
-        if OPENAI_RESPONSES_WEB_SEARCH:
+        tools = list(_TIMER_TOOLS) if (use_functions and not DISABLE_TOOLS) else []
+        if OPENAI_RESPONSES_WEB_SEARCH and not DISABLE_TOOLS:
             if OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
                 tools.append(_REQUEST_WEB_SEARCH_TOOL)
             else:
