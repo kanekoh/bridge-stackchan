@@ -36,6 +36,7 @@ MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 MQTT_TLS = os.getenv("MQTT_TLS", "false").lower() == "true"
 MQTT_DEVICE_ID = os.getenv("MQTT_DEVICE_ID", "default")
 MQTT_QOS = int(os.getenv("MQTT_QOS", "1"))
+MQTT_ACK_TIMEOUT = float(os.getenv("MQTT_ACK_TIMEOUT", "15.0"))
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789/v1")
@@ -707,7 +708,7 @@ def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, so
     _mqtt_conn.publish(topic, payload)
 
 
-async def wait_for_ack(request_id: str, timeout: float = 5.0) -> bool:
+async def wait_for_ack(request_id: str, timeout: float = MQTT_ACK_TIMEOUT) -> bool:
     """stackchan/ack トピックで requestId に対応する ACK を待つ。
 
     publish_speak より前に _pending_acks に event を登録しておくと、
