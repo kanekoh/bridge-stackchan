@@ -115,14 +115,14 @@ def test_notify_at_uses_default_minutes():
 
 def test_notify_at_uses_popup_override():
     start = datetime(2026, 6, 10, 10, 0, tzinfo=_JST)
-    reminders = {"useDefault": False, "overrides": [{"method": "popup", "minutesBefore": 30}]}
+    reminders = {"useDefault": False, "overrides": [{"method": "popup", "minutes": 30}]}
     result = _calculate_notify_at(start, reminders, default_minutes=15)
     assert result == datetime(2026, 6, 10, 9, 30, tzinfo=_JST)
 
 def test_notify_at_falls_back_when_no_popup():
     # email リマインダーのみ → デフォルト値を使用
     start = datetime(2026, 6, 10, 10, 0, tzinfo=_JST)
-    reminders = {"useDefault": False, "overrides": [{"method": "email", "minutesBefore": 10}]}
+    reminders = {"useDefault": False, "overrides": [{"method": "email", "minutes": 10}]}
     result = _calculate_notify_at(start, reminders, default_minutes=15)
     assert result == datetime(2026, 6, 10, 9, 45, tzinfo=_JST)
 

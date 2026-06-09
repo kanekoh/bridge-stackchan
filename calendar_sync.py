@@ -68,7 +68,7 @@ def _calculate_notify_at(
             None,
         )
         if popup:
-            return start_dt - timedelta(minutes=int(popup["minutesBefore"]))
+            return start_dt - timedelta(minutes=int(popup["minutes"]))
     return start_dt - timedelta(minutes=default_minutes)
 
 
