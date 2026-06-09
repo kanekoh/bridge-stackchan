@@ -458,13 +458,16 @@ if __name__ == "__main__":
         if not rows:
             print("予定・タスクはありません")
         else:
-            print(f"{'種別':<8} {'名前':<6} {'タイトル':<24} {'開始/期日':<22} {'通知予定':<22} {'状態'}")
-            print("-" * 100)
-            for type_, person, title, start_at, due_at, notify_at, status in rows:
-                when = start_at or due_at or "-"
-                notify = notify_at or "-"
-                label = "イベント" if type_ == "event" else "タスク  "
-                print(f"{label:<8} {person:<6} {title[:22]:<24} {when[:19]:<22} {notify[:19]:<22} {status}")
+            print(f"{len(rows)} 件\n")
+            for i, (type_, person, title, start_at, due_at, notify_at, status) in enumerate(rows, 1):
+                label = "イベント" if type_ == "event" else "タスク"
+                when  = (start_at or due_at or "-")[:19]
+                notify = notify_at[:19] if notify_at else "-"
+                print(f"[{i}] {title}")
+                print(f"    種別: {label}  状態: {status}  名前: {person}")
+                print(f"    開始: {when}")
+                print(f"    通知: {notify}")
+                print()
 
     else:
         print("使い方:")
