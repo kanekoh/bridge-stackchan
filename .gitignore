@@ -59,3 +59,8 @@ docker-compose.override.yml
 *.key
 *.crt
 *.p12
+
+# Google OAuth トークン・認証情報
+secrets/
+credentials.json
+token*.json

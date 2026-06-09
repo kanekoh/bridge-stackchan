@@ -1,0 +1,39 @@
+# calendar_config.yaml
+# Google カレンダー・タスクの同期設定
+#
+# 使い方:
+#   1. このファイルを calendar_config.yaml にコピー
+#      cp calendar_config.yaml.example calendar_config.yaml
+#   2. 初回認証（ブラウザが開きます）
+#      python calendar_sync.py --auth
+#   3. カレンダーIDとタスクリストIDを確認
+#      python calendar_sync.py --list
+#   4. このファイルに設定を記入
+#   5. .env で CALENDAR_ENABLED=true に変更
+
+calendars:
+  - id: "your-email@gmail.com"           # Google カレンダーのID（通常はメールアドレス）
+    person_name: "パパ"                    # 声かけに使う名前（例:「パパ、○○の時間だよ！」）
+    notify: true                          # true: MQTTで声かけする / false: 同期のみ
+
+  # - id: "other@gmail.com"
+  #   person_name: "ママ"
+  #   notify: true
+
+  # - id: "xxxxxxxxxxxxxxxx@group.calendar.google.com"
+  #   person_name: "家族"
+  #   notify: true
+
+task_lists:
+  - id: "@default"                        # デフォルトのタスクリスト
+    person_name: "パパ"
+    notify: true
+
+  # 他のタスクリストIDは python calendar_sync.py --list で確認
+  # - id: "MDM1NjU3NTk4MDMwNzQ4MDQ6MDow"
+  #   person_name: "ママ"
+  #   notify: true
+
+settings:
+  default_notify_minutes_before: 15      # カレンダー通知が未設定の場合、何分前に声かけするか
+  sync_days_ahead: 7                     # 何日先まで同期するか

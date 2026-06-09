@@ -4,10 +4,10 @@ set -e
 CONTAINER_NAME="bridge-stackchan"
 PORT="${PORT:-8000}"
 
-if docker ps -q -f name="$CONTAINER_NAME" | grep -q .; then
+if podman ps -q -f name="$CONTAINER_NAME" | grep -q .; then
   echo "Stopping container: $CONTAINER_NAME"
-  docker stop "$CONTAINER_NAME"
-  docker rm "$CONTAINER_NAME"
+  podman stop "$CONTAINER_NAME"
+  podman rm "$CONTAINER_NAME"
   echo "Stopped."
 else
   echo "Container '$CONTAINER_NAME' is not running."

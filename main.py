@@ -71,6 +71,16 @@ SESSION_SUMMARY_MAX_TOKENS = int(os.getenv("SESSION_SUMMARY_MAX_TOKENS", "500"))
 
 DB_PATH = os.getenv("DB_PATH", "data/bridge.db")
 
+# Google Calendar / Tasks
+CALENDAR_ENABLED = os.getenv("CALENDAR_ENABLED", "false").lower() == "true"
+GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "secrets/credentials.json")
+GOOGLE_TOKEN_DIR = os.getenv("GOOGLE_TOKEN_DIR", "secrets")
+CALENDAR_SYNC_INTERVAL_MINUTES = int(os.getenv("CALENDAR_SYNC_INTERVAL_MINUTES", "30"))
+CALENDAR_DEFAULT_NOTIFY_MINUTES = int(os.getenv("CALENDAR_DEFAULT_NOTIFY_MINUTES", "15"))
+CALENDAR_SYNC_DAYS_AHEAD = int(os.getenv("CALENDAR_SYNC_DAYS_AHEAD", "7"))
+CALENDAR_NOTIFY_CHECK_INTERVAL = int(os.getenv("CALENDAR_NOTIFY_CHECK_INTERVAL", "60"))
+CALENDAR_NOTIFY_GRACE_MINUTES = int(os.getenv("CALENDAR_NOTIFY_GRACE_MINUTES", "60"))
+
 # Slack (Socket Mode — 両方設定されている場合のみ有効)
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN", "")
@@ -180,6 +190,45 @@ def _init_db() -> None:
             _db_conn.execute(col_def)
         except sqlite3.OperationalError:
             pass  # already exists
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS items (
+            id          TEXT PRIMARY KEY,
+            type        TEXT NOT NULL,
+            source_id   TEXT NOT NULL,
+            person_name TEXT NOT NULL,
+            notify      BOOLEAN NOT NULL,
+            title       TEXT NOT NULL,
+            start_at    DATETIME,
+            end_at      DATETIME,
+            due_at      DATETIME,
+            notify_at   DATETIME,
+            all_day     BOOLEAN NOT NULL DEFAULT 0,
+            status      TEXT NOT NULL DEFAULT 'active',
+            synced_at   DATETIME NOT NULL
+        )
+    """)
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS notification_log (
+            event_id    TEXT PRIMARY KEY,
+            notified_at DATETIME NOT NULL,
+            acked       BOOLEAN NOT NULL DEFAULT 0,
+            acked_at    DATETIME
+        )
+    """)
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS calendar_sources (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type  TEXT NOT NULL CHECK(source_type IN ('calendar', 'tasklist')),
+            source_id    TEXT NOT NULL,
+            person_name  TEXT NOT NULL,
+            notify       BOOLEAN NOT NULL DEFAULT 1,
+            token_key    TEXT NOT NULL DEFAULT 'default',
+            enabled      BOOLEAN NOT NULL DEFAULT 1,
+            created_at   DATETIME NOT NULL,
+            updated_at   DATETIME NOT NULL,
+            UNIQUE(source_type, source_id)
+        )
+    """)
     _db_conn.commit()
     logger.info("DB initialized: path=%s", DB_PATH)
 
@@ -550,6 +599,75 @@ async def _handle_function_calls(
     return results
 
 
+async def _fire_calendar_notification(item: dict) -> None:
+    person = item["person_name"]
+    title = item["title"]
+    if item["type"] == "event":
+        prompt = f"{person}の予定「{title}」の時間がもうすぐだよ！短く明るく声かけして。"
+    else:
+        prompt = f"{person}のタスク「{title}」の期日が近いよ！短く声かけして。"
+    try:
+        message = await chat_with_llm(
+            prompt,
+            system_prompt_append=(
+                "これはカレンダー通知です。スタックちゃんとして家族に向けて声かけしてください。"
+                "依頼者への返答にはしないでください。"
+            ),
+            use_functions=False,
+        )
+    except Exception as e:
+        logger.error("Calendar notification LLM error: item_id=%s error=%s", item["id"], e)
+        message = f"{person}、{title}の時間だよ！"
+    audio_url, streaming_url = await resolve_audio_url(message)
+    req_id = str(uuid.uuid4())
+    publish_speak(audio_url, streaming_url, message, "calendar", "normal", req_id)
+    logger.info("Calendar notification sent: item_id=%s message=%s", item["id"], message[:60])
+
+
+async def _check_calendar_notifications() -> None:
+    now = datetime.now(_JST)
+    grace_cutoff = (now - timedelta(minutes=CALENDAR_NOTIFY_GRACE_MINUTES)).isoformat()
+    now_iso = now.isoformat()
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            """
+            SELECT i.id, i.type, i.person_name, i.title
+            FROM items i
+            LEFT JOIN notification_log n ON i.id = n.event_id
+            WHERE i.notify = 1
+              AND i.status = 'active'
+              AND i.notify_at IS NOT NULL
+              AND i.notify_at <= ?
+              AND i.notify_at >= ?
+              AND n.event_id IS NULL
+            """,
+            (now_iso, grace_cutoff),
+        ).fetchall()
+
+    for row in rows:
+        item = {"id": row[0], "type": row[1], "person_name": row[2], "title": row[3]}
+        try:
+            await _fire_calendar_notification(item)
+            with _db_lock:
+                _db_conn.execute(  # type: ignore[union-attr]
+                    "INSERT OR IGNORE INTO notification_log (event_id, notified_at) VALUES (?, ?)",
+                    (item["id"], datetime.now(_JST).isoformat()),
+                )
+                _db_conn.commit()  # type: ignore[union-attr]
+        except Exception as e:
+            logger.error("Calendar notification failed: item_id=%s error=%s", item["id"], e)
+
+
+async def _calendar_notification_loop() -> None:
+    logger.info("Calendar notification loop started: check_interval=%ds", CALENDAR_NOTIFY_CHECK_INTERVAL)
+    while True:
+        await asyncio.sleep(CALENDAR_NOTIFY_CHECK_INTERVAL)
+        try:
+            await _check_calendar_notifications()
+        except Exception as e:
+            logger.error("Calendar notification loop error: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _http_client, _main_loop
@@ -562,6 +680,20 @@ async def lifespan(app: FastAPI):
     if slack_handler:
         asyncio.create_task(slack_handler.start_async())
         logger.info("Slack Socket Mode handler started")
+
+    if CALENDAR_ENABLED:
+        from calendar_sync import start_sync_thread
+        start_sync_thread(
+            _db_conn,
+            _db_lock,
+            GOOGLE_CREDENTIALS_FILE,
+            GOOGLE_TOKEN_DIR,
+            CALENDAR_SYNC_INTERVAL_MINUTES,
+            CALENDAR_DEFAULT_NOTIFY_MINUTES,
+            CALENDAR_SYNC_DAYS_AHEAD,
+        )
+        asyncio.create_task(_calendar_notification_loop())
+        logger.info("Calendar sync and notification started")
 
     yield
 
@@ -810,6 +942,99 @@ def debug_connectivity():
             results["tcp"][f"{host}:{port}"] = _tcp_check(host, port)
 
     return results
+
+
+@app.get("/debug/calendar-items")
+def debug_calendar_items():
+    """items テーブルの全レコードを返す（デバッグ用）。"""
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            """SELECT id, type, person_name, title, start_at, end_at, due_at,
+                      notify_at, all_day, status, synced_at
+               FROM items ORDER BY COALESCE(start_at, due_at) ASC"""
+        ).fetchall()
+    items = [
+        {
+            "id": r[0], "type": r[1], "person_name": r[2], "title": r[3],
+            "start_at": r[4], "end_at": r[5], "due_at": r[6],
+            "notify_at": r[7], "all_day": bool(r[8]), "status": r[9], "synced_at": r[10],
+        }
+        for r in rows
+    ]
+    return {"count": len(items), "items": items}
+
+
+class CalendarSourceCreate(BaseModel):
+    source_type: str
+    source_id: str
+    person_name: str
+    notify: bool = True
+    token_key: str = "default"
+    enabled: bool = True
+
+
+@app.get("/calendar/sources")
+def list_calendar_sources():
+    """登録済みカレンダー・タスクリスト一覧。"""
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT id, source_type, source_id, person_name, notify, token_key, enabled, created_at "
+            "FROM calendar_sources ORDER BY id"
+        ).fetchall()
+    return {
+        "count": len(rows),
+        "sources": [
+            {
+                "id": r[0], "source_type": r[1], "source_id": r[2],
+                "person_name": r[3], "notify": bool(r[4]), "token_key": r[5],
+                "enabled": bool(r[6]), "created_at": r[7],
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/calendar/sources", status_code=201)
+def create_calendar_source(req: CalendarSourceCreate):
+    """カレンダーまたはタスクリストを登録する。"""
+    if req.source_type not in ("calendar", "tasklist"):
+        raise HTTPException(status_code=422, detail="source_type は 'calendar' または 'tasklist' を指定してください")
+    now = datetime.now(_JST).isoformat()
+    try:
+        with _db_lock:
+            cursor = _db_conn.execute(  # type: ignore[union-attr]
+                """
+                INSERT INTO calendar_sources
+                    (source_type, source_id, person_name, notify, token_key, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (req.source_type, req.source_id, req.person_name, int(req.notify), req.token_key, int(req.enabled), now, now),
+            )
+            _db_conn.commit()  # type: ignore[union-attr]
+            row_id = cursor.lastrowid
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            raise HTTPException(status_code=409, detail=f"source_id '{req.source_id}' はすでに登録されています")
+        raise HTTPException(status_code=500, detail=str(e))
+    logger.info(
+        "Calendar source registered: id=%d type=%s source_id=%s person=%s token_key=%s",
+        row_id, req.source_type, req.source_id, req.person_name, req.token_key,
+    )
+    return {"id": row_id, "source_type": req.source_type, "source_id": req.source_id, "person_name": req.person_name}
+
+
+@app.delete("/calendar/sources/{source_id}")
+def delete_calendar_source(source_id: int):
+    """カレンダーソースの登録を削除する。"""
+    with _db_lock:
+        c = _db_conn.execute(  # type: ignore[union-attr]
+            "DELETE FROM calendar_sources WHERE id = ?", (source_id,)
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+    if c.rowcount == 0:
+        raise HTTPException(status_code=404, detail=f"id={source_id} は見つかりませんでした")
+    logger.info("Calendar source deleted: id=%d", source_id)
+    return {"deleted": source_id}
 
 
 @app.post("/speak")
