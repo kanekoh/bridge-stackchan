@@ -439,8 +439,40 @@ if __name__ == "__main__":
         conn.close()
         print(f"\n完了: カレンダー {cal_count}件 / タスクリスト {task_count}件 を登録しました")
 
+    elif "--check" in sys.argv:
+        import sqlite3 as _sqlite3
+        db_path = os.getenv("DB_PATH", "data/bridge.db")
+        if not os.path.exists(db_path):
+            print(f"DBが見つかりません: {db_path}")
+            sys.exit(1)
+
+        conn = _sqlite3.connect(db_path)
+        rows = conn.execute("""
+            SELECT type, person_name, title, start_at, due_at, notify_at, status
+            FROM items
+            WHERE status IN ('active', 'done', 'deleted')
+            ORDER BY COALESCE(start_at, due_at) ASC
+        """).fetchall()
+        conn.close()
+
+        if not rows:
+            print("予定・タスクはありません")
+        else:
+            print(f"{'種別':<8} {'名前':<6} {'タイトル':<24} {'開始/期日':<22} {'通知予定':<22} {'状態'}")
+            print("-" * 100)
+            for type_, person, title, start_at, due_at, notify_at, status in rows:
+                when = start_at or due_at or "-"
+                notify = notify_at or "-"
+                label = "イベント" if type_ == "event" else "タスク  "
+                print(f"{label:<8} {person:<6} {title[:22]:<24} {when[:19]:<22} {notify[:19]:<22} {status}")
+
     else:
         print("使い方:")
+        print()
+        print("  【認証・登録】")
         print("  python calendar_sync.py --auth [--key papa]                      # OAuth 認証")
-        print("  python calendar_sync.py --list [--key papa]                      # ID一覧を表示")
+        print("  python calendar_sync.py --list [--key papa]                      # カレンダー・タスクリスト ID 一覧")
         print("  python calendar_sync.py --register-all --key papa --person パパ  # 全件をDBに自動登録")
+        print()
+        print("  【確認】")
+        print("  python calendar_sync.py --check                                  # DB内の予定・タスク一覧")
