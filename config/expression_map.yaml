@@ -1,0 +1,34 @@
+# Stack-chan 表情 → VOICEVOX 話者ID マッピング
+#
+# voicevox_speaker: VOICEVOX の話者ID（整数）
+#   未設定の場合は環境変数 VOICEVOX_SPEAKER にフォールバックする。
+#   話者IDは VOICEVOX Engine の /speakers エンドポイントで確認できる。
+#
+# stackchan_expression: Stack-chan に送る表情名
+#   Stack-chan が対応している値: neutral / happy / sad / sleepy / angry / doubt
+#   省略した場合は表情の送信をしない（音声のみ）。
+
+expressions:
+  neutral:
+    voicevox_speaker: 3
+    stackchan_expression: neutral
+
+  happy:
+    voicevox_speaker: 1
+    stackchan_expression: happy
+
+  sad:
+    voicevox_speaker: 76
+    stackchan_expression: sad
+
+  sleepy:
+    voicevox_speaker: 75
+    stackchan_expression: sleepy
+
+  angry:
+    voicevox_speaker: 7
+    stackchan_expression: angry
+
+  doubt:
+    voicevox_speaker: 3
+    stackchan_expression: doubt

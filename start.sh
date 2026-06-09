@@ -17,7 +17,7 @@ if podman ps -aq -f name="$CONTAINER_NAME" | grep -q .; then
   podman rm "$CONTAINER_NAME"
 fi
 
-mkdir -p data secrets
+mkdir -p data secrets config
 
 echo "Starting container: $CONTAINER_NAME"
 podman run -d \
@@ -27,6 +27,7 @@ podman run -d \
   -p "${PORT}:8000" \
   -v "$(pwd)/data:/app/data:Z" \
   -v "$(pwd)/secrets:/app/secrets:Z" \
+  -v "$(pwd)/config:/app/config:Z" \
   "$IMAGE_NAME"
 
 echo "Started. Logs: podman logs -f $CONTAINER_NAME"

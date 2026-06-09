@@ -16,6 +16,7 @@ from datetime import datetime, timezone, timedelta
 import httpx
 import openai
 import paho.mqtt.client as mqtt
+import yaml
 from fastapi import FastAPI, Form, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -81,11 +82,50 @@ CALENDAR_SYNC_DAYS_AHEAD = int(os.getenv("CALENDAR_SYNC_DAYS_AHEAD", "7"))
 CALENDAR_NOTIFY_CHECK_INTERVAL = int(os.getenv("CALENDAR_NOTIFY_CHECK_INTERVAL", "60"))
 CALENDAR_NOTIFY_GRACE_MINUTES = int(os.getenv("CALENDAR_NOTIFY_GRACE_MINUTES", "60"))
 
+EXPRESSION_MAP_FILE = os.getenv("EXPRESSION_MAP_FILE", "config/expression_map.yaml")
+
 # Slack (Socket Mode — 両方設定されている場合のみ有効)
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN", "")
 
 _JST = timezone(timedelta(hours=9))
+
+_KNOWN_EXPRESSIONS = {"neutral", "happy", "sad", "sleepy", "angry", "doubt"}
+
+def _load_expression_map(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return data.get("expressions", {})
+    except FileNotFoundError:
+        logging.getLogger(__name__).warning("expression_map not found: %s — using defaults", path)
+        return {}
+
+_expression_map: dict = _load_expression_map(EXPRESSION_MAP_FILE)
+
+
+def _parse_expression(reply: str) -> tuple[str, str]:
+    """Split LLM reply into (expression, clean_text).
+
+    The LLM is instructed to put one of the known expression labels on the first
+    line and the actual message on subsequent lines.  If the first line is not a
+    known label we fall back to "neutral" and keep the full reply as text.
+    """
+    lines = reply.split("\n", 1)
+    first = lines[0].strip().lower()
+    if first in _KNOWN_EXPRESSIONS:
+        text = lines[1].strip() if len(lines) > 1 else ""
+        return first, text
+    return "neutral", reply.strip()
+
+
+def _resolve_expression(expression: str) -> tuple[int, str]:
+    """Return (voicevox_speaker_id, stackchan_expression) from expression_map."""
+    entry = _expression_map.get(expression, {})
+    speaker = entry.get("voicevox_speaker", VOICEVOX_SPEAKER)
+    stackchan_expr = entry.get("stackchan_expression", expression)
+    return int(speaker), stackchan_expr
+
 
 _STACKCHAN_SYSTEM_PROMPT = """\
 あなたはStack-chan（スタックちゃん）という超かわいいアシスタントロボットです。
@@ -103,7 +143,14 @@ _STACKCHAN_SYSTEM_PROMPT = """\
 利用者について:
 - 家族みんなが使うシステムです
 - 特定の一人に対応しすぎないようにする
-- 誰にでも分かりやすく、親しみやすい表現を心がける\
+- 誰にでも分かりやすく、親しみやすい表現を心がける
+
+返答フォーマット:
+- 必ず最初の1行に感情ラベルだけを出力し、2行目以降に本文を書く
+- 感情ラベルは次の6種類からひとつ選ぶ: neutral / happy / sad / sleepy / angry / doubt
+- 例（1行目が感情ラベル、2行目が本文）:
+  happy
+  スイミング、明日の16時からだよ！たのしみだね。\
 """
 
 _openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -486,11 +533,13 @@ async def _fire_timer(info: _TimerInfo) -> None:
         message = f"{info.label}の時間だよ！"
 
     # MQTT で発話（常に実行）
+    expression, clean_message = _parse_expression(message)
+    speaker_id, stackchan_expr = _resolve_expression(expression)
     try:
-        audio_url, streaming_url = await resolve_audio_url(message)
+        audio_url, streaming_url = await resolve_audio_url(clean_message, speaker_id)
         req_id = str(uuid.uuid4())
-        publish_speak(audio_url, streaming_url, message, "timer", "normal", req_id)
-        logger.info("Timer fired: timer_id=%s label=%s message=%s", info.timer_id, info.label, message[:60])
+        publish_speak(audio_url, streaming_url, clean_message, "timer", "normal", req_id, stackchan_expr)
+        logger.info("Timer fired: timer_id=%s label=%s expression=%s message=%s", info.timer_id, info.label, expression, clean_message[:60])
     except Exception as e:
         logger.error("Timer speak error: timer_id=%s error=%s", info.timer_id, e)
         return
@@ -500,7 +549,7 @@ async def _fire_timer(info: _TimerInfo) -> None:
         try:
             await _slack_app.client.chat_postMessage(
                 channel=info.slack_channel,
-                text=f"⏰ タイマー「{info.label}」が発火しました：「{message}」",
+                text=f"⏰ タイマー「{info.label}」が発火しました：「{clean_message}」",
             )
             logger.info("Timer Slack notified: channel=%s", info.slack_channel)
         except Exception as e:
@@ -689,10 +738,12 @@ async def _fire_calendar_notification(item: dict) -> None:
     except Exception as e:
         logger.error("Calendar notification LLM error: item_id=%s error=%s", item["id"], e)
         message = f"{person}、{title}の時間だよ！"
-    audio_url, streaming_url = await resolve_audio_url(message)
+    expression, clean_message = _parse_expression(message)
+    speaker_id, stackchan_expr = _resolve_expression(expression)
+    audio_url, streaming_url = await resolve_audio_url(clean_message, speaker_id)
     req_id = str(uuid.uuid4())
-    publish_speak(audio_url, streaming_url, message, "calendar", "normal", req_id)
-    logger.info("Calendar notification sent: item_id=%s message=%s", item["id"], message[:60])
+    publish_speak(audio_url, streaming_url, clean_message, "calendar", "normal", req_id, stackchan_expr)
+    logger.info("Calendar notification sent: item_id=%s expression=%s message=%s", item["id"], expression, clean_message[:60])
 
 
 async def _check_calendar_notifications() -> None:
@@ -868,13 +919,13 @@ class SpeakRequest(BaseModel):
     request_id: str | None = None
 
 
-async def get_audio_url_web(text: str) -> tuple[str, str | None]:
+async def get_audio_url_web(text: str, speaker_id: int | None = None) -> tuple[str, str | None]:
     """Get MP3 URLs from VOICEVOX Web高速版 (api.tts.quest) without downloading.
     Returns (mp3DownloadUrl, mp3StreamingUrl).
     """
     resp = await _http_client.get(
         f"{VOICEVOX_URL}/synthesis",
-        params={"speaker": VOICEVOX_SPEAKER, "text": text, "key": VOICEVOX_API_KEY},
+        params={"speaker": speaker_id if speaker_id is not None else VOICEVOX_SPEAKER, "text": text, "key": VOICEVOX_API_KEY},
     )
     resp.raise_for_status()
     data = resp.json()
@@ -889,12 +940,12 @@ async def get_audio_url_web(text: str) -> tuple[str, str | None]:
     return mp3_url, data.get("mp3StreamingUrl")
 
 
-async def resolve_audio_url(text: str) -> tuple[str, str | None]:
+async def resolve_audio_url(text: str, speaker_id: int | None = None) -> tuple[str, str | None]:
     """Return (audioUrl, audioStreamingUrl) for the given text."""
-    return await get_audio_url_web(text)
+    return await get_audio_url_web(text, speaker_id)
 
 
-def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, source: str, priority: str, request_id: str) -> None:
+def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, source: str, priority: str, request_id: str, expression: str = "neutral") -> None:
     """Publish MQTT speak event to Stack-chan."""
     topic = f"stackchan/{MQTT_DEVICE_ID}/speak"
     msg: dict = {
@@ -904,6 +955,7 @@ def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, so
         "source": source,
         "priority": priority,
         "requestId": request_id,
+        "expression": expression,
     }
     if audio_streaming_url:
         msg["audioStreamingUrl"] = audio_streaming_url
@@ -1511,7 +1563,8 @@ async def _slack_handle_mention(event: dict, say) -> None:
         await say(_classify_api_error(e) or "ごめんね、うまく考えられなかったよ〜 もう一度試してみて！")
         return
 
-    await say(reply)
+    _, clean_reply = _parse_expression(reply)
+    await say(clean_reply)
 
 
 async def _slack_handle_dm(event: dict, say) -> None:
@@ -1541,7 +1594,8 @@ async def _slack_handle_dm(event: dict, say) -> None:
         await say(_classify_api_error(e) or "ごめんね、うまく考えられなかったよ〜 もう一度試してみて！")
         return
 
-    await say(reply)
+    _, clean_reply = _parse_expression(reply)
+    await say(clean_reply)
 
 
 async def _slack_handle_speak(ack, body: dict, respond) -> None:
@@ -1568,23 +1622,25 @@ async def _slack_handle_speak(ack, body: dict, respond) -> None:
         await respond("ごめん、うまく変換できなかったよ。もう一度試してね！")
         return
 
+    expression, clean_reply = _parse_expression(reply)
+    speaker_id, stackchan_expr = _resolve_expression(expression)
     try:
-        audio_url, streaming_url = await resolve_audio_url(reply)
+        audio_url, streaming_url = await resolve_audio_url(clean_reply, speaker_id)
         req_id = str(uuid.uuid4())
         # ACK が publish_speak より先に届いても取りこぼさないよう、先に event を登録する
         _pending_acks[req_id] = asyncio.Event()
-        publish_speak(audio_url, streaming_url, reply, "slack", "normal", req_id)
+        publish_speak(audio_url, streaming_url, clean_reply, "slack", "normal", req_id, stackchan_expr)
     except Exception as e:
         _pending_acks.pop(req_id, None)
         logger.error("Slack /speak speak error: %s", e)
-        await respond(f"音声の送信に失敗したよ。テキストはこれ：「{reply}」")
+        await respond(f"音声の送信に失敗したよ。テキストはこれ：「{clean_reply}」")
         return
 
     ack_ok = await wait_for_ack(req_id)
     if ack_ok:
-        await respond(f"話すよ！「{reply}」", response_type="in_channel")
+        await respond(f"話すよ！「{clean_reply}」", response_type="in_channel")
     else:
-        await respond(f"⚠️ スタックちゃんから応答がなかったよ。届いてないかも。「{reply}」", response_type="in_channel")
+        await respond(f"⚠️ スタックちゃんから応答がなかったよ。届いてないかも。「{clean_reply}」", response_type="in_channel")
 
 
 _DURATION_RE = re.compile(
@@ -1772,28 +1828,31 @@ async def ingest_audio(
             except Exception as speak_e:
                 logger.error("LLM error fallback speak failed: %s", speak_e)
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
-    logger.info("LLM reply: backend=%s request_id=%s text=%s", LLM_BACKEND, req_id, reply[:80])
+    expression, clean_reply = _parse_expression(reply)
+    speaker_id, stackchan_expr = _resolve_expression(expression)
+    logger.info("LLM reply: backend=%s request_id=%s expression=%s text=%s", LLM_BACKEND, req_id, expression, clean_reply[:80])
 
     try:
-        audio_url, audio_streaming_url = await resolve_audio_url(reply)
+        audio_url, audio_streaming_url = await resolve_audio_url(clean_reply, speaker_id)
     except Exception as e:
         logger.error("VOICEVOX error: %s", e)
         raise HTTPException(status_code=502, detail=f"VOICEVOX error: {e}")
 
     if mode == "async":
         try:
-            publish_speak(audio_url, audio_streaming_url, reply, source, priority, req_id)
+            publish_speak(audio_url, audio_streaming_url, clean_reply, source, priority, req_id, stackchan_expr)
         except Exception as e:
             logger.error("MQTT error: %s", e)
             raise HTTPException(status_code=502, detail=f"MQTT error: {e}")
-        return {"requestId": req_id}
+        return {"requestId": req_id, "expression": stackchan_expr}
 
     # sync: return full result in response body without MQTT
     resp: dict = {
         "requestId": req_id,
         "transcript": transcript,
         "speaker": speaker,
-        "reply": reply,
+        "reply": clean_reply,
+        "expression": stackchan_expr,
         "audioUrl": audio_url,
     }
     if audio_streaming_url:
