@@ -413,6 +413,37 @@ _TIMER_TOOLS = [
     },
 ]
 
+_CALENDAR_TOOLS = [
+    {
+        "type": "function",
+        "name": "get_upcoming_items",
+        "description": (
+            "DBに保存されたGoogleカレンダーの予定・タスクを取得する。"
+            "「次の予定は？」「今日の予定は？」「しおりのタスクは？」などの質問に答えるために使う。"
+            "取得した結果をもとに、自分の言葉で答えること。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "person": {
+                    "type": "string",
+                    "description": "絞り込む人の名前（例: しおり、パパ）。省略すると全員分を返す",
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["all", "event", "task"],
+                    "description": "取得する種別。省略時は all（予定とタスク両方）",
+                },
+                "days": {
+                    "type": "integer",
+                    "description": "何日先まで取得するか（1〜14、省略時は3）",
+                },
+            },
+            "required": [],
+        },
+    },
+]
+
 # ON_DEMAND モード時のみ Pass 1 のツール一覧に追加される。
 # LLM がこれを呼ぶと notify_context に enable_web_search フラグが立ち、
 # 次のループで本物の web_search_preview に差し替えられる。
@@ -528,6 +559,44 @@ def _register_timer(
     return timer_id
 
 
+def _tool_get_upcoming_items(args: dict) -> dict:
+    days = min(max(int(args.get("days", 3)), 1), 14)
+    person = args.get("person")
+    type_ = args.get("type", "all")
+
+    now = datetime.now(_JST)
+    until = now + timedelta(days=days)
+
+    params: list = [now.isoformat(), until.isoformat()]
+    where = ["status = 'active'", "COALESCE(start_at, due_at) >= ?", "COALESCE(start_at, due_at) <= ?"]
+    if person:
+        where.append("person_name = ?")
+        params.append(person)
+    if type_ != "all":
+        where.append("type = ?")
+        params.append(type_)
+
+    sql = f"SELECT type, person_name, title, start_at, due_at, all_day FROM items WHERE {' AND '.join(where)} ORDER BY COALESCE(start_at, due_at) ASC LIMIT 20"
+
+    with _db_lock:
+        rows = _db_conn.execute(sql, params).fetchall()  # type: ignore[union-attr]
+
+    items = []
+    for row_type, row_person, title, start_at, due_at, all_day in rows:
+        entry: dict = {
+            "type": "イベント" if row_type == "event" else "タスク",
+            "person": row_person,
+            "title": title,
+        }
+        when = start_at or due_at
+        if when:
+            entry["when"] = when[:10] if all_day else when[:16].replace("T", " ")
+        items.append(entry)
+
+    logger.info("Tool get_upcoming_items: days=%d person=%s type=%s count=%d", days, person, type_, len(items))
+    return {"status": "ok", "count": len(items), "items": items}
+
+
 async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
     """Execute a named tool and return the raw result dict (protocol-agnostic)."""
     if name == "set_timer":
@@ -565,6 +634,8 @@ async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
             "message": "Web検索が有効になりました。次のターンで検索を実行して回答してください。",
             "query": query,
         }
+    if name == "get_upcoming_items":
+        return _tool_get_upcoming_items(args)
     logger.warning("Unknown function call: name=%s", name)
     return {"status": "error", "message": f"Unknown function: {name}"}
 
@@ -1153,6 +1224,8 @@ class OpenClawResponsesBackend:
         if system_prompt_append:
             instructions_parts.append(system_prompt_append)
         tools = list(_TIMER_TOOLS) if use_functions else []
+        if use_functions and CALENDAR_ENABLED:
+            tools.extend(_CALENDAR_TOOLS)
 
         logger.info(
             "OpenClaw request: url=%s model=%s session_key=%s",
@@ -1237,6 +1310,8 @@ class OpenAIResponsesBackend:
             )
 
         tools = list(_TIMER_TOOLS) if (use_functions and not DISABLE_TOOLS) else []
+        if use_functions and CALENDAR_ENABLED and not DISABLE_TOOLS:
+            tools.extend(_CALENDAR_TOOLS)
         if OPENAI_RESPONSES_WEB_SEARCH and not DISABLE_TOOLS:
             if OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
                 tools.append(_REQUEST_WEB_SEARCH_TOOL)
