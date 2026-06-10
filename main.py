@@ -866,11 +866,19 @@ class _MqttConnection:
             try:
                 data = json.loads(message.payload)
                 req_id = data.get("id")
+                logger.info(
+                    "MQTT ACK on_message: topic=%s req_id=%s status=%s main_loop=%s",
+                    message.topic, req_id, data.get("status"), _main_loop is not None,
+                )
                 if req_id and _main_loop:
                     event = _pending_acks.get(req_id)
+                    logger.info(
+                        "MQTT ACK lookup: req_id=%s event_found=%s pending_keys=%s",
+                        req_id, event is not None, list(_pending_acks.keys()),
+                    )
                     if event:
                         _main_loop.call_soon_threadsafe(event.set)
-                        logger.info("MQTT ACK received: requestId=%s", req_id)
+                        logger.info("MQTT ACK dispatched: requestId=%s", req_id)
             except Exception as e:
                 logger.warning("MQTT ACK parse error: %s", e)
 
