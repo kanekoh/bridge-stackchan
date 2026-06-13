@@ -1639,8 +1639,9 @@ class OpenClawResponsesBackend:
         }
         if OPENCLAW_GATEWAY_TOKEN:
             headers["Authorization"] = f"Bearer {OPENCLAW_GATEWAY_TOKEN}"
-        if OPENCLAW_SESSION_KEY:
-            headers["x-openclaw-session-key"] = OPENCLAW_SESSION_KEY
+        effective_session = session_key or OPENCLAW_SESSION_KEY
+        if effective_session:
+            headers["x-openclaw-session-key"] = effective_session
 
         user_input: str | list = f"[話者: {speaker}] {text}" if speaker else text
         instructions_parts = [_build_datetime_context()]
@@ -1924,13 +1925,16 @@ async def _slack_handle_mention(event: dict, say) -> None:
         return
 
     channel = event["channel"]
+    user = event.get("user", "")
     session_key = f"slack:channel:{channel}"
-    _record_slack_user(event.get("user", ""))
-    logger.info("Slack mention: channel=%s text=%s", channel, text[:60])
+    _record_slack_user(user)
+    sender_name = _resolve_display_name(user, "")
+    logger.info("Slack mention: channel=%s sender=%s text=%s", channel, sender_name or "(unknown)", text[:60])
 
     try:
         reply = await chat_with_llm(
             text,
+            speaker=sender_name or None,
             session_key=session_key,
             notify_context={"session_key": session_key, "slack_channel": channel},
         )
@@ -1958,11 +1962,13 @@ async def _slack_handle_dm(event: dict, say) -> None:
     user = event["user"]
     session_key = f"slack:dm:{user}"
     _record_slack_user(user)
-    logger.info("Slack DM: user=%s text=%s", user, text[:60])
+    sender_name = _resolve_display_name(user, "")
+    logger.info("Slack DM: user=%s sender=%s text=%s", user, sender_name or "(unknown)", text[:60])
 
     try:
         reply = await chat_with_llm(
             text,
+            speaker=sender_name or None,
             session_key=session_key,
             notify_context={"session_key": session_key, "slack_channel": channel},
         )
@@ -2155,8 +2161,9 @@ async def _slack_handle_speak(ack, body: dict, respond) -> None:
     channel_id = body.get("channel_id", "")
     user_id = body.get("user_id", "")
     sender_name = _resolve_display_name(user_id, body.get("user_name") or "だれか")
-    session_key = f"slack:speak:{channel_id}"
-    logger.info("Slack /speak: channel=%s sender=%s text=%s", channel_id, sender_name, text[:60])
+    # ingest-audio と同じセッションを共有することで、音声会話と Slack /speak の記憶が繋がる
+    session_key = MQTT_DEVICE_ID
+    logger.info("Slack /speak: channel=%s sender=%s session=%s text=%s", channel_id, sender_name, session_key, text[:60])
 
     try:
         # /speak は「みんなへの発信」なので、依頼者への返答にならないよう指示を加える
