@@ -41,7 +41,7 @@ def build_services(credentials_file: str, token_file: str):
                 f"実行してください: python calendar_sync.py --auth [--key <key>]"
             )
 
-    return build("calendar", "v3", credentials=creds), build("tasks", "v1", credentials=creds)
+    return build("calendar", "v3", credentials=creds, cache_discovery=False), build("tasks", "v1", credentials=creds, cache_discovery=False)
 
 
 def _parse_google_datetime(dt_str: str | None) -> datetime | None:
