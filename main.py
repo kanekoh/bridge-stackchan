@@ -52,6 +52,7 @@ OPENCLAW_MAX_OUTPUT_TOKENS: int | None = int(_raw) if _raw.strip() else None
 SPEAKER_ID_URL = os.getenv("SPEAKER_ID_URL", "")
 SPEAKER_ID_API_KEY = os.getenv("SPEAKER_ID_API_KEY", "")
 SPEAKER_ID_THRESHOLD = float(os.getenv("SPEAKER_ID_THRESHOLD", "0.75"))
+SPEAKER_ID_BROWSER_URL = os.getenv("SPEAKER_ID_BROWSER_URL", "")  # ブラウザからアクセスする URL（例: http://raspberrypi:8082）
 STT_MODEL = os.getenv("STT_MODEL", "whisper-1")
 
 # LLM バックエンド切り替え
@@ -106,19 +107,22 @@ def _load_expression_map(path: str) -> dict:
 _expression_map: dict = _load_expression_map(EXPRESSION_MAP_FILE)
 
 
-def _parse_expression(reply: str) -> tuple[str, str]:
+def _parse_expression(reply: str, default: str = "neutral") -> tuple[str, str]:
     """Split LLM reply into (expression, clean_text).
 
     The LLM is instructed to put one of the known expression labels on the first
     line and the actual message on subsequent lines.  If the first line is not a
-    known label we fall back to "neutral" and keep the full reply as text.
+    known label, or is "neutral" (treated as "no specific emotion"), we fall back
+    to `default` (unknown labels are normalised to "neutral").
     """
     lines = reply.split("\n", 1)
     first = lines[0].strip().lower()
+    safe_default = default if default in _KNOWN_EXPRESSIONS else "neutral"
     if first in _KNOWN_EXPRESSIONS:
         text = lines[1].strip() if len(lines) > 1 else ""
-        return first, text
-    return "neutral", reply.strip()
+        expr = first if first != "neutral" else safe_default
+        return expr, text
+    return safe_default, reply.strip()
 
 
 def _resolve_expression(expression: str) -> tuple[int, str]:
@@ -294,6 +298,13 @@ def _init_db() -> None:
         )
     """)
     _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS slack_seen_users (
             slack_user_id  TEXT PRIMARY KEY,
             slack_name     TEXT,
@@ -312,6 +323,28 @@ def _init_db() -> None:
     """)
     _db_conn.commit()
     logger.info("DB initialized: path=%s", DB_PATH)
+
+
+def _get_setting(key: str, default: str = "") -> str:
+    """DB の app_settings から設定値を取得する。なければ default を返す。"""
+    if not _db_conn:
+        return default
+    with _db_lock:
+        row = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT value FROM app_settings WHERE key = ?", (key,)
+        ).fetchone()
+    return row[0] if row else default
+
+
+def _set_setting(key: str, value: str) -> None:
+    now = datetime.now(_JST).isoformat()
+    with _db_lock:
+        _db_conn.execute(  # type: ignore[union-attr]
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value, now),
+        )
+        _db_conn.commit()
 
 
 def _get_all_family_members() -> list[dict]:
@@ -965,6 +998,14 @@ app = FastAPI(title="Bridge API", version="0.1.0", lifespan=lifespan)
 _templates = Jinja2Templates(directory="templates")
 
 
+def _ui_context(request: Request, **extra) -> dict:
+    """全テンプレートに渡す共通コンテキスト。"""
+    return {
+        "speaker_id_browser_url": _get_setting("speaker_id_browser_url", SPEAKER_ID_BROWSER_URL),
+        **extra,
+    }
+
+
 def _build_mqtt_client() -> mqtt.Client:
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     if MQTT_USERNAME:
@@ -1142,17 +1183,22 @@ async def ui_index():
 
 @app.get("/ui/members", response_class=HTMLResponse)
 async def ui_members(request: Request):
-    return _templates.TemplateResponse(request=request, name="members.html")
+    return _templates.TemplateResponse(request=request, name="members.html", context=_ui_context(request))
 
 
 @app.get("/ui/messages", response_class=HTMLResponse)
 async def ui_messages(request: Request):
-    return _templates.TemplateResponse(request=request, name="messages.html")
+    return _templates.TemplateResponse(request=request, name="messages.html", context=_ui_context(request))
 
 
 @app.get("/ui/test", response_class=HTMLResponse)
 async def ui_test(request: Request):
-    return _templates.TemplateResponse(request=request, name="test.html")
+    return _templates.TemplateResponse(request=request, name="test.html", context=_ui_context(request))
+
+
+@app.get("/ui/settings", response_class=HTMLResponse)
+async def ui_settings(request: Request):
+    return _templates.TemplateResponse(request=request, name="settings.html", context=_ui_context(request))
 
 
 # ── REST API (family members) ────────────────────────────────────────────────
@@ -1232,6 +1278,61 @@ def api_list_messages(status: str = "all"):
 def api_delete_message(message_id: int):
     with _db_lock:
         _db_conn.execute("DELETE FROM messages WHERE id=?", (message_id,))  # type: ignore[union-attr]
+        _db_conn.commit()
+
+
+# ── REST API (settings) ───────────────────────────────────────────────────────
+
+_EDITABLE_SETTINGS = {
+    "speaker_id_browser_url": {
+        "label": "Speaker-ID ブラウザ向け URL",
+        "description": "ブラウザから話者登録・テストページにアクセスする URL（例: http://raspberrypi:8082）",
+        "env_fallback": lambda: SPEAKER_ID_BROWSER_URL,
+    },
+    "speaker_id_url": {
+        "label": "Speaker-ID サーバー URL（内部）",
+        "description": "bridge サーバーが話者識別 API を呼ぶ際の URL（例: http://localhost:8082）",
+        "env_fallback": lambda: SPEAKER_ID_URL,
+    },
+    "speaker_id_threshold": {
+        "label": "話者識別スコアしきい値",
+        "description": "この値以上のスコアで話者を確定（0〜1、デフォルト 0.75）",
+        "env_fallback": lambda: str(SPEAKER_ID_THRESHOLD),
+    },
+}
+
+
+@app.get("/api/settings")
+def api_get_settings():
+    result = []
+    for key, meta in _EDITABLE_SETTINGS.items():
+        db_value = _get_setting(key, "")
+        result.append({
+            "key": key,
+            "label": meta["label"],
+            "description": meta["description"],
+            "value": db_value,
+            "env_default": meta["env_fallback"](),
+            "effective": db_value or meta["env_fallback"](),
+        })
+    return result
+
+
+@app.put("/api/settings/{key}")
+def api_update_setting(key: str, value: str = Form(...)):
+    if key not in _EDITABLE_SETTINGS:
+        raise HTTPException(status_code=404, detail=f"設定キー '{key}' は存在しません")
+    _set_setting(key, value.strip())
+    return {"key": key, "value": value.strip()}
+
+
+@app.delete("/api/settings/{key}", status_code=204)
+def api_reset_setting(key: str):
+    """DB の上書き値を削除して env のデフォルトに戻す。"""
+    if key not in _EDITABLE_SETTINGS:
+        raise HTTPException(status_code=404, detail=f"設定キー '{key}' は存在しません")
+    with _db_lock:
+        _db_conn.execute("DELETE FROM app_settings WHERE key=?", (key,))  # type: ignore[union-attr]
         _db_conn.commit()
 
 
@@ -2051,16 +2152,27 @@ async def _slack_handle_speak(ack, body: dict, respond) -> None:
         await respond("話す内容を入力してください。例: `/speak おはようございます`")
         return
 
-    logger.info("Slack /speak: channel=%s text=%s", body.get("channel_id"), text[:60])
+    channel_id = body.get("channel_id", "")
+    user_id = body.get("user_id", "")
+    sender_name = _resolve_display_name(user_id, body.get("user_name") or "だれか")
+    session_key = f"slack:speak:{channel_id}"
+    logger.info("Slack /speak: channel=%s sender=%s text=%s", channel_id, sender_name, text[:60])
 
     try:
         # /speak は「みんなへの発信」なので、依頼者への返答にならないよう指示を加える
+        # 送信者名を LLM に渡すことで「パパが〜って言ってたよ」のような表現が可能になる
         speak_instruction = (
-            "以下はスタックちゃんがその場にいる人に向けて話す内容の原文です。"
-            "この内容をスタックちゃんらしい口調に変換してください。"
-            "依頼した人への返答や呼びかけにはしないでください。"
+            f"{sender_name}から家族全員へのメッセージです。"
+            "以下の内容をスタックちゃんらしい口調で読み上げてください。"
+            "特定の個人への呼びかけにはせず、その場にいる全員に向けて話してください。"
         )
-        reply = await chat_with_llm(text, system_prompt_append=speak_instruction, use_functions=False)
+        reply = await chat_with_llm(
+            text,
+            system_prompt_append=speak_instruction,
+            session_key=session_key,
+            notify_context={"session_key": session_key, "slack_channel": channel_id},
+            use_functions=False,
+        )
     except Exception as e:
         logger.error("Slack /speak LLM error: %s", e)
         await respond("ごめん、うまく変換できなかったよ。もう一度試してね！")
@@ -2219,6 +2331,7 @@ async def ingest_audio(
     request_id: str = Form(""),
     mode: str = Form("async"),
     session_key: str = Form(""),
+    expression: str = Form(""),
 ):
     """
     Receive audio from Stack-chan, run STT, call LLM, then deliver the reply.
@@ -2230,6 +2343,7 @@ async def ingest_audio(
     - request_id: caller-supplied idempotency key (auto-generated if omitted)
     - mode: "async" (default) publishes via MQTT; "sync" returns audioUrl in the response body only
     - session_key: conversation session identifier (defaults to MQTT_DEVICE_ID)
+    - expression: default expression used when LLM reply does not include one (default: "neutral")
     """
     if not OPENAI_API_KEY:
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
@@ -2276,7 +2390,7 @@ async def ingest_audio(
             except Exception as speak_e:
                 logger.error("LLM error fallback speak failed: %s", speak_e)
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
-    expression, clean_reply = _parse_expression(reply)
+    expression, clean_reply = _parse_expression(reply, default=expression)
     speaker_id, stackchan_expr = _resolve_expression(expression)
     logger.info("LLM reply: backend=%s request_id=%s expression=%s text=%s", LLM_BACKEND, req_id, expression, clean_reply[:80])
 

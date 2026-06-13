@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}設定{% endblock %}
+{% block nav_settings %}font-semibold text-blue-600{% endblock %}
+
+{% block content %}
+<h1 class="text-xl font-bold text-gray-800 mb-2">設定</h1>
+<p class="text-sm text-gray-500 mb-6">DB に保存された値が優先されます。空欄にリセットすると環境変数のデフォルト値が使われます。</p>
+
+<div id="settingsList" class="space-y-4"></div>
+
+<p id="saveMsg" class="text-sm mt-4"></p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  async function loadSettings() {
+    const settings = await apiFetch('/api/settings');
+    const list = document.getElementById('settingsList');
+    list.innerHTML = settings.map(s => `
+      <div class="bg-white rounded-lg border border-gray-200 p-5">
+        <div class="flex items-start justify-between gap-4">
+          <div class="flex-1 min-w-0">
+            <p class="font-medium text-sm text-gray-800">${esc(s.label)}</p>
+            <p class="text-xs text-gray-400 mt-0.5">${esc(s.description)}</p>
+            ${s.env_default ? `<p class="text-xs text-gray-400 mt-1">環境変数デフォルト: <code class="bg-gray-100 px-1 rounded">${esc(s.env_default)}</code></p>` : ''}
+          </div>
+        </div>
+        <div class="flex gap-2 mt-3">
+          <input id="input-${esc(s.key)}" value="${esc(s.value)}" placeholder="${esc(s.env_default || '未設定')}"
+            class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400 font-mono">
+          <button onclick="saveSetting('${esc(s.key)}')" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded whitespace-nowrap">保存</button>
+          <button onclick="resetSetting('${esc(s.key)}')" class="text-gray-400 hover:text-gray-600 text-sm px-3 py-2 whitespace-nowrap" title="デフォルトに戻す">↺</button>
+        </div>
+      </div>`).join('');
+  }
+
+  async function saveSetting(key) {
+    const input = document.getElementById('input-' + key);
+    const msg = document.getElementById('saveMsg');
+    const fd = new FormData();
+    fd.append('value', input.value);
+    try {
+      await apiFetch(`/api/settings/${key}`, { method: 'PUT', body: fd });
+      msg.textContent = '✅ 保存しました（反映は次回ページ読み込み時）';
+      msg.className = 'text-sm mt-4 text-green-600';
+    } catch(err) {
+      msg.textContent = '❌ ' + err.message;
+      msg.className = 'text-sm mt-4 text-red-500';
+    }
+  }
+
+  async function resetSetting(key) {
+    if (!confirm('この設定をリセットして環境変数のデフォルトに戻しますか？')) return;
+    const msg = document.getElementById('saveMsg');
+    try {
+      await apiFetch(`/api/settings/${key}`, { method: 'DELETE' });
+      msg.textContent = '✅ リセットしました';
+      msg.className = 'text-sm mt-4 text-green-600';
+      loadSettings();
+    } catch(err) {
+      msg.textContent = '❌ ' + err.message;
+      msg.className = 'text-sm mt-4 text-red-500';
+    }
+  }
+
+  function esc(s) {
+    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  loadSettings();
+</script>
+{% endblock %}

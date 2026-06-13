@@ -7,11 +7,17 @@
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-gray-50 min-h-screen">
-  <nav class="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-6">
+  <nav class="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-6 flex-wrap">
     <span class="font-bold text-gray-800">🤖 スタックちゃん</span>
     <a href="/ui/members" class="text-sm {% block nav_members %}text-gray-500 hover:text-gray-800{% endblock %}">家族メンバー</a>
     <a href="/ui/messages" class="text-sm {% block nav_messages %}text-gray-500 hover:text-gray-800{% endblock %}">伝言</a>
     <a href="/ui/test" class="text-sm {% block nav_test %}text-gray-500 hover:text-gray-800{% endblock %}">テスト</a>
+    {% if speaker_id_browser_url %}
+    <span class="text-gray-200">|</span>
+    <a href="{{ speaker_id_browser_url }}/" target="_blank" class="text-sm text-gray-500 hover:text-gray-800">話者登録 ↗</a>
+    <a href="{{ speaker_id_browser_url }}/test.html" target="_blank" class="text-sm text-gray-500 hover:text-gray-800">話者テスト ↗</a>
+    {% endif %}
+    <a href="/ui/settings" class="text-sm ml-auto {% block nav_settings %}text-gray-400 hover:text-gray-700{% endblock %}">⚙ 設定</a>
   </nav>
   <main class="max-w-3xl mx-auto px-4 py-8">
     {% block content %}{% endblock %}
