@@ -855,6 +855,8 @@ class _MqttConnection:
 
         def on_connect(client, userdata, flags, reason_code, properties):
             if reason_code == 0:
+                client.subscribe("stackchan/ack", qos=MQTT_QOS)
+                logger.info("MQTT (re)connected, subscribed to stackchan/ack qos=%d", MQTT_QOS)
                 connected.set()
             else:
                 logger.error("MQTT connect failed: reason_code=%s", reason_code)
@@ -892,8 +894,6 @@ class _MqttConnection:
             client.loop_stop()
             raise RuntimeError("MQTT connection timeout (no CONNACK within 10s)")
 
-        client.subscribe("stackchan/ack", qos=MQTT_QOS)
-        logger.info("MQTT connected (persistent), subscribed to stackchan/ack qos=%d", MQTT_QOS)
         return client
 
     def publish(self, topic: str, payload: str) -> None:
