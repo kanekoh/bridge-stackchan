@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}伝言{% endblock %}
+{% block nav_messages %}font-semibold text-blue-600{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-xl font-bold text-gray-800">伝言</h1>
+  <div class="flex gap-2">
+    <button onclick="loadMessages('pending')" id="tab-pending" class="text-sm px-3 py-1 rounded-full bg-blue-500 text-white">未読</button>
+    <button onclick="loadMessages('delivered')" id="tab-delivered" class="text-sm px-3 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200">既読</button>
+    <button onclick="loadMessages('all')" id="tab-all" class="text-sm px-3 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200">すべて</button>
+  </div>
+</div>
+
+<div id="messageList" class="space-y-3"></div>
+<p id="emptyMsg" class="text-center text-gray-400 py-12 hidden">伝言がありません</p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let currentStatus = 'pending';
+
+  async function loadMessages(status) {
+    currentStatus = status;
+    ['pending','delivered','all'].forEach(s => {
+      const btn = document.getElementById('tab-' + s);
+      btn.className = s === status
+        ? 'text-sm px-3 py-1 rounded-full bg-blue-500 text-white'
+        : 'text-sm px-3 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200';
+    });
+    const msgs = await apiFetch('/api/messages?status=' + status);
+    const list = document.getElementById('messageList');
+    const empty = document.getElementById('emptyMsg');
+    if (!msgs.length) { list.innerHTML = ''; empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+    list.innerHTML = msgs.map(m => {
+      const delivered = m.delivered_at
+        ? `<span class="text-xs text-green-600">✅ ${fmtDate(m.delivered_at)}</span>`
+        : `<span class="text-xs text-orange-500">⏳ 未読</span>`;
+      const recipient = m.recipient ? `<span class="bg-blue-50 text-blue-700 text-xs px-2 py-0.5 rounded-full">${esc(m.recipient)}へ</span>` : '';
+      return `
+        <div class="bg-white rounded-lg border border-gray-200 p-4">
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 mb-2 flex-wrap">
+                <span class="font-medium text-sm">${esc(m.sender)}</span>
+                ${recipient}
+                ${delivered}
+              </div>
+              <p class="text-gray-700 text-sm leading-relaxed">${esc(m.content)}</p>
+              <p class="text-xs text-gray-400 mt-2">${fmtDate(m.created_at)}</p>
+            </div>
+            <button onclick="deleteMessage(${m.id})" class="text-gray-300 hover:text-red-400 text-lg flex-shrink-0">×</button>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  async function deleteMessage(id) {
+    if (!confirm('この伝言を削除しますか？')) return;
+    try { await apiFetch('/api/messages/' + id, { method: 'DELETE' }); loadMessages(currentStatus); }
+    catch(err) { alert('削除失敗: ' + err.message); }
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return d.toLocaleDateString('ja-JP') + ' ' + d.toLocaleTimeString('ja-JP', {hour:'2-digit', minute:'2-digit'});
+  }
+
+  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  loadMessages('pending');
+</script>
+{% endblock %}

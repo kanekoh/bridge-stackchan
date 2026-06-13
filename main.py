@@ -17,7 +17,9 @@ import httpx
 import openai
 import paho.mqtt.client as mqtt
 import yaml
-from fastapi import FastAPI, Form, HTTPException, UploadFile, File
+from fastapi import FastAPI, Form, HTTPException, Request, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -264,14 +266,19 @@ def _init_db() -> None:
     """)
     _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender       TEXT NOT NULL,
-            recipient    TEXT,
-            content      TEXT NOT NULL,
-            created_at   TEXT NOT NULL,
-            delivered_at TEXT
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender          TEXT NOT NULL,
+            sender_slack_id TEXT,
+            recipient       TEXT,
+            content         TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            delivered_at    TEXT
         )
     """)
+    try:
+        _db_conn.execute("ALTER TABLE messages ADD COLUMN sender_slack_id TEXT")
+    except sqlite3.OperationalError:
+        pass  # already exists
     _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS calendar_sources (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -286,15 +293,68 @@ def _init_db() -> None:
             UNIQUE(source_type, source_id)
         )
     """)
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS slack_seen_users (
+            slack_user_id  TEXT PRIMARY KEY,
+            slack_name     TEXT,
+            last_seen_at   TEXT NOT NULL
+        )
+    """)
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS family_members (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            name           TEXT NOT NULL UNIQUE,
+            slack_user_id  TEXT,
+            mac_address    TEXT,
+            created_at     TEXT NOT NULL,
+            updated_at     TEXT NOT NULL
+        )
+    """)
     _db_conn.commit()
     logger.info("DB initialized: path=%s", DB_PATH)
 
 
-def _save_message(sender: str, recipient: str | None, content: str) -> int:
+def _get_all_family_members() -> list[dict]:
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT id, name, slack_user_id, mac_address, created_at, updated_at FROM family_members ORDER BY name",
+        ).fetchall()
+    return [{"id": r[0], "name": r[1], "slack_user_id": r[2], "mac_address": r[3], "created_at": r[4], "updated_at": r[5]} for r in rows]
+
+
+def _resolve_display_name(slack_user_id: str | None, fallback: str) -> str:
+    """Slack user_id から family_members の呼び名を引く。未登録なら fallback を返す。"""
+    if not slack_user_id or not _db_conn:
+        return fallback
+    with _db_lock:
+        row = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT name FROM family_members WHERE slack_user_id = ?", (slack_user_id,)
+        ).fetchone()
+    return row[0] if row else fallback
+
+
+def _record_slack_user(user_id: str, slack_name: str | None = None) -> None:
+    """Slack ユーザーを slack_seen_users に upsert する。名前は判明した時点で更新。"""
+    if not user_id or not _db_conn:
+        return
+    now = datetime.now(_JST).isoformat()
+    with _db_lock:
+        _db_conn.execute(  # type: ignore[union-attr]
+            """INSERT INTO slack_seen_users (slack_user_id, slack_name, last_seen_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(slack_user_id) DO UPDATE SET
+                 slack_name   = COALESCE(excluded.slack_name, slack_name),
+                 last_seen_at = excluded.last_seen_at""",
+            (user_id, slack_name, now),
+        )
+        _db_conn.commit()
+
+
+def _save_message(sender: str, recipient: str | None, content: str, sender_slack_id: str | None = None) -> int:
     with _db_lock:
         cur = _db_conn.execute(  # type: ignore[union-attr]
-            "INSERT INTO messages (sender, recipient, content, created_at) VALUES (?, ?, ?, ?)",
-            (sender, recipient, content, datetime.now(_JST).isoformat()),
+            "INSERT INTO messages (sender, sender_slack_id, recipient, content, created_at) VALUES (?, ?, ?, ?, ?)",
+            (sender, sender_slack_id, recipient, content, datetime.now(_JST).isoformat()),
         )
         _db_conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
@@ -303,9 +363,9 @@ def _save_message(sender: str, recipient: str | None, content: str) -> int:
 def _fetch_pending_messages() -> list[dict]:
     with _db_lock:
         rows = _db_conn.execute(  # type: ignore[union-attr]
-            "SELECT id, sender, recipient, content FROM messages WHERE delivered_at IS NULL ORDER BY created_at",
+            "SELECT id, sender, sender_slack_id, recipient, content FROM messages WHERE delivered_at IS NULL ORDER BY created_at",
         ).fetchall()
-    return [{"id": r[0], "sender": r[1], "recipient": r[2], "content": r[3]} for r in rows]
+    return [{"id": r[0], "sender": r[1], "sender_slack_id": r[2], "recipient": r[3], "content": r[4]} for r in rows]
 
 
 def _mark_message_delivered(message_id: int) -> None:
@@ -528,6 +588,25 @@ _CALENDAR_TOOLS = [
     },
 ]
 
+_MESSAGE_TOOLS = [
+    {
+        "type": "function",
+        "name": "get_pending_messages",
+        "description": (
+            "家族から預かっている未読の伝言を取得する。"
+            "「伝言ある？」「なにか連絡来てた？」「メッセージある？」「なにか残ってた？」"
+            "などの質問に答えるために使う。"
+            "直接聞かれた場合は「そういえば」などの前置きは不要。"
+            "「○○からの伝言があるよ！」と直接伝えること。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+]
+
 # ON_DEMAND モード時のみ Pass 1 のツール一覧に追加される。
 # LLM がこれを呼ぶと notify_context に enable_web_search フラグが立ち、
 # 次のループで本物の web_search_preview に差し替えられる。
@@ -722,6 +801,22 @@ async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
         }
     if name == "get_upcoming_items":
         return _tool_get_upcoming_items(args)
+    if name == "get_pending_messages":
+        messages = _fetch_pending_messages()
+        for msg in messages:
+            _mark_message_delivered(msg["id"])
+            asyncio.create_task(_notify_message_delivered(msg))
+        logger.info("Function call get_pending_messages: count=%d", len(messages))
+        if not messages:
+            return {"status": "ok", "count": 0, "messages": []}
+        return {
+            "status": "ok",
+            "count": len(messages),
+            "messages": [
+                {"sender": m["sender"], "recipient": m["recipient"], "content": m["content"]}
+                for m in messages
+            ],
+        }
     logger.warning("Unknown function call: name=%s", name)
     return {"status": "error", "message": f"Unknown function: {name}"}
 
@@ -867,6 +962,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Bridge API", version="0.1.0", lifespan=lifespan)
+_templates = Jinja2Templates(directory="templates")
 
 
 def _build_mqtt_client() -> mqtt.Client:
@@ -1035,6 +1131,135 @@ def _tcp_check(host: str, port: int, timeout: float = 3.0) -> str:
             return "ok"
     except Exception as e:
         return f"{type(e).__name__}: {e}"
+
+
+# ── Web UI ───────────────────────────────────────────────────────────────────
+
+@app.get("/ui", response_class=HTMLResponse)
+async def ui_index():
+    return RedirectResponse(url="/ui/members")
+
+
+@app.get("/ui/members", response_class=HTMLResponse)
+async def ui_members(request: Request):
+    return _templates.TemplateResponse("members.html", {"request": request})
+
+
+@app.get("/ui/messages", response_class=HTMLResponse)
+async def ui_messages(request: Request):
+    return _templates.TemplateResponse("messages.html", {"request": request})
+
+
+@app.get("/ui/test", response_class=HTMLResponse)
+async def ui_test(request: Request):
+    return _templates.TemplateResponse("test.html", {"request": request})
+
+
+# ── REST API (family members) ────────────────────────────────────────────────
+
+@app.get("/api/family-members")
+def api_list_members():
+    return _get_all_family_members()
+
+
+@app.post("/api/family-members", status_code=201)
+def api_create_member(name: str = Form(...), slack_user_id: str = Form(""), mac_address: str = Form("")):
+    now = datetime.now(_JST).isoformat()
+    try:
+        with _db_lock:
+            cur = _db_conn.execute(  # type: ignore[union-attr]
+                "INSERT INTO family_members (name, slack_user_id, mac_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (name.strip(), slack_user_id.strip() or None, mac_address.strip() or None, now, now),
+            )
+            _db_conn.commit()
+        return {"id": cur.lastrowid, "name": name}
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail=f"名前 '{name}' はすでに登録されています")
+
+
+@app.put("/api/family-members/{member_id}")
+def api_update_member(member_id: int, name: str = Form(...), slack_user_id: str = Form(""), mac_address: str = Form("")):
+    now = datetime.now(_JST).isoformat()
+    with _db_lock:
+        cur = _db_conn.execute(  # type: ignore[union-attr]
+            "UPDATE family_members SET name=?, slack_user_id=?, mac_address=?, updated_at=? WHERE id=?",
+            (name.strip(), slack_user_id.strip() or None, mac_address.strip() or None, now, member_id),
+        )
+        _db_conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="メンバーが見つかりません")
+    return {"id": member_id, "name": name}
+
+
+@app.get("/api/slack-seen-users")
+def api_slack_seen_users():
+    """family_members に未登録の Slack ユーザー一覧を返す。"""
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            """SELECT s.slack_user_id, s.slack_name, s.last_seen_at
+               FROM slack_seen_users s
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM family_members f WHERE f.slack_user_id = s.slack_user_id
+               )
+               ORDER BY s.last_seen_at DESC""",
+        ).fetchall()
+    return [{"slack_user_id": r[0], "slack_name": r[1], "last_seen_at": r[2]} for r in rows]
+
+
+@app.delete("/api/family-members/{member_id}", status_code=204)
+def api_delete_member(member_id: int):
+    with _db_lock:
+        cur = _db_conn.execute("DELETE FROM family_members WHERE id=?", (member_id,))  # type: ignore[union-attr]
+        _db_conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="メンバーが見つかりません")
+
+
+# ── REST API (messages) ───────────────────────────────────────────────────────
+
+@app.get("/api/messages")
+def api_list_messages(status: str = "all"):
+    where = "" if status == "all" else ("WHERE delivered_at IS NULL" if status == "pending" else "WHERE delivered_at IS NOT NULL")
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            f"SELECT id, sender, sender_slack_id, recipient, content, created_at, delivered_at FROM messages {where} ORDER BY created_at DESC LIMIT 100"
+        ).fetchall()
+    return [{"id": r[0], "sender": r[1], "sender_slack_id": r[2], "recipient": r[3],
+             "content": r[4], "created_at": r[5], "delivered_at": r[6]} for r in rows]
+
+
+@app.delete("/api/messages/{message_id}", status_code=204)
+def api_delete_message(message_id: int):
+    with _db_lock:
+        _db_conn.execute("DELETE FROM messages WHERE id=?", (message_id,))  # type: ignore[union-attr]
+        _db_conn.commit()
+
+
+# ── REST API (UI test) ────────────────────────────────────────────────────────
+
+class UiSpeakRequest(BaseModel):
+    text: str
+    mode: str = "say"  # "say" | "speak"
+
+
+@app.post("/api/ui/speak")
+async def api_ui_speak(req: UiSpeakRequest):
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="text は必須です")
+    if req.mode == "speak":
+        speak_instruction = (
+            "以下はスタックちゃんがその場にいる人に向けて話す内容の原文です。"
+            "この内容をスタックちゃんらしい口調に変換してください。"
+        )
+        reply = await chat_with_llm(req.text, system_prompt_append=speak_instruction, use_functions=False)
+        expression, text_to_say = _parse_expression(reply)
+    else:
+        expression, text_to_say = "neutral", req.text
+    speaker_id, stackchan_expr = _resolve_expression(expression)
+    audio_url, streaming_url = await resolve_audio_url(text_to_say, speaker_id)
+    req_id = str(uuid.uuid4())
+    publish_speak(audio_url, streaming_url, text_to_say, "ui", "normal", req_id, stackchan_expr)
+    return {"requestId": req_id, "text": text_to_say, "expression": stackchan_expr}
 
 
 @app.get("/healthz")
@@ -1323,6 +1548,8 @@ class OpenClawResponsesBackend:
         tools = list(_TIMER_TOOLS) if use_functions else []
         if use_functions and CALENDAR_ENABLED:
             tools.extend(_CALENDAR_TOOLS)
+        if use_functions:
+            tools.extend(_MESSAGE_TOOLS)
 
         logger.info(
             "OpenClaw request: url=%s model=%s session_key=%s",
@@ -1409,6 +1636,8 @@ class OpenAIResponsesBackend:
         tools = list(_TIMER_TOOLS) if (use_functions and not DISABLE_TOOLS) else []
         if use_functions and CALENDAR_ENABLED and not DISABLE_TOOLS:
             tools.extend(_CALENDAR_TOOLS)
+        if use_functions and not DISABLE_TOOLS:
+            tools.extend(_MESSAGE_TOOLS)
         if OPENAI_RESPONSES_WEB_SEARCH and not DISABLE_TOOLS:
             if OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
                 tools.append(_REQUEST_WEB_SEARCH_TOOL)
@@ -1595,6 +1824,7 @@ async def _slack_handle_mention(event: dict, say) -> None:
 
     channel = event["channel"]
     session_key = f"slack:channel:{channel}"
+    _record_slack_user(event.get("user", ""))
     logger.info("Slack mention: channel=%s text=%s", channel, text[:60])
 
     try:
@@ -1626,6 +1856,7 @@ async def _slack_handle_dm(event: dict, say) -> None:
     channel = event.get("channel", "")
     user = event["user"]
     session_key = f"slack:dm:{user}"
+    _record_slack_user(user)
     logger.info("Slack DM: user=%s text=%s", user, text[:60])
 
     try:
@@ -1681,6 +1912,7 @@ async def _deliver_pending_messages_after(main_reply: str, source: str, priority
             publish_speak(audio_url, streaming_url, clean_reply, source, priority, req_id, stackchan_expr)
             _mark_message_delivered(msg["id"])
             logger.info("Message delivered: id=%d text=%s", msg["id"], clean_reply[:60])
+            await _notify_message_delivered(msg)
         except Exception as e:
             logger.error("Message delivery speak error: msg_id=%d %s", msg["id"], e)
 
@@ -1688,9 +1920,34 @@ async def _deliver_pending_messages_after(main_reply: str, source: str, priority
             await asyncio.sleep(3.0)
 
 
+async def _notify_message_delivered(msg: dict) -> None:
+    """伝言が読まれたことを送信者に Slack DM で通知する。"""
+    slack_id = msg.get("sender_slack_id")
+    if not slack_id or not _slack_app:
+        return
+    recipient_part = f"{msg['recipient']}への" if msg["recipient"] else ""
+    try:
+        await _slack_app.client.chat_postMessage(
+            channel=slack_id,
+            text=f"📬 {recipient_part}伝言が届いたよ！「{msg['content']}」",
+        )
+        logger.info("Delivery notification sent: msg_id=%d slack_id=%s", msg["id"], slack_id)
+    except Exception as e:
+        logger.error("Delivery notification error: msg_id=%d %s", msg["id"], e)
+
+
+def _record_slack_user_from_body(body: dict) -> None:
+    """スラッシュコマンドの body から Slack ユーザーを記録する。"""
+    user_id = body.get("user_id", "")
+    user_name = body.get("user_name")
+    if user_id:
+        _record_slack_user(user_id, user_name)
+
+
 async def _slack_handle_say(ack, body: dict, respond) -> None:
     """/say コマンド: テキストを LLM 変換なしでそのまま VOICEVOX → MQTT 送信。"""
     await ack()
+    _record_slack_user_from_body(body)
 
     text = body.get("text", "").strip()
     if not text:
@@ -1716,6 +1973,37 @@ async def _slack_handle_say(ack, body: dict, respond) -> None:
         await respond(f"⚠️ スタックちゃんから応答がなかったよ。届いてないかも。「{text}」", response_type="in_channel")
 
 
+async def _slack_handle_register(ack, body: dict, respond) -> None:
+    """/register コマンド: 自分の Slack アカウントを家族メンバーとして登録する。
+    書式: /register <呼び名>
+    例:   /register パパ
+    """
+    await ack()
+    _record_slack_user_from_body(body)
+
+    name = body.get("text", "").strip()
+    if not name:
+        await respond("使い方: `/register <呼び名>`\n例: `/register パパ`")
+        return
+
+    user_id = body.get("user_id", "")
+    now = datetime.now(_JST).isoformat()
+    try:
+        with _db_lock:
+            _db_conn.execute(  # type: ignore[union-attr]
+                """INSERT INTO family_members (name, slack_user_id, created_at, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(name) DO UPDATE SET slack_user_id=excluded.slack_user_id, updated_at=excluded.updated_at""",
+                (name, user_id, now, now),
+            )
+            _db_conn.commit()
+        logger.info("Slack /register: user_id=%s name=%s", user_id, name)
+        await respond(f"✅ 「{name}」として登録したよ！")
+    except Exception as e:
+        logger.error("Slack /register error: %s", e)
+        await respond("登録に失敗したよ。もう一度試してみて！")
+
+
 async def _slack_handle_tell(ack, body: dict, respond) -> None:
     """/tell コマンド: 伝言を DB に保存。次回の会話時にスタックちゃんが読み上げる。
     書式: /tell [宛名] <内容>
@@ -1723,6 +2011,7 @@ async def _slack_handle_tell(ack, body: dict, respond) -> None:
           /tell 夕食は7時です（宛名なしは全員向け）
     """
     await ack()
+    _record_slack_user_from_body(body)
 
     text = body.get("text", "").strip()
     if not text:
@@ -1740,8 +2029,10 @@ async def _slack_handle_tell(ack, body: dict, respond) -> None:
     else:
         recipient, content = None, text
 
-    sender = body.get("user_name") or body.get("user_id", "だれか")
-    msg_id = _save_message(sender, recipient, content)
+    sender_slack_id = body.get("user_id")
+    fallback_name = body.get("user_name") or sender_slack_id or "だれか"
+    sender = _resolve_display_name(sender_slack_id, fallback_name)
+    msg_id = _save_message(sender, recipient, content, sender_slack_id)
     logger.info("Message saved: id=%d sender=%s recipient=%s", msg_id, sender, recipient)
 
     if recipient:
@@ -1753,6 +2044,7 @@ async def _slack_handle_tell(ack, body: dict, respond) -> None:
 async def _slack_handle_speak(ack, body: dict, respond) -> None:
     """/speak コマンド: テキストをスタックちゃん口調に変換して MQTT 送信。"""
     await ack()
+    _record_slack_user_from_body(body)
 
     text = body.get("text", "").strip()
     if not text:
@@ -1846,6 +2138,7 @@ async def _slack_handle_timer(ack, body: dict, respond) -> None:
       ラベル例: 宿題確認, おやつの時間
     """
     await ack()
+    _record_slack_user_from_body(body)
 
     raw = body.get("text", "").strip()
     if not raw:
@@ -1908,6 +2201,7 @@ def _setup_slack():
     _slack_app = AsyncApp(token=SLACK_BOT_TOKEN)
     _slack_app.event("app_mention")(_slack_handle_mention)
     _slack_app.event("message")(_slack_handle_dm)
+    _slack_app.command("/register")(_slack_handle_register)
     _slack_app.command("/say")(_slack_handle_say)
     _slack_app.command("/speak")(_slack_handle_speak)
     _slack_app.command("/tell")(_slack_handle_tell)

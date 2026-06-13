@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}スタックちゃん管理{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <nav class="bg-white border-b border-gray-200 px-4 py-3 flex items-center gap-6">
+    <span class="font-bold text-gray-800">🤖 スタックちゃん</span>
+    <a href="/ui/members" class="text-sm {% block nav_members %}text-gray-500 hover:text-gray-800{% endblock %}">家族メンバー</a>
+    <a href="/ui/messages" class="text-sm {% block nav_messages %}text-gray-500 hover:text-gray-800{% endblock %}">伝言</a>
+    <a href="/ui/test" class="text-sm {% block nav_test %}text-gray-500 hover:text-gray-800{% endblock %}">テスト</a>
+  </nav>
+  <main class="max-w-3xl mx-auto px-4 py-8">
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    async function apiFetch(url, options = {}) {
+      const res = await fetch(url, options);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || res.statusText);
+      }
+      return res.status === 204 ? null : res.json();
+    }
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

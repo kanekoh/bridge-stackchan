@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}家族メンバー{% endblock %}
+{% block nav_members %}font-semibold text-blue-600{% endblock %}
+
+{% block content %}
+<h1 class="text-xl font-bold text-gray-800 mb-6">家族メンバー</h1>
+
+<!-- 追加フォーム -->
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+  <h2 class="font-semibold text-gray-700 mb-4">メンバーを追加</h2>
+  <form id="addForm" class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">呼び名 <span class="text-red-500">*</span></label>
+      <input name="name" required placeholder="例: しおり" class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+    </div>
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">Slack ユーザーID</label>
+      <input name="slack_user_id" placeholder="例: U08XXXXXXX" class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+    </div>
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">MAC アドレス</label>
+      <input name="mac_address" placeholder="例: aa:bb:cc:dd:ee:ff" class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+    </div>
+    <div class="sm:col-span-3 flex gap-2">
+      <button type="submit" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">追加</button>
+      <span id="addMsg" class="text-sm self-center"></span>
+    </div>
+  </form>
+</div>
+
+<!-- メンバー一覧 -->
+<div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+  <table class="w-full text-sm">
+    <thead class="bg-gray-50 border-b border-gray-200">
+      <tr>
+        <th class="text-left px-4 py-3 text-gray-600 font-medium">呼び名</th>
+        <th class="text-left px-4 py-3 text-gray-600 font-medium">Slack ID</th>
+        <th class="text-left px-4 py-3 text-gray-600 font-medium">MAC アドレス</th>
+        <th class="px-4 py-3"></th>
+      </tr>
+    </thead>
+    <tbody id="memberTable"></tbody>
+  </table>
+  <p id="emptyMsg" class="text-center text-gray-400 py-8 hidden">メンバーがいません</p>
+</div>
+
+<!-- 未登録候補 -->
+<div class="bg-amber-50 border border-amber-200 rounded-lg p-5 mb-6" id="candidateSection" style="display:none">
+  <h2 class="font-semibold text-amber-800 mb-3">📨 Slack でやりとりした未登録ユーザー</h2>
+  <div id="candidateList" class="space-y-2"></div>
+</div>
+
+<!-- 編集モーダル -->
+<div id="editModal" class="fixed inset-0 bg-black/40 flex items-center justify-center hidden z-50">
+  <div class="bg-white rounded-lg p-6 w-full max-w-md mx-4">
+    <h2 class="font-semibold text-gray-700 mb-4">メンバーを編集</h2>
+    <form id="editForm" class="grid gap-3">
+      <input type="hidden" name="id">
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">呼び名 <span class="text-red-500">*</span></label>
+        <input name="name" required class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">Slack ユーザーID</label>
+        <input name="slack_user_id" class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">MAC アドレス</label>
+        <input name="mac_address" class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+      </div>
+      <div class="flex gap-2 mt-1">
+        <button type="submit" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">保存</button>
+        <button type="button" onclick="closeModal()" class="text-gray-500 hover:text-gray-700 text-sm px-4 py-2">キャンセル</button>
+        <span id="editMsg" class="text-sm self-center"></span>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  async function loadMembers() {
+    const members = await apiFetch('/api/family-members');
+    const tbody = document.getElementById('memberTable');
+    const empty = document.getElementById('emptyMsg');
+    if (!members.length) { tbody.innerHTML = ''; empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+    tbody.innerHTML = members.map(m => `
+      <tr class="border-b border-gray-100 hover:bg-gray-50">
+        <td class="px-4 py-3 font-medium">${esc(m.name)}</td>
+        <td class="px-4 py-3 text-gray-500">${esc(m.slack_user_id || '—')}</td>
+        <td class="px-4 py-3 text-gray-500">${esc(m.mac_address || '—')}</td>
+        <td class="px-4 py-3 text-right">
+          <button onclick='openEdit(${JSON.stringify(m)})' class="text-blue-500 hover:text-blue-700 text-xs mr-3">編集</button>
+          <button onclick="deleteMember(${m.id}, '${esc(m.name)}')" class="text-red-400 hover:text-red-600 text-xs">削除</button>
+        </td>
+      </tr>`).join('');
+  }
+
+  document.getElementById('addForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const msg = document.getElementById('addMsg');
+    try {
+      await apiFetch('/api/family-members', { method: 'POST', body: fd });
+      msg.textContent = '✅ 追加しました'; msg.className = 'text-sm text-green-600 self-center';
+      e.target.reset(); loadMembers(); loadCandidates();
+    } catch(err) { msg.textContent = '❌ ' + err.message; msg.className = 'text-sm text-red-500 self-center'; }
+  });
+
+  function openEdit(m) {
+    const f = document.getElementById('editForm');
+    f.id.value = m.id; f.name.value = m.name;
+    f.slack_user_id.value = m.slack_user_id || '';
+    f.mac_address.value = m.mac_address || '';
+    document.getElementById('editMsg').textContent = '';
+    document.getElementById('editModal').classList.remove('hidden');
+  }
+  function closeModal() { document.getElementById('editModal').classList.add('hidden'); }
+
+  document.getElementById('editForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const id = fd.get('id');
+    const msg = document.getElementById('editMsg');
+    try {
+      await apiFetch(`/api/family-members/${id}`, { method: 'PUT', body: fd });
+      msg.textContent = '✅ 保存しました'; msg.className = 'text-sm text-green-600 self-center';
+      loadMembers(); setTimeout(closeModal, 800);
+    } catch(err) { msg.textContent = '❌ ' + err.message; msg.className = 'text-sm text-red-500 self-center'; }
+  });
+
+  async function deleteMember(id, name) {
+    if (!confirm(`「${name}」を削除しますか？`)) return;
+    try { await apiFetch(`/api/family-members/${id}`, { method: 'DELETE' }); loadMembers(); }
+    catch(err) { alert('削除失敗: ' + err.message); }
+  }
+
+  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  async function loadCandidates() {
+    const users = await apiFetch('/api/slack-seen-users');
+    const section = document.getElementById('candidateSection');
+    const list = document.getElementById('candidateList');
+    if (!users.length) { section.style.display = 'none'; return; }
+    section.style.display = '';
+    list.innerHTML = users.map(u => `
+      <div class="flex items-center gap-3 bg-white rounded px-3 py-2 text-sm">
+        <span class="text-gray-500 font-mono text-xs">${esc(u.slack_user_id)}</span>
+        <span class="text-gray-700">${esc(u.slack_name || '名前不明')}</span>
+        <span class="text-gray-400 text-xs ml-auto">${fmtDate(u.last_seen_at)}</span>
+        <button onclick='prefillAdd(${JSON.stringify(u)})' class="text-blue-500 hover:text-blue-700 text-xs whitespace-nowrap">登録する</button>
+      </div>`).join('');
+  }
+
+  function prefillAdd(u) {
+    const f = document.getElementById('addForm');
+    f.slack_user_id.value = u.slack_user_id;
+    f.name.value = u.slack_name || '';
+    f.name.focus();
+    f.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return d.toLocaleDateString('ja-JP') + ' ' + d.toLocaleTimeString('ja-JP', {hour:'2-digit', minute:'2-digit'});
+  }
+
+  loadMembers();
+  loadCandidates();
+</script>
+{% endblock %}
