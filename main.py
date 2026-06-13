@@ -1142,17 +1142,17 @@ async def ui_index():
 
 @app.get("/ui/members", response_class=HTMLResponse)
 async def ui_members(request: Request):
-    return _templates.TemplateResponse("members.html", {"request": request})
+    return _templates.TemplateResponse(request=request, name="members.html")
 
 
 @app.get("/ui/messages", response_class=HTMLResponse)
 async def ui_messages(request: Request):
-    return _templates.TemplateResponse("messages.html", {"request": request})
+    return _templates.TemplateResponse(request=request, name="messages.html")
 
 
 @app.get("/ui/test", response_class=HTMLResponse)
 async def ui_test(request: Request):
-    return _templates.TemplateResponse("test.html", {"request": request})
+    return _templates.TemplateResponse(request=request, name="test.html")
 
 
 # ── REST API (family members) ────────────────────────────────────────────────
