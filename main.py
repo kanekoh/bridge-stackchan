@@ -263,6 +263,16 @@ def _init_db() -> None:
         )
     """)
     _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender       TEXT NOT NULL,
+            recipient    TEXT,
+            content      TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            delivered_at TEXT
+        )
+    """)
+    _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS calendar_sources (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             source_type  TEXT NOT NULL CHECK(source_type IN ('calendar', 'tasklist')),
@@ -278,6 +288,33 @@ def _init_db() -> None:
     """)
     _db_conn.commit()
     logger.info("DB initialized: path=%s", DB_PATH)
+
+
+def _save_message(sender: str, recipient: str | None, content: str) -> int:
+    with _db_lock:
+        cur = _db_conn.execute(  # type: ignore[union-attr]
+            "INSERT INTO messages (sender, recipient, content, created_at) VALUES (?, ?, ?, ?)",
+            (sender, recipient, content, datetime.now(_JST).isoformat()),
+        )
+        _db_conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+
+def _fetch_pending_messages() -> list[dict]:
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT id, sender, recipient, content FROM messages WHERE delivered_at IS NULL ORDER BY created_at",
+        ).fetchall()
+    return [{"id": r[0], "sender": r[1], "recipient": r[2], "content": r[3]} for r in rows]
+
+
+def _mark_message_delivered(message_id: int) -> None:
+    with _db_lock:
+        _db_conn.execute(  # type: ignore[union-attr]
+            "UPDATE messages SET delivered_at = ? WHERE id = ?",
+            (datetime.now(_JST).isoformat(), message_id),
+        )
+        _db_conn.commit()
 
 
 def _get_previous_response_id(session_key: str) -> str | None:
@@ -1606,6 +1643,113 @@ async def _slack_handle_dm(event: dict, say) -> None:
     await say(clean_reply)
 
 
+async def _deliver_pending_messages_after(main_reply: str, source: str, priority: str) -> None:
+    """メイン返答の再生推定時間後に未読伝言を MQTT で届ける。
+    日本語の平均読み上げ速度 ~5.5文字/秒 + バッファ3秒で待機する。
+    """
+    wait_sec = len(main_reply) / 5.5 + 3.0
+    await asyncio.sleep(wait_sec)
+
+    messages = _fetch_pending_messages()
+    if not messages:
+        return
+
+    for msg in messages:
+        sender = msg["sender"]
+        recipient = msg["recipient"]
+        content = msg["content"]
+
+        recipient_part = f"（{recipient}への伝言）" if recipient else ""
+        prompt = (
+            f"以下の伝言{recipient_part}を、スタックちゃんとして読み上げてください。\n"
+            "必ず「そういえば」「あ、そうだ」「ちなみに」などの話題転換の言葉を文頭に入れてください。\n"
+            "自然な話し言葉で短くまとめてください。\n\n"
+            f"送り主: {sender}\n"
+            f"内容: {content}"
+        )
+        try:
+            reply = await chat_with_llm(prompt, system_prompt_append="", use_functions=False)
+        except Exception as e:
+            logger.error("Message delivery LLM error: msg_id=%d %s", msg["id"], e)
+            continue
+
+        expression, clean_reply = _parse_expression(reply)
+        speaker_id, stackchan_expr = _resolve_expression(expression)
+        try:
+            audio_url, streaming_url = await resolve_audio_url(clean_reply, speaker_id)
+            req_id = str(uuid.uuid4())
+            publish_speak(audio_url, streaming_url, clean_reply, source, priority, req_id, stackchan_expr)
+            _mark_message_delivered(msg["id"])
+            logger.info("Message delivered: id=%d text=%s", msg["id"], clean_reply[:60])
+        except Exception as e:
+            logger.error("Message delivery speak error: msg_id=%d %s", msg["id"], e)
+
+        if len(messages) > 1:
+            await asyncio.sleep(3.0)
+
+
+async def _slack_handle_say(ack, body: dict, respond) -> None:
+    """/say コマンド: テキストを LLM 変換なしでそのまま VOICEVOX → MQTT 送信。"""
+    await ack()
+
+    text = body.get("text", "").strip()
+    if not text:
+        await respond("読み上げる内容を入力してください。例: `/say おはようございます`")
+        return
+
+    logger.info("Slack /say: channel=%s text=%s", body.get("channel_id"), text[:60])
+    req_id = str(uuid.uuid4())
+    try:
+        audio_url, streaming_url = await resolve_audio_url(text)
+        _pending_acks[req_id] = asyncio.Event()
+        publish_speak(audio_url, streaming_url, text, "slack", "normal", req_id)
+    except Exception as e:
+        _pending_acks.pop(req_id, None)
+        logger.error("Slack /say error: %s", e)
+        await respond(f"音声の送信に失敗したよ。テキストはこれ：「{text}」")
+        return
+
+    ack_ok = await wait_for_ack(req_id)
+    if ack_ok:
+        await respond(f"話すよ！「{text}」", response_type="in_channel")
+    else:
+        await respond(f"⚠️ スタックちゃんから応答がなかったよ。届いてないかも。「{text}」", response_type="in_channel")
+
+
+async def _slack_handle_tell(ack, body: dict, respond) -> None:
+    """/tell コマンド: 伝言を DB に保存。次回の会話時にスタックちゃんが読み上げる。
+    書式: /tell [宛名] <内容>
+    例:   /tell しおり 明日の習い事は16時からだよ
+          /tell 夕食は7時です（宛名なしは全員向け）
+    """
+    await ack()
+
+    text = body.get("text", "").strip()
+    if not text:
+        await respond(
+            "使い方: `/tell [宛名] <内容>`\n"
+            "例: `/tell しおり 明日の習い事は16時からだよ`\n"
+            "　　`/tell 夕食は7時です`（宛名なしは全員向け）"
+        )
+        return
+
+    # 先頭トークンが6文字以内なら宛名とみなす（日本語の名前は概ね短い）
+    tokens = text.split(None, 1)
+    if len(tokens) == 2 and len(tokens[0]) <= 6:
+        recipient, content = tokens[0], tokens[1]
+    else:
+        recipient, content = None, text
+
+    sender = body.get("user_name") or body.get("user_id", "だれか")
+    msg_id = _save_message(sender, recipient, content)
+    logger.info("Message saved: id=%d sender=%s recipient=%s", msg_id, sender, recipient)
+
+    if recipient:
+        await respond(f"📬 {recipient}への伝言を預かったよ！次に話しかけてもらったときに伝えるね。")
+    else:
+        await respond(f"📬 みんなへの伝言を預かったよ！次に話しかけてもらったときに伝えるね。")
+
+
 async def _slack_handle_speak(ack, body: dict, respond) -> None:
     """/speak コマンド: テキストをスタックちゃん口調に変換して MQTT 送信。"""
     await ack()
@@ -1764,7 +1908,9 @@ def _setup_slack():
     _slack_app = AsyncApp(token=SLACK_BOT_TOKEN)
     _slack_app.event("app_mention")(_slack_handle_mention)
     _slack_app.event("message")(_slack_handle_dm)
+    _slack_app.command("/say")(_slack_handle_say)
     _slack_app.command("/speak")(_slack_handle_speak)
+    _slack_app.command("/tell")(_slack_handle_tell)
     _slack_app.command("/timer")(_slack_handle_timer)
 
     return AsyncSocketModeHandler(_slack_app, SLACK_APP_TOKEN)
@@ -1855,6 +2001,9 @@ async def ingest_audio(
         return {"requestId": req_id, "expression": stackchan_expr}
 
     # sync: return full result in response body without MQTT
+    # 未読伝言があれば、メイン音声の再生推定時間後に MQTT で届ける
+    asyncio.create_task(_deliver_pending_messages_after(clean_reply, source, priority))
+
     resp: dict = {
         "requestId": req_id,
         "transcript": transcript,
