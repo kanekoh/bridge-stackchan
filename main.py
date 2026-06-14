@@ -1981,7 +1981,7 @@ async def _slack_handle_dm(event: dict, say) -> None:
     await say(clean_reply)
 
 
-async def _deliver_pending_messages_after(main_reply: str, source: str, priority: str) -> None:
+async def _deliver_pending_messages_after(main_reply: str, source: str, priority: str, session_key: str = "") -> None:
     """メイン返答の再生推定時間後に未読伝言を MQTT で届ける。
     日本語の平均読み上げ速度 ~5.5文字/秒 + バッファ3秒で待機する。
     """
@@ -2006,7 +2006,13 @@ async def _deliver_pending_messages_after(main_reply: str, source: str, priority
             f"内容: {content}"
         )
         try:
-            reply = await chat_with_llm(prompt, system_prompt_append="", use_functions=False)
+            reply = await chat_with_llm(
+                prompt,
+                system_prompt_append="",
+                session_key=session_key,
+                notify_context={"session_key": session_key, "slack_channel": None},
+                use_functions=False,
+            )
         except Exception as e:
             logger.error("Message delivery LLM error: msg_id=%d %s", msg["id"], e)
             continue
@@ -2417,7 +2423,7 @@ async def ingest_audio(
 
     # sync: return full result in response body without MQTT
     # 未読伝言があれば、メイン音声の再生推定時間後に MQTT で届ける
-    asyncio.create_task(_deliver_pending_messages_after(clean_reply, source, priority))
+    asyncio.create_task(_deliver_pending_messages_after(clean_reply, source, priority, session_key=effective_session_key))
 
     resp: dict = {
         "requestId": req_id,
