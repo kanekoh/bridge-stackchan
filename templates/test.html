@@ -6,7 +6,7 @@
 <h1 class="text-xl font-bold text-gray-800 mb-4">スタックちゃんテスト</h1>
 
 <!-- 監視エリア情報 -->
-<div class="bg-gray-50 rounded-lg border border-gray-200 p-4 mb-6">
+<div class="bg-gray-50 rounded-lg border border-gray-200 p-4 mb-4">
   <div class="flex items-center justify-between mb-3">
     <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">現在の監視エリア</h2>
     <a href="/ui/settings" class="text-xs text-blue-500 hover:underline">設定を変更 →</a>
@@ -14,6 +14,16 @@
   <div id="coverage" class="grid grid-cols-1 gap-2 sm:grid-cols-3 text-xs">
     <p class="text-gray-400">読み込み中...</p>
   </div>
+</div>
+
+<!-- P2P WebSocket 状態 -->
+<div class="bg-gray-50 rounded-lg border border-gray-200 p-4 mb-6">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">P2P地震情報 WebSocket</h2>
+    <button onclick="loadWsStatus()" class="text-xs text-gray-400 hover:text-gray-600">↻ 更新</button>
+  </div>
+  <div id="wsStatus" class="text-xs text-gray-400">読み込み中...</div>
+  <div id="wsEvents" class="mt-3 space-y-1 max-h-48 overflow-y-auto"></div>
 </div>
 
 <div class="space-y-5">
@@ -222,6 +232,50 @@
     }
   }
 
+  // ── P2P WebSocket ステータス ────────────────────────────────
+  const ACTION_LABEL = {
+    'dispatch':      '→ 処理',
+    'skip:dup_memory': '無視（重複）',
+  };
+  const CODE_LABEL = { 551: '地震', 552: '津波', 554: 'EEW', 556: '南海トラフ' };
+
+  async function loadWsStatus() {
+    const statusEl = document.getElementById('wsStatus');
+    const eventsEl = document.getElementById('wsEvents');
+    try {
+      const d = await apiFetch('/api/debug/p2pquake/status');
+      if (!d.enabled) {
+        statusEl.textContent = '無効（P2PQUAKE_ENABLED=false）';
+        return;
+      }
+      const ws = d.ws;
+      const dot = ws.connected ? '🟢' : '🔴';
+      const since = ws.connected
+        ? `接続中 (${(ws.connected_at || '').slice(0,16).replace('T',' ')}〜)`
+        : `切断中 (再接続回数: ${ws.reconnect_count})`;
+      const last = ws.last_event_at
+        ? `最終受信: ${ws.last_event_at.slice(0,16).replace('T',' ')} code=${ws.last_event_code}`
+        : '受信なし';
+      statusEl.innerHTML = `<span class="font-medium">${dot} ${since}</span>　<span class="text-gray-400">${last}</span>`;
+
+      eventsEl.innerHTML = (d.recent_events || []).map(e => {
+        const t    = (e.time || '').slice(0,16).replace('T',' ');
+        const code = CODE_LABEL[e.code] || `code=${e.code}`;
+        const act  = ACTION_LABEL[e.action] || e.action;
+        const actColor = e.action === 'dispatch' ? 'text-blue-600' : 'text-gray-400';
+        return `<div class="flex gap-2 text-xs border-b border-gray-100 py-0.5">
+          <span class="text-gray-400 shrink-0">${t}</span>
+          <span class="font-medium shrink-0">${code}</span>
+          <span class="text-gray-500 truncate">${e.summary || ''}</span>
+          <span class="${actColor} shrink-0 ml-auto">${act}</span>
+        </div>`;
+      }).join('') || '<p class="text-gray-400 text-xs">受信履歴なし</p>';
+    } catch(e) {
+      statusEl.textContent = '❌ ' + e.message;
+    }
+  }
+
   loadCoverage();
+  loadWsStatus();
 </script>
 {% endblock %}

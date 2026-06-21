@@ -227,6 +227,19 @@ _active_timer_infos: dict[str, "_TimerInfo"] = {}  # list_timers で参照
 # Slack アプリ参照（_setup_slack で設定、タイマー発火時の通知に使用）
 _slack_app = None  # type: ignore
 
+# P2P地震情報 WebSocket 接続状態
+_p2pquake_ws_status: dict = {
+    "connected": False,
+    "connected_at": None,
+    "disconnected_at": None,
+    "reconnect_count": 0,
+    "last_event_at": None,
+    "last_event_code": None,
+    "last_event_id": None,
+}
+_p2pquake_recent_events: list[dict] = []  # 直近50件（受信 → フィルタ結果まで）
+_P2PQUAKE_EVENT_BUFFER = 50
+
 # ── SQLite ────────────────────────────────────────────────────────────────────
 
 _db_lock = threading.Lock()
@@ -1513,20 +1526,26 @@ async def _p2p_speak(text: str, source: str, priority: str) -> None:
 
 
 async def _handle_earthquake(data: dict) -> None:
-    if data.get("issue", {}).get("type") != "DetailScale":
-        return  # 速報段階はスキップ、確定詳細情報のみ処理
-
     earthquake_id = data["id"]
+    issue_type = data.get("issue", {}).get("type")
+
+    if issue_type != "DetailScale":
+        logger.info("earthquake skip: id=%s reason=not_detail_scale type=%s", earthquake_id, issue_type)
+        return
+
     if _eq_already_seen(earthquake_id):
+        logger.info("earthquake skip: id=%s reason=already_seen", earthquake_id)
         return
 
     local_scale = _get_local_scale(data)
     if local_scale is None:
-        logger.debug("earthquake: no shaking in location pref, skipping id=%s", earthquake_id)
+        pref = _get_setting("location_pref", "")
+        logger.info("earthquake skip: id=%s reason=no_observation_in_pref pref=%s", earthquake_id, pref)
         return
 
     min_scale = int(_get_setting("p2pquake_min_scale", str(P2PQUAKE_MIN_SCALE)))
     if local_scale < min_scale:
+        logger.info("earthquake skip: id=%s reason=below_min_scale local=%s min=%s", earthquake_id, local_scale, min_scale)
         return
 
     eq    = data["earthquake"]
@@ -1571,10 +1590,11 @@ async def _handle_tsunami(data: dict) -> None:
         asyncio.create_task(_tsunami_llm_comment(fixed_text, cancelled=True))
         return
 
+    areas_str    = _get_setting("p2pquake_tsunami_areas", ",".join(P2PQUAKE_TSUNAMI_TARGET_AREAS))
+    target_areas = set(a.strip() for a in areas_str.split(",") if a.strip())
     for area in data.get("areas", []):
-        areas_str = _get_setting("p2pquake_tsunami_areas", ",".join(P2PQUAKE_TSUNAMI_TARGET_AREAS))
-        target_areas = set(areas_str.split(","))
         if area["name"] not in target_areas:
+            logger.info("tsunami skip: id=%s area=%s reason=not_in_target", earthquake_id, area["name"])
             continue
 
         new_grade     = area["grade"]
@@ -1583,7 +1603,9 @@ async def _handle_tsunami(data: dict) -> None:
         current_order = _TSUNAMI_GRADE_ORDER.get(current_grade or "", 0)
 
         if new_order <= current_order:
-            continue  # 同グレードまたは格下げは通知しない
+            logger.info("tsunami skip: id=%s area=%s reason=not_escalating current=%s new=%s",
+                        earthquake_id, area["name"], current_grade, new_grade)
+            continue
 
         _save_tsunami_grade(area["name"], new_grade)
         grade_label = _TSUNAMI_GRADE_LABEL.get(new_grade, new_grade)
@@ -1652,6 +1674,19 @@ async def _unknown_p2p_llm(data: dict) -> None:
         logger.exception("unknown p2p LLM failed")
 
 
+def _p2pquake_log_event(code: int | None, eid: str, summary: str, action: str) -> None:
+    """受信イベントを即時ログ出力 + メモリバッファに積む。"""
+    now = datetime.now(_JST).isoformat()
+    logger.info("p2pquake recv: code=%s id=%s action=%s summary=%s", code, eid, action, summary)
+    entry = {"time": now, "code": code, "id": eid, "summary": summary, "action": action}
+    _p2pquake_recent_events.append(entry)
+    if len(_p2pquake_recent_events) > _P2PQUAKE_EVENT_BUFFER:
+        _p2pquake_recent_events.pop(0)
+    _p2pquake_ws_status["last_event_at"]   = now
+    _p2pquake_ws_status["last_event_code"] = code
+    _p2pquake_ws_status["last_event_id"]   = eid
+
+
 async def _p2pquake_ws_loop() -> None:
     backoff = 1
     seen_ids: set[str] = set()  # 再接続時の直近重複対策（メモリ内）
@@ -1660,20 +1695,47 @@ async def _p2pquake_ws_loop() -> None:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(P2PQUAKE_WS_URL) as ws:
+                    now = datetime.now(_JST).isoformat()
+                    _p2pquake_ws_status["connected"]      = True
+                    _p2pquake_ws_status["connected_at"]   = now
+                    _p2pquake_ws_status["disconnected_at"] = None
                     logger.info("P2P地震情報 WebSocket connected: %s", P2PQUAKE_WS_URL)
                     backoff = 1
+
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data = json.loads(msg.data)
                             eid  = data.get("id", "")
                             code = data.get("code")
 
+                            # 受信直後にサマリを作ってログ
+                            if code == 551:
+                                eq = data.get("earthquake", {})
+                                summary = (
+                                    f"{eq.get('hypocenter', {}).get('name', '?')} "
+                                    f"M{eq.get('hypocenter', {}).get('magnitude', '?')} "
+                                    f"最大{_scale_to_str(eq.get('maxScale', -1))} "
+                                    f"type={data.get('issue', {}).get('type', '?')}"
+                                )
+                            elif code == 552:
+                                areas = [a.get("name") for a in data.get("areas", [])]
+                                summary = f"cancelled={data.get('cancelled')} areas={areas}"
+                            elif code == 554:
+                                summary = "EEW"
+                            elif code == 556:
+                                summary = "南海トラフ臨時情報"
+                            else:
+                                summary = str(data)[:120]
+
                             if eid and eid in seen_ids:
+                                _p2pquake_log_event(code, eid, summary, "skip:dup_memory")
                                 continue
                             if eid:
                                 seen_ids.add(eid)
                                 if len(seen_ids) > 500:
                                     seen_ids.pop()
+
+                            _p2pquake_log_event(code, eid, summary, "dispatch")
 
                             if code == 551:
                                 asyncio.create_task(_handle_earthquake(data))
@@ -1684,7 +1746,6 @@ async def _p2pquake_ws_loop() -> None:
                             elif code == 556:
                                 asyncio.create_task(_handle_nankai(data))
                             else:
-                                logger.info("p2pquake: unknown code=%s id=%s", code, eid)
                                 asyncio.create_task(_unknown_p2p_llm(data))
 
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
@@ -1694,6 +1755,9 @@ async def _p2pquake_ws_loop() -> None:
         except Exception:
             logger.exception("p2pquake ws error, retry in %ds", backoff)
 
+        _p2pquake_ws_status["connected"]       = False
+        _p2pquake_ws_status["disconnected_at"] = datetime.now(_JST).isoformat()
+        _p2pquake_ws_status["reconnect_count"] += 1
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, 60)
 
@@ -2333,6 +2397,16 @@ def debug_connectivity():
             results["tcp"][f"{host}:{port}"] = _tcp_check(host, port)
 
     return results
+
+
+@app.get("/api/debug/p2pquake/status")
+def api_p2pquake_status():
+    """P2P地震情報 WebSocket の接続状態と直近受信イベントを返す。"""
+    return {
+        "enabled": P2PQUAKE_ENABLED,
+        "ws": dict(_p2pquake_ws_status),
+        "recent_events": list(reversed(_p2pquake_recent_events)),  # 新しい順
+    }
 
 
 @app.post("/api/debug/p2pquake")
