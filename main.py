@@ -1876,6 +1876,7 @@ _EDITABLE_SETTINGS = {
         "env_fallback": lambda: str(P2PQUAKE_MIN_SCALE),
         "type": "select",
         "options": [
+            {"value": "0",  "label": "すべて（テスト用）"},
             {"value": "10", "label": "震度1以上"},
             {"value": "20", "label": "震度2以上"},
             {"value": "30", "label": "震度3以上（推奨）"},
