@@ -2165,6 +2165,132 @@ async def debug_p2pquake(code: int = Query(551), force: bool = Query(False)):
     return {"ok": True, "code": code, "event_id": event_id, "force": force}
 
 
+# WMO 天気コード → 日本語説明
+_WMO_DESC: dict[int, str] = {
+    0: "快晴", 1: "晴れ", 2: "一部曇り", 3: "曇り",
+    45: "霧", 48: "着氷性の霧",
+    51: "霧雨（弱）", 53: "霧雨", 55: "霧雨（強）",
+    61: "小雨", 63: "雨", 65: "大雨",
+    71: "小雪", 73: "雪", 75: "大雪",
+    80: "にわか雨（弱）", 81: "にわか雨", 82: "にわか雨（強）",
+    95: "雷雨", 96: "雷雨（ひょう）", 99: "雷雨（大粒のひょう）",
+}
+
+
+@app.get("/api/debug/coverage")
+def api_debug_coverage():
+    """現在の設置場所から導出される監視エリアをまとめて返す（表示専用）。"""
+    lat   = _get_setting("location_lat", "")
+    lon   = _get_setting("location_lon", "")
+    pref  = _get_setting("location_pref", "")
+    title = _get_setting("location_title", "")
+    nationwide = _get_setting("p2pquake_nationwide", "false") == "true"
+    min_scale  = int(_get_setting("p2pquake_min_scale", str(P2PQUAKE_MIN_SCALE)))
+    tsunami_areas_str = _get_setting("p2pquake_tsunami_areas", ",".join(P2PQUAKE_TSUNAMI_TARGET_AREAS))
+    tsunami_areas = [a.strip() for a in tsunami_areas_str.split(",") if a.strip()]
+
+    scale_labels = {10: "震度1", 20: "震度2", 30: "震度3", 40: "震度4", 50: "震度5弱"}
+
+    return {
+        "location": {
+            "title": title or None,
+            "pref":  pref  or None,
+            "lat":   float(lat) if lat else None,
+            "lon":   float(lon) if lon else None,
+            "configured": bool(pref),
+        },
+        "earthquake": {
+            "enabled": P2PQUAKE_ENABLED,
+            "mode": "全国" if nationwide else ("設置場所のみ" if pref else "全国（設置場所未設定のため）"),
+            "filter_pref": None if nationwide else (pref or None),
+            "min_scale_label": scale_labels.get(min_scale, f"コード{min_scale}"),
+        },
+        "tsunami": {
+            "enabled": P2PQUAKE_ENABLED,
+            "areas": tsunami_areas,
+        },
+        "weather": {
+            "enabled": bool(lat and lon),
+            "lat": float(lat) if lat else None,
+            "lon": float(lon) if lon else None,
+            "note": "Open-Meteo（設置場所の座標を使用）" if lat else "位置情報未設定のため利用不可",
+        },
+    }
+
+
+@app.get("/api/debug/weather")
+async def api_debug_weather():
+    """Open-Meteo から設置場所の現在天気を取得して返す。"""
+    lat = _get_setting("location_lat", "")
+    lon = _get_setting("location_lon", "")
+    if not lat or not lon:
+        raise HTTPException(status_code=400, detail="設置場所が未設定です。設定画面で場所を登録してください。")
+
+    resp = await _http_client.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": lat, "longitude": lon,
+            "current": "temperature_2m,apparent_temperature,precipitation,weathercode,windspeed_10m,relativehumidity_2m",
+            "timezone": "Asia/Tokyo",
+        },
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    cur  = data.get("current", {})
+    code = cur.get("weathercode", -1)
+    return {
+        "location": {"lat": float(lat), "lon": float(lon), "title": _get_setting("location_title", "")},
+        "weather": {
+            "description":        _WMO_DESC.get(code, f"コード{code}"),
+            "weathercode":        code,
+            "temperature":        cur.get("temperature_2m"),
+            "apparent_temp":      cur.get("apparent_temperature"),
+            "humidity":           cur.get("relativehumidity_2m"),
+            "precipitation":      cur.get("precipitation"),
+            "windspeed":          cur.get("windspeed_10m"),
+            "time":               cur.get("time"),
+        },
+    }
+
+
+@app.post("/api/debug/weather/speak")
+async def api_debug_weather_speak():
+    """現在の天気をLLMで変換してスタックちゃんに喋らせる（テスト用）。"""
+    lat = _get_setting("location_lat", "")
+    lon = _get_setting("location_lon", "")
+    if not lat or not lon:
+        raise HTTPException(status_code=400, detail="設置場所が未設定です。")
+
+    resp = await _http_client.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": lat, "longitude": lon,
+            "current": "temperature_2m,apparent_temperature,precipitation,weathercode,windspeed_10m,relativehumidity_2m",
+            "timezone": "Asia/Tokyo",
+        },
+    )
+    resp.raise_for_status()
+    cur = resp.json().get("current", {})
+    code = cur.get("weathercode", -1)
+    desc = _WMO_DESC.get(code, f"コード{code}")
+    title = _get_setting("location_title", "設置場所")
+
+    prompt = (
+        f"【現在の天気 — {title}】\n"
+        f"天気: {desc} / 気温: {cur.get('temperature_2m')}°C（体感 {cur.get('apparent_temperature')}°C）"
+        f" / 湿度: {cur.get('relativehumidity_2m')}% / 降水量: {cur.get('precipitation')}mm"
+        f" / 風速: {cur.get('windspeed_10m')}km/h\n\n"
+        "この天気情報をもとに、家族に向けて短く天気をお知らせしてください。"
+    )
+    reply = await chat_with_llm(prompt, session_key="family", use_functions=False)
+    _, clean = _parse_expression(reply)
+    speaker_id, expr = _resolve_expression("neutral")
+    audio_url, stream_url = await resolve_audio_url(clean, speaker_id)
+    req_id = str(uuid.uuid4())
+    publish_speak(audio_url, stream_url, clean, "weather_test", "normal", req_id, expr)
+    return {"ok": True, "text": clean, "weather": desc}
+
+
 @app.get("/debug/calendar-items")
 def debug_calendar_items():
     """items テーブルの全レコードを返す（デバッグ用）。"""
