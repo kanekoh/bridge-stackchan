@@ -1335,6 +1335,20 @@ def _extract_pref(title: str) -> str:
     return m.group(1) if m else ""
 
 
+# P2P地震情報 code=555（地震感知情報）エリアID → 地名
+_P2P_USERQUAKE_AREAS: dict[int, str] = {
+    0: "北海道道央", 1: "北海道道南", 2: "北海道道北", 3: "北海道道東",
+    4: "青森県", 5: "岩手県", 6: "秋田県", 7: "宮城県", 8: "山形県", 9: "福島県",
+    10: "茨城県", 11: "栃木県", 12: "群馬県", 13: "埼玉県", 14: "千葉県", 15: "東京都",
+    16: "神奈川県", 17: "新潟県", 18: "富山県", 19: "石川県", 20: "福井県",
+    21: "山梨県", 22: "長野県", 23: "静岡県", 24: "愛知県", 25: "三重県", 26: "岐阜県",
+    27: "滋賀県", 28: "京都府", 29: "大阪府", 30: "兵庫県", 31: "奈良県", 32: "和歌山県",
+    33: "鳥取県", 34: "島根県", 35: "岡山県", 36: "広島県", 37: "山口県",
+    38: "徳島県", 39: "香川県", 40: "愛媛県", 41: "高知県",
+    42: "福岡県", 43: "佐賀県", 44: "長崎県", 45: "熊本県", 46: "大分県",
+    47: "宮崎県", 48: "鹿児島県", 49: "沖縄県",
+}
+
 # 都道府県 → 気象庁 津波予報区 マッピング（P2P地震情報 API の area.name と一致させること）
 _PREF_TSUNAMI_AREAS: dict[str, list[str]] = {
     "北海道":   ["北海道太平洋沿岸東部", "北海道太平洋沿岸中部", "北海道太平洋沿岸西部",
@@ -1722,6 +1736,14 @@ async def _p2pquake_ws_loop() -> None:
                                 summary = f"cancelled={data.get('cancelled')} areas={areas}"
                             elif code == 554:
                                 summary = "EEW"
+                            elif code == 555:
+                                areas = data.get("areas", [])
+                                total = sum(a.get("peer", 0) for a in areas)
+                                area_parts = [
+                                    f"{_P2P_USERQUAKE_AREAS.get(a['id'], f'エリア{a[\"id\"]}')}{a['peer']}件"
+                                    for a in sorted(areas, key=lambda x: x.get("peer", 0), reverse=True)[:5]
+                                ]
+                                summary = f"感知情報(ユーザー報告): 合計{total}件 [{', '.join(area_parts)}]"
                             elif code == 556:
                                 summary = "南海トラフ臨時情報"
                             else:
@@ -1743,6 +1765,8 @@ async def _p2pquake_ws_loop() -> None:
                                 asyncio.create_task(_handle_tsunami(data))
                             elif code == 554:
                                 asyncio.create_task(_handle_eew(data))
+                            elif code == 555:
+                                pass  # 感知情報（ユーザー報告）: ログのみ、発話しない
                             elif code == 556:
                                 asyncio.create_task(_handle_nankai(data))
                             else:
