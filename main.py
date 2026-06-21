@@ -79,6 +79,9 @@ DB_PATH = os.getenv("DB_PATH", "data/bridge.db")
 # Google Calendar / Tasks
 CALENDAR_ENABLED = os.getenv("CALENDAR_ENABLED", "false").lower() == "true"
 
+# Google Geolocation API（Stack-chan からの位置更新）
+GOOGLE_GEOLOCATION_API_KEY = os.getenv("GOOGLE_GEOLOCATION_API_KEY", "")
+
 # P2P地震情報 WebSocket
 P2PQUAKE_ENABLED = os.getenv("P2PQUAKE_ENABLED", "false").lower() == "true"
 P2PQUAKE_WS_URL = os.getenv("P2PQUAKE_WS_URL", "wss://api.p2pquake.net/v2/ws")
@@ -1827,6 +1830,95 @@ def api_get_location():
         "pref":    _get_setting("location_pref", ""),
         "title":   _get_setting("location_title", ""),
     }
+
+
+async def _reverse_geocode(lat: float, lon: float) -> tuple[str, str]:
+    """Nominatim (OpenStreetMap) で緯度経度 → (都道府県, 表示用住所文字列)。
+    キー不要・無料。利用規約: 1 req/s 以下, User-Agent 必須。"""
+    resp = await _http_client.get(
+        "https://nominatim.openstreetmap.org/reverse",
+        params={"lat": lat, "lon": lon, "format": "json", "accept-language": "ja"},
+        headers={"User-Agent": "bridge-stackchan/1.0 (home assistant robot)"},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    addr = data.get("address", {})
+    pref  = addr.get("state", "")
+    city  = addr.get("city") or addr.get("town") or addr.get("village") or ""
+    suburb = addr.get("suburb") or addr.get("neighbourhood") or addr.get("quarter") or ""
+    parts = [p for p in [pref, city, suburb] if p]
+    title = "、".join(parts) if parts else data.get("display_name", "")
+    return pref, title
+
+
+class LocationUpdateRequest(BaseModel):
+    wifiAccessPoints: list[dict] = []
+    considerIp: bool = True
+
+
+@app.post("/api/location/update")
+async def api_location_update(req: LocationUpdateRequest):
+    """Stack-chan から Wi-Fi スキャン結果を受け取り、Google Geolocation API で
+    緯度経度を解決して app_settings に保存する。
+
+    Stack-chan 側インタフェース仕様:
+      POST /api/location/update
+      Content-Type: application/json
+      {
+        "wifiAccessPoints": [
+          {"macAddress": "aa:bb:cc:dd:ee:ff", "signalStrength": -65},
+          ...
+        ],
+        "considerIp": true
+      }
+
+    レスポンス (200):
+      {"lat": 35.32, "lon": 139.55, "accuracy": 45.0,
+       "pref": "神奈川県", "title": "神奈川県、鎌倉市、大町", "updated": true}
+    """
+    if not GOOGLE_GEOLOCATION_API_KEY:
+        raise HTTPException(status_code=503, detail="GOOGLE_GEOLOCATION_API_KEY が設定されていません")
+
+    # ① Google Geolocation API で緯度経度を取得
+    geo_payload: dict = {"considerIp": req.considerIp}
+    if req.wifiAccessPoints:
+        geo_payload["wifiAccessPoints"] = req.wifiAccessPoints
+
+    try:
+        geo_resp = await _http_client.post(
+            "https://www.googleapis.com/geolocation/v1/geolocate",
+            params={"key": GOOGLE_GEOLOCATION_API_KEY},
+            json=geo_payload,
+        )
+        geo_resp.raise_for_status()
+        geo_data = geo_resp.json()
+    except Exception as e:
+        logger.error("Google Geolocation API error: %s", e)
+        raise HTTPException(status_code=502, detail=f"Geolocation API エラー: {e}")
+
+    lat      = geo_data["location"]["lat"]
+    lon      = geo_data["location"]["lng"]
+    accuracy = geo_data.get("accuracy", 0.0)
+
+    # ② Nominatim で逆ジオコーディング → 都道府県 + 住所文字列
+    try:
+        pref, title = await _reverse_geocode(lat, lon)
+    except Exception as e:
+        logger.warning("reverse geocode failed, using coordinates only: %s", e)
+        pref  = ""
+        title = f"緯度{lat:.4f} 経度{lon:.4f}"
+
+    # ③ app_settings に保存（既存の地震フィルタ・LLM コンテキストがそのまま利用）
+    _set_setting("location_lat",   str(lat))
+    _set_setting("location_lon",   str(lon))
+    _set_setting("location_pref",  pref)
+    _set_setting("location_title", title)
+
+    logger.info("location updated: lat=%.4f lon=%.4f pref=%s title=%s acc=%.0fm",
+                lat, lon, pref, title, accuracy)
+
+    return {"lat": lat, "lon": lon, "accuracy": accuracy,
+            "pref": pref, "title": title, "updated": True}
 
 
 # ── REST API (UI test) ────────────────────────────────────────────────────────
