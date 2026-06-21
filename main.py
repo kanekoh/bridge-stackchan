@@ -82,6 +82,11 @@ CALENDAR_ENABLED = os.getenv("CALENDAR_ENABLED", "false").lower() == "true"
 # Google Geolocation API（Stack-chan からの位置更新）
 GOOGLE_GEOLOCATION_API_KEY = os.getenv("GOOGLE_GEOLOCATION_API_KEY", "")
 
+# 天気通知
+WEATHER_CHECK_INTERVAL  = int(os.getenv("WEATHER_CHECK_INTERVAL", "900"))   # 15分
+WEATHER_RAIN_THRESHOLD  = float(os.getenv("WEATHER_RAIN_THRESHOLD", "0.3")) # mm/15min で雨とみなす
+WEATHER_RAIN_SUDDEN_MUL = 5.0  # 閾値の何倍以上で「急な雨」とみなすか
+
 # P2P地震情報 WebSocket
 P2PQUAKE_ENABLED = os.getenv("P2PQUAKE_ENABLED", "false").lower() == "true"
 P2PQUAKE_WS_URL = os.getenv("P2PQUAKE_WS_URL", "wss://api.p2pquake.net/v2/ws")
@@ -1048,6 +1053,89 @@ async def _calendar_notification_loop() -> None:
             logger.error("Calendar notification loop error: %s", e)
 
 
+async def _check_rain_notification() -> None:
+    """Open-Meteo minutely_15 で雨降り始めを検知して通知する。"""
+    lat = _get_setting("location_lat", "")
+    lon = _get_setting("location_lon", "")
+    if not lat or not lon:
+        return
+
+    resp = await _http_client.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": lat, "longitude": lon,
+            "minutely_15": "precipitation",
+            "timezone": "Asia/Tokyo",
+            "forecast_minutely_15": 6,  # 90 分先まで（6 区間 × 15 分）
+        },
+    )
+    resp.raise_for_status()
+    precip = resp.json().get("minutely_15", {}).get("precipitation", [])
+    if len(precip) < 3:
+        return
+
+    threshold = WEATHER_RAIN_THRESHOLD
+    now_dry   = precip[0] < threshold
+    soon_wet  = any(p >= threshold for p in precip[1:3])  # 15〜45 分後
+
+    if not now_dry:
+        # 現在すでに降雨中 → 何もしない（クールダウンはリセットしない）
+        return
+
+    if not soon_wet:
+        # 乾燥状態かつ雨予報なし → クールダウンをリセットして次回通知を許可
+        if _get_setting("weather_rain_notified", ""):
+            _set_setting("weather_rain_notified", "")
+            logger.debug("rain cooldown reset: dry, no rain expected")
+        return
+
+    # クールダウンチェック（3 時間以内に通知済みならスキップ）
+    last_str = _get_setting("weather_rain_notified", "")
+    if last_str:
+        try:
+            elapsed = (datetime.now(_JST) - datetime.fromisoformat(last_str)).total_seconds()
+            if elapsed < 3 * 3600:
+                return
+        except ValueError:
+            pass
+
+    sudden = precip[1] >= threshold * WEATHER_RAIN_SUDDEN_MUL
+    if sudden:
+        fixed_text = "急に雨が降り始めます！洗濯物や開けている窓に注意してください。"
+    else:
+        fixed_text = "30分以内に雨が降り始めそうです。外出の際は傘をお忘れなく。"
+
+    _set_setting("weather_rain_notified", datetime.now(_JST).isoformat())
+    logger.info("rain notify: sudden=%s precip_next=%s", sudden, precip[1:3])
+
+    await _p2p_speak(fixed_text, source="weather_rain", priority="normal")
+    asyncio.create_task(_rain_llm_comment(sudden))
+
+
+async def _rain_llm_comment(sudden: bool) -> None:
+    title = _get_setting("location_title", "")
+    prompt = (
+        f"{'急な雨' if sudden else '30分以内の雨'}の通知をしました（場所: {title}）。"
+        "洗濯物・傘・窓など家族への短い一言を1文で。通知文の繰り返し不要。"
+    )
+    try:
+        comment = await chat_with_llm(prompt, session_key="family", use_functions=False)
+        await _p2p_speak(comment, source="weather_rain_comment", priority="normal")
+    except Exception:
+        logger.exception("rain LLM comment failed")
+
+
+async def _weather_notify_loop() -> None:
+    logger.info("Weather notify loop started: check_interval=%ds", WEATHER_CHECK_INTERVAL)
+    while True:
+        await asyncio.sleep(WEATHER_CHECK_INTERVAL)
+        try:
+            if _get_setting("weather_notify_rain", "false") == "true":
+                await _check_rain_notification()
+        except Exception:
+            logger.exception("Weather notify loop error")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _http_client, _main_loop
@@ -1078,6 +1166,9 @@ async def lifespan(app: FastAPI):
     if P2PQUAKE_ENABLED:
         asyncio.create_task(_p2pquake_ws_loop())
         logger.info("P2P地震情報 WebSocket started")
+
+    asyncio.create_task(_weather_notify_loop())
+    logger.info("Weather notify loop started")
 
     yield
 
@@ -1890,6 +1981,16 @@ _EDITABLE_SETTINGS = {
         "env_fallback": lambda: ",".join(P2PQUAKE_TSUNAMI_TARGET_AREAS),
         "type": "textarea",
     },
+    "weather_notify_rain": {
+        "label": "天気通知 — 雨降り始め",
+        "description": "30分以内に雨が降り始めると予測されたときに通知します。設置場所の位置情報が必要です。",
+        "env_fallback": lambda: "false",
+        "type": "select",
+        "options": [
+            {"value": "false", "label": "OFF"},
+            {"value": "true",  "label": "ON"},
+        ],
+    },
 }
 
 
@@ -2371,6 +2472,29 @@ async def api_debug_weather_speak():
     req_id = str(uuid.uuid4())
     publish_speak(audio_url, stream_url, clean, "weather_test", "normal", req_id, expr)
     return {"ok": True, "text": clean, "weather": desc}
+
+
+@app.post("/api/debug/weather/rain-check")
+async def api_debug_rain_check():
+    """雨検知チェックをその場で実行する（テスト用）。クールダウンをリセットしてから実行。"""
+    _set_setting("weather_rain_notified", "")  # クールダウンリセット
+    await _check_rain_notification()
+    lat = _get_setting("location_lat", "")
+    lon = _get_setting("location_lon", "")
+    if not lat or not lon:
+        return {"ok": False, "detail": "位置情報未設定"}
+    resp = await _http_client.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": lat, "longitude": lon,
+            "minutely_15": "precipitation",
+            "timezone": "Asia/Tokyo",
+            "forecast_minutely_15": 6,
+        },
+    )
+    resp.raise_for_status()
+    precip = resp.json().get("minutely_15", {}).get("precipitation", [])
+    return {"ok": True, "precipitation_15min": precip[:6], "threshold": WEATHER_RAIN_THRESHOLD}
 
 
 @app.get("/debug/calendar-items")
