@@ -1740,7 +1740,7 @@ async def _p2pquake_ws_loop() -> None:
                                 areas = data.get("areas", [])
                                 total = sum(a.get("peer", 0) for a in areas)
                                 area_parts = [
-                                    f"{_P2P_USERQUAKE_AREAS.get(a['id'], f'エリア{a[\"id\"]}')}{a['peer']}件"
+                                    f"{_P2P_USERQUAKE_AREAS.get(a['id'], 'エリア' + str(a['id']))}{a['peer']}件"
                                     for a in sorted(areas, key=lambda x: x.get("peer", 0), reverse=True)[:5]
                                 ]
                                 summary = f"感知情報(ユーザー報告): 合計{total}件 [{', '.join(area_parts)}]"
