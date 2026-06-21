@@ -1201,6 +1201,66 @@ def _extract_pref(title: str) -> str:
     return m.group(1) if m else ""
 
 
+# 都道府県 → 気象庁 津波予報区 マッピング（P2P地震情報 API の area.name と一致させること）
+_PREF_TSUNAMI_AREAS: dict[str, list[str]] = {
+    "北海道":   ["北海道太平洋沿岸東部", "北海道太平洋沿岸中部", "北海道太平洋沿岸西部",
+                 "北海道日本海沿岸南部", "北海道日本海沿岸北部", "北海道オホーツク海沿岸"],
+    "青森県":   ["青森県太平洋沿岸", "青森県日本海沿岸"],
+    "岩手県":   ["岩手県"],
+    "宮城県":   ["宮城県"],
+    "秋田県":   ["秋田県"],
+    "山形県":   ["山形県"],
+    "福島県":   ["福島県"],
+    "茨城県":   ["茨城県"],
+    "千葉県":   ["千葉県九十九里・外房", "千葉県内房"],
+    "東京都":   ["伊豆諸島", "小笠原諸島"],
+    "神奈川県": ["相模湾・三浦半島"],
+    "新潟県":   ["新潟県上越地方", "新潟県中越地方", "新潟県下越地方", "粟島"],
+    "富山県":   ["富山県"],
+    "石川県":   ["石川県能登", "石川県加賀"],
+    "福井県":   ["福井県"],
+    "静岡県":   ["静岡県"],
+    "愛知県":   ["愛知県外海", "愛知県内海"],
+    "三重県":   ["三重県北部", "三重県南部"],
+    "京都府":   ["京都府"],
+    "大阪府":   ["大阪府"],
+    "兵庫県":   ["兵庫県北部", "兵庫県南部"],
+    "和歌山県": ["和歌山県"],
+    "鳥取県":   ["鳥取県"],
+    "島根県":   ["島根県出雲・石見", "島根県隠岐"],
+    "岡山県":   ["岡山県"],
+    "広島県":   ["広島県"],
+    "山口県":   ["山口県北部", "山口県西部"],
+    "徳島県":   ["徳島県"],
+    "香川県":   ["香川県"],
+    "愛媛県":   ["愛媛県宇和海沿岸", "愛媛県瀬戸内海沿岸"],
+    "高知県":   ["高知県"],
+    "福岡県":   ["福岡県瀬戸内海沿岸", "福岡県日本海沿岸"],
+    "佐賀県":   ["佐賀県北部"],
+    "長崎県":   ["長崎県西方", "長崎県島原半島"],
+    "熊本県":   ["熊本県天草・芦北", "熊本県有明・八代海"],
+    "大分県":   ["大分県中部", "大分県北部", "大分県南部"],
+    "宮崎県":   ["宮崎県"],
+    "鹿児島県": ["鹿児島県東部", "鹿児島県西部", "種子島・屋久島地方", "奄美群島・トカラ列島"],
+    "沖縄県":   ["沖縄本島地方", "大東島地方", "宮古島・八重山地方"],
+    # 内陸県（海なし）は空リスト → 津波エリア設定なし
+    "埼玉県": [], "栃木県": [], "群馬県": [], "山梨県": [],
+    "長野県": [], "岐阜県": [], "奈良県": [], "滋賀県": [],
+}
+
+
+def _apply_tsunami_areas_from_pref(pref: str) -> None:
+    """都道府県から津波予報区を自動設定する。内陸県の場合は設定しない。"""
+    areas = _PREF_TSUNAMI_AREAS.get(pref)
+    if areas is None:
+        return  # マッピング未定義の県はそのまま
+    if areas:
+        _set_setting("p2pquake_tsunami_areas", ",".join(areas))
+        logger.info("tsunami areas auto-set from pref=%s: %s", pref, areas)
+    else:
+        logger.info("tsunami areas: %s is inland, no coastal areas", pref)
+
+
 def _get_local_scale(data: dict) -> int | None:
     """設置場所の都道府県で観測された最大震度コードを返す。
     全国モードまたは設置場所未設定なら全国最大値を返す。
@@ -1894,6 +1954,7 @@ async def api_geocode(address: str = Form(...)):
     _set_setting("location_lon",     str(lon))
     _set_setting("location_pref",    pref)
     _set_setting("location_title",   title)
+    _apply_tsunami_areas_from_pref(pref)
 
     return {"lat": lat, "lon": lon, "pref": pref, "title": title}
 
@@ -1993,6 +2054,7 @@ async def _geolocate_and_save(wifi_aps: list[dict], consider_ip: bool = True) ->
     _set_setting("location_lon",   str(lon))
     _set_setting("location_pref",  pref)
     _set_setting("location_title", title)
+    _apply_tsunami_areas_from_pref(pref)
 
     logger.info("location updated: lat=%.4f lon=%.4f pref=%s title=%s acc=%.0fm",
                 lat, lon, pref, title, accuracy)
@@ -2020,6 +2082,7 @@ async def api_location_from_coords(lat: float = Form(...), lon: float = Form(...
     _set_setting("location_lon",   str(lon))
     _set_setting("location_pref",  pref)
     _set_setting("location_title", title)
+    _apply_tsunami_areas_from_pref(pref)
     logger.info("location set from browser coords: lat=%.4f lon=%.4f pref=%s", lat, lon, pref)
     return {"lat": lat, "lon": lon, "pref": pref, "title": title}
 
