@@ -1,5 +1,6 @@
 import asyncio
 import io
+import math
 import os
 import re
 import socket
@@ -14,6 +15,7 @@ from typing import Protocol
 from datetime import datetime, timezone, timedelta
 
 import aiohttp
+import ephem
 import httpx
 import openai
 import paho.mqtt.client as mqtt
@@ -95,6 +97,12 @@ P2PQUAKE_MIN_SCALE = int(os.getenv("P2PQUAKE_MIN_SCALE", "30"))  # 震度3以上
 P2PQUAKE_TSUNAMI_TARGET_AREAS: set[str] = set(
     os.getenv("P2PQUAKE_TSUNAMI_TARGET_AREAS", "相模湾・三浦半島,神奈川県,伊豆諸島").split(",")
 )
+# ISS 通過通知
+ISS_NOTIFY_ENABLED  = os.getenv("ISS_NOTIFY_ENABLED", "false").lower() == "true"
+ISS_MIN_ELEVATION   = float(os.getenv("ISS_MIN_ELEVATION", "30"))   # 最大仰角が何度以上のパスを通知するか
+ISS_NOTIFY_AHEAD    = int(os.getenv("ISS_NOTIFY_AHEAD", "5"))       # 何分前に通知するか
+ISS_TLE_URL         = "https://celestrak.org/NORAD/elements/gp.php?NAME=ISS%20(ZARYA)&FORMAT=TLE"
+
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "secrets/credentials.json")
 GOOGLE_TOKEN_DIR = os.getenv("GOOGLE_TOKEN_DIR", "secrets")
 CALENDAR_SYNC_INTERVAL_MINUTES = int(os.getenv("CALENDAR_SYNC_INTERVAL_MINUTES", "30"))
@@ -239,6 +247,10 @@ _p2pquake_ws_status: dict = {
 }
 _p2pquake_recent_events: list[dict] = []  # 直近50件（受信 → フィルタ結果まで）
 _P2PQUAKE_EVENT_BUFFER = 50
+
+# ISS 通過通知
+_iss_tle_cache: dict = {}          # {"date": "YYYY-MM-DD", "line1": ..., "line2": ...}
+_iss_notified_passes: set[str] = set()  # 通知済みパスのキー（"YYYYMMDDHHMM"）
 
 # ── SQLite ────────────────────────────────────────────────────────────────────
 
@@ -1168,6 +1180,212 @@ async def _rain_llm_comment(sudden: bool, time_label: str, hour: int) -> None:
         logger.exception("rain LLM comment failed")
 
 
+async def _fetch_iss_tle() -> tuple[str, str] | None:
+    """CelesTrak から ISS TLE を取得。当日キャッシュあれば再利用。"""
+    today = datetime.now(_JST).strftime("%Y-%m-%d")
+    if _iss_tle_cache.get("date") == today:
+        return _iss_tle_cache["line1"], _iss_tle_cache["line2"]
+    try:
+        resp = await _http_client.get(ISS_TLE_URL, timeout=10)
+        resp.raise_for_status()
+        lines = [l.strip() for l in resp.text.strip().splitlines() if l.strip()]
+        if len(lines) < 3:
+            raise ValueError("TLE に3行以上必要")
+        _iss_tle_cache.update({"date": today, "line1": lines[1], "line2": lines[2]})
+        logger.info("ISS TLE 更新: %s", lines[0])
+        return lines[1], lines[2]
+    except Exception:
+        logger.exception("ISS TLE 取得失敗")
+        return None
+
+
+def _az_to_direction(az_rad: float) -> str:
+    """方位角（ラジアン）を8方位の日本語に変換。"""
+    dirs = ["北", "北東", "東", "南東", "南", "南西", "西", "北西"]
+    idx = int((math.degrees(az_rad) % 360 + 22.5) / 45) % 8
+    return dirs[idx]
+
+
+def _get_sunset_utc(lat: float, lon: float) -> datetime | None:
+    """当日の日没時刻（UTC）を ephem で計算して返す。計算失敗時は None。"""
+    try:
+        obs = ephem.Observer()
+        obs.lat       = str(lat)
+        obs.lon       = str(lon)
+        obs.elevation = 10
+        obs.pressure  = 0
+        obs.horizon   = "-0:34"  # 標準的な日没（大気屈折 34 分補正）
+        obs.date      = ephem.now()
+        sunset = obs.next_setting(ephem.Sun())
+        return ephem.Date(sunset).datetime().replace(tzinfo=timezone.utc)
+    except Exception:
+        logger.debug("日没時刻計算失敗")
+        return None
+
+
+def _calc_iss_passes(lat: float, lon: float, tle1: str, tle2: str,
+                     hours: int = 18, min_el: float = 10.0) -> list[dict]:
+    """指定時間内の ISS 通過リストを返す。min_el 以上の最大仰角のパスのみ含む。"""
+    obs = ephem.Observer()
+    obs.lat       = str(lat)
+    obs.lon       = str(lon)
+    obs.elevation = 10
+    obs.horizon   = "10"
+    obs.pressure  = 0
+    iss = ephem.readtle("ISS", tle1, tle2)
+
+    now_utc  = datetime.now(timezone.utc)
+    end_ephem = ephem.Date(ephem.now() + hours / 24.0)
+    obs.date  = ephem.Date(now_utc.replace(tzinfo=None))
+
+    passes = []
+    while True:
+        try:
+            rise_t, rise_az, max_t, max_el, set_t, _ = obs.next_pass(iss)
+        except Exception:
+            break
+        if rise_t > end_ephem:
+            break
+        max_el_deg = math.degrees(max_el)
+        if max_el_deg >= min_el:
+            rise_utc = ephem.Date(rise_t).datetime().replace(tzinfo=timezone.utc)
+            max_utc  = ephem.Date(max_t).datetime().replace(tzinfo=timezone.utc)
+            passes.append({
+                "rise_jst":    rise_utc.astimezone(_JST),
+                "max_jst":     max_utc.astimezone(_JST),
+                "max_el_deg":  max_el_deg,
+                "direction":   _az_to_direction(float(rise_az)),
+                "pass_key":    rise_utc.astimezone(_JST).strftime("%Y%m%d%H%M"),
+            })
+        obs.date = ephem.Date(set_t) + ephem.minute
+    return passes
+
+
+async def _iss_speak(prompt: str, source: str) -> None:
+    text = await chat_with_llm(prompt, session_key="family", use_functions=False)
+    expr_label, clean_text = _parse_expression(text)
+    speaker_id, stackchan_expr = _resolve_expression(expr_label or "happy")
+    audio_url, stream_url = await resolve_audio_url(clean_text, speaker_id)
+    publish_speak(audio_url, stream_url, clean_text,
+                  source=source, priority="normal",
+                  request_id=str(uuid.uuid4()), expression=stackchan_expr)
+
+
+async def _iss_notify_loop() -> None:
+    """
+    2種類の ISS 通知を行うループ（1分ごとにチェック）。
+    ① 朝の予告（7:45-7:55）: 当日の夕方〜夜に見えるパスを予告
+    ② 直前通知（ISS_NOTIFY_AHEAD 分前）: 「もうすぐ来るよ」
+    """
+    logger.info("ISS notify loop started: min_elevation=%.0f° ahead=%dmin",
+                ISS_MIN_ELEVATION, ISS_NOTIFY_AHEAD)
+    morning_announced_date: str = ""  # 朝予告の重複防止
+
+    while True:
+        await asyncio.sleep(60)
+        try:
+            if not _get_setting("iss_notify_enabled", str(ISS_NOTIFY_ENABLED)).lower() == "true":
+                continue
+
+            lat = _get_setting("location_lat", "")
+            lon = _get_setting("location_lon", "")
+            if not lat or not lon:
+                continue
+
+            tle = await _fetch_iss_tle()
+            if not tle:
+                continue
+            tle1, tle2 = tle
+
+            now_jst  = datetime.now(_JST)
+            today_str = now_jst.strftime("%Y-%m-%d")
+
+            # ── ① 朝の予告（7:45-7:55, 1日1回） ──────────────────────
+            if 7 * 60 + 45 <= now_jst.hour * 60 + now_jst.minute <= 7 * 60 + 55:
+                if morning_announced_date != today_str:
+                    # 日没時刻を取得して日没後のパスに絞る
+                    sunset_utc = _get_sunset_utc(float(lat), float(lon))
+                    all_passes = _calc_iss_passes(
+                        float(lat), float(lon), tle1, tle2,
+                        hours=20, min_el=ISS_MIN_ELEVATION
+                    )
+                    if sunset_utc:
+                        sunset_jst = sunset_utc.astimezone(_JST)
+                        evening_passes = [p for p in all_passes if p["rise_jst"] >= sunset_jst]
+                        logger.info("ISS 朝予告: 日没=%s 候補=%d件",
+                                    sunset_jst.strftime("%H:%M"), len(evening_passes))
+                    else:
+                        sunset_jst = None
+                        evening_passes = [
+                            p for p in all_passes
+                            if p["rise_jst"].hour >= 16 or p["rise_jst"].hour < 3
+                        ]
+                    if evening_passes:
+                        best = max(evening_passes, key=lambda p: p["max_el_deg"])
+                        sunset_hint = (
+                            f"（今日の日没は{sunset_jst.strftime('%H時%M分')}ごろです）"
+                            if sunset_jst else ""
+                        )
+                        prompt = (
+                            f"今夜{best['rise_jst'].strftime('%H時%M分')}ごろに"
+                            f"ISSが{best['direction']}の空から見えます。"
+                            f"最高点は{best['max_jst'].strftime('%H時%M分')}ごろで"
+                            f"かなり高いところまで上がります（最大{best['max_el_deg']:.0f}度）。"
+                            f"{sunset_hint}"
+                            "家族に「今夜ISSが見えるよ」と朝のうちに予告してください。"
+                            "日没時刻も自然に添えてください。「仰角」は使わず、わかりやすく。1〜2文で。"
+                        )
+                        try:
+                            await _iss_speak(prompt, source="iss_morning_preview")
+                            morning_announced_date = today_str
+                            logger.info("ISS 朝予告送信: %s 方向=%s max_el=%.0f°",
+                                        best["rise_jst"].strftime("%H:%M"),
+                                        best["direction"], best["max_el_deg"])
+                        except Exception:
+                            logger.exception("ISS 朝予告失敗")
+                    else:
+                        morning_announced_date = today_str  # 今日は見えないのでスキップ記録
+                        logger.info("ISS 朝予告: 今夜は見える機会なし（日没=%s）",
+                                    sunset_jst.strftime("%H:%M") if sunset_jst else "不明")
+
+            # ── ② 直前通知（ISS_NOTIFY_AHEAD 分以内に通過開始） ─────────
+            passes = _calc_iss_passes(
+                float(lat), float(lon), tle1, tle2,
+                hours=1, min_el=ISS_MIN_ELEVATION
+            )
+            notify_window = ISS_NOTIFY_AHEAD * 60
+            now_utc = datetime.now(timezone.utc)
+
+            for p in passes:
+                secs_until = (p["rise_jst"].astimezone(timezone.utc) - now_utc).total_seconds()
+                if not (0 < secs_until <= notify_window):
+                    continue
+                if p["pass_key"] in _iss_notified_passes:
+                    continue
+
+                _iss_notified_passes.add(p["pass_key"])
+                if len(_iss_notified_passes) > 30:
+                    _iss_notified_passes.discard(min(_iss_notified_passes))
+
+                minutes_until = max(1, round(secs_until / 60))
+                prompt = (
+                    f"ISSが約{minutes_until}分後に{p['direction']}の空から見えはじめます。"
+                    f"{p['max_jst'].strftime('%H時%M分')}ごろが一番高くなります"
+                    f"（空の高さ{p['max_el_deg']:.0f}度相当）。"
+                    "家族に「もうすぐISSが来るよ、空を見てみて！」と短く伝えてください。"
+                    "「仰角」は使わず、わかりやすく。1〜2文で。"
+                )
+                try:
+                    await _iss_speak(prompt, source="iss_notify")
+                    logger.info("ISS 直前通知送信: rise=%s 方向=%s max_el=%.0f°",
+                                p["rise_jst"].strftime("%H:%M"), p["direction"], p["max_el_deg"])
+                except Exception:
+                    logger.exception("ISS 直前通知失敗")
+
+        except Exception:
+            logger.exception("ISS notify loop error")
+
+
 async def _weather_notify_loop() -> None:
     logger.info("Weather notify loop started: check_interval=%ds", WEATHER_CHECK_INTERVAL)
     while True:
@@ -1212,6 +1430,9 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_weather_notify_loop())
     logger.info("Weather notify loop started")
+
+    asyncio.create_task(_iss_notify_loop())  # DB設定で後から有効化可能なため常時起動
+    logger.info("ISS notify loop started")
 
     yield
 
@@ -2096,6 +2317,19 @@ _EDITABLE_SETTINGS = {
             {"value": "true",  "label": "ON"},
         ],
     },
+    "iss_notify_enabled": {
+        "label": "ISS 通過通知",
+        "description": (
+            "朝7:45-7:55に当日夕方〜夜の通過予告、通過5分前に直前通知を行います。"
+            "設置場所の位置情報が必要です。仰角30度以上のパスのみ対象。"
+        ),
+        "env_fallback": lambda: str(ISS_NOTIFY_ENABLED).lower(),
+        "type": "select",
+        "options": [
+            {"value": "false", "label": "OFF"},
+            {"value": "true",  "label": "ON"},
+        ],
+    },
 }
 
 
@@ -2610,6 +2844,117 @@ async def api_debug_rain_check():
     resp.raise_for_status()
     precip = resp.json().get("minutely_15", {}).get("precipitation", [])
     return {"ok": True, "precipitation_15min": precip[:6], "threshold": WEATHER_RAIN_THRESHOLD}
+
+
+@app.get("/api/debug/iss")
+async def api_debug_iss():
+    """現在位置をもとに ISS の次の通過情報と日没時刻を返す（テスト用）。"""
+    lat = _get_setting("location_lat", "")
+    lon = _get_setting("location_lon", "")
+    if not lat or not lon:
+        return {"ok": False, "detail": "位置情報未設定"}
+    tle = await _fetch_iss_tle()
+    if not tle:
+        return {"ok": False, "detail": "TLE 取得失敗"}
+    tle1, tle2 = tle
+    passes = _calc_iss_passes(float(lat), float(lon), tle1, tle2, hours=24, min_el=10.0)
+    sunset_utc = _get_sunset_utc(float(lat), float(lon))
+    sunset_jst = sunset_utc.astimezone(_JST).strftime("%H:%M") if sunset_utc else None
+    return {
+        "ok": True,
+        "sunset_jst": sunset_jst,
+        "min_elevation": ISS_MIN_ELEVATION,
+        "passes": [
+            {
+                "rise_jst":   p["rise_jst"].strftime("%Y-%m-%d %H:%M"),
+                "max_jst":    p["max_jst"].strftime("%H:%M"),
+                "max_el_deg": round(p["max_el_deg"], 1),
+                "direction":  p["direction"],
+                "visible":    p["max_el_deg"] >= ISS_MIN_ELEVATION,
+            }
+            for p in passes[:10]
+        ],
+    }
+
+
+@app.post("/api/debug/iss/morning-preview")
+async def api_debug_iss_morning_preview():
+    """朝の予告通知をその場でテスト送信する。"""
+    lat = _get_setting("location_lat", "")
+    lon = _get_setting("location_lon", "")
+    if not lat or not lon:
+        raise HTTPException(400, "位置情報未設定")
+    tle = await _fetch_iss_tle()
+    if not tle:
+        raise HTTPException(503, "TLE 取得失敗")
+    tle1, tle2 = tle
+    sunset_utc = _get_sunset_utc(float(lat), float(lon))
+    all_passes = _calc_iss_passes(float(lat), float(lon), tle1, tle2,
+                                   hours=24, min_el=ISS_MIN_ELEVATION)
+    if sunset_utc:
+        sunset_jst = sunset_utc.astimezone(_JST)
+        evening_passes = [p for p in all_passes if p["rise_jst"] >= sunset_jst]
+    else:
+        sunset_jst = None
+        evening_passes = [p for p in all_passes
+                          if p["rise_jst"].hour >= 16 or p["rise_jst"].hour < 3]
+    if not evening_passes:
+        return {"ok": False, "detail": "今夜は見える機会がありません"}
+    best = max(evening_passes, key=lambda p: p["max_el_deg"])
+    sunset_hint = (
+        f"（今日の日没は{sunset_jst.strftime('%H時%M分')}ごろです）"
+        if sunset_jst else ""
+    )
+    prompt = (
+        f"今夜{best['rise_jst'].strftime('%H時%M分')}ごろに"
+        f"ISSが{best['direction']}の空から見えます。"
+        f"最高点は{best['max_jst'].strftime('%H時%M分')}ごろで"
+        f"かなり高いところまで上がります（最大{best['max_el_deg']:.0f}度）。"
+        f"{sunset_hint}"
+        "家族に「今夜ISSが見えるよ」と朝のうちに予告してください。"
+        "日没時刻も自然に添えてください。「仰角」は使わず、わかりやすく。1〜2文で。"
+    )
+    await _iss_speak(prompt, source="iss_morning_preview_test")
+    return {"ok": True, "pass": {
+        "rise_jst": best["rise_jst"].strftime("%H:%M"),
+        "max_el_deg": round(best["max_el_deg"], 1),
+        "direction": best["direction"],
+    }}
+
+
+@app.post("/api/debug/iss/immediate")
+async def api_debug_iss_immediate():
+    """次の通過の直前通知をその場でテスト送信する。"""
+    lat = _get_setting("location_lat", "")
+    lon = _get_setting("location_lon", "")
+    if not lat or not lon:
+        raise HTTPException(400, "位置情報未設定")
+    tle = await _fetch_iss_tle()
+    if not tle:
+        raise HTTPException(503, "TLE 取得失敗")
+    tle1, tle2 = tle
+    passes = _calc_iss_passes(float(lat), float(lon), tle1, tle2,
+                               hours=24, min_el=ISS_MIN_ELEVATION)
+    if not passes:
+        return {"ok": False, "detail": "24時間以内に見えるパスがありません"}
+    p = passes[0]
+    now_utc = datetime.now(timezone.utc)
+    secs_until = (p["rise_jst"].astimezone(timezone.utc) - now_utc).total_seconds()
+    minutes_until = max(1, round(secs_until / 60))
+    prompt = (
+        f"ISSが約{minutes_until}分後に{p['direction']}の空から見えはじめます。"
+        f"{p['max_jst'].strftime('%H時%M分')}ごろが一番高くなります"
+        f"（空の高さ{p['max_el_deg']:.0f}度相当）。"
+        "家族に「もうすぐISSが来るよ、空を見てみて！」と短く伝えてください。"
+        "「仰角」は使わず、わかりやすく。1〜2文で。"
+    )
+    await _iss_speak(prompt, source="iss_notify_test")
+    return {"ok": True, "pass": {
+        "rise_jst": p["rise_jst"].strftime("%H:%M"),
+        "minutes_until": minutes_until,
+        "max_el_deg": round(p["max_el_deg"], 1),
+        "direction": p["direction"],
+    }}
 
 
 @app.get("/debug/calendar-items")
