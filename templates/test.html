@@ -74,7 +74,8 @@
         重複スキップを無効化（同じイベントを再送）
       </label>
     </div>
-    <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+    <p class="text-xs font-medium text-gray-600 mb-1">発話あり</p>
+    <div class="grid grid-cols-2 gap-2 sm:grid-cols-4 mb-3">
       <button onclick="testP2p(551)" class="bg-orange-500 hover:bg-orange-600 text-white text-sm px-3 py-2 rounded">
         🌍 地震情報<br><span class="text-xs opacity-75">code 551</span>
       </button>
@@ -82,10 +83,22 @@
         🌊 津波予報<br><span class="text-xs opacity-75">code 552</span>
       </button>
       <button onclick="testP2p(554)" class="bg-red-700 hover:bg-red-800 text-white text-sm px-3 py-2 rounded">
-        ⚡ 緊急地震速報<br><span class="text-xs opacity-75">code 554</span>
+        ⚡ EEW 発表検出<br><span class="text-xs opacity-75">code 554</span>
       </button>
-      <button onclick="testP2p(556)" class="bg-purple-600 hover:bg-purple-700 text-white text-sm px-3 py-2 rounded">
-        🗾 南海トラフ<br><span class="text-xs opacity-75">code 556</span>
+      <button onclick="testP2p(556)" class="bg-red-700 hover:bg-red-800 text-white text-sm px-3 py-2 rounded">
+        ⚡ EEW 警報<br><span class="text-xs opacity-75">code 556（予測震度つき）</span>
+      </button>
+    </div>
+    <p class="text-xs font-medium text-gray-600 mb-1">ログのみ（発話なし）</p>
+    <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      <button onclick="testP2p(555)" class="border border-gray-300 hover:bg-gray-50 text-gray-600 text-sm px-3 py-2 rounded">
+        📡 接続ピア数<br><span class="text-xs opacity-75">code 555</span>
+      </button>
+      <button onclick="testP2p(561)" class="border border-gray-300 hover:bg-gray-50 text-gray-600 text-sm px-3 py-2 rounded">
+        🙋 感知情報<br><span class="text-xs opacity-75">code 561</span>
+      </button>
+      <button onclick="testP2p(9611)" class="border border-gray-300 hover:bg-gray-50 text-gray-600 text-sm px-3 py-2 rounded">
+        📊 感知解析結果<br><span class="text-xs opacity-75">code 9611</span>
       </button>
     </div>
     <p id="p2pResult" class="text-xs mt-3 text-gray-500"></p>
@@ -258,7 +271,15 @@
     'dispatch':      '→ 処理',
     'skip:dup_memory': '無視（重複）',
   };
-  const CODE_LABEL = { 551: '地震', 552: '津波', 554: 'EEW', 556: '南海トラフ' };
+  const CODE_LABEL = {
+    551: '地震情報',
+    552: '津波予報',
+    554: 'EEW発表検出',
+    555: '接続ピア数',
+    556: 'EEW警報',
+    561: '感知情報',
+    9611: '感知解析結果',
+  };
 
   async function loadWsStatus() {
     const statusEl = document.getElementById('wsStatus');
