@@ -1861,25 +1861,14 @@ async def _tsunami_llm_comment(fixed_text: str, cancelled: bool) -> None:
 
 
 async def _handle_eew(data: dict) -> None:
-    # code=554: 緊急地震速報（警報）。揺れが来る数秒前。LLMなしで即発話のみ。
-    eew_key = data.get("id", "") + ":eew"
+    # code=554: 緊急地震速報（発表検出）。EEW チャイム検出。LLMなしで即発話のみ。
+    # code=556: 緊急地震速報（警報）。予測震度・到達時刻つき。同様に即発話。
+    eew_key = data.get("id", str(data.get("code", ""))) + ":eew"
     if _eq_already_seen(eew_key):
         return
     _mark_eq_seen(eew_key, "eew", 0, 0.0)
     text = "緊急地震速報！強い揺れが来る可能性があります。今すぐ身を低くして頭を守ってください。"
     await _p2p_speak(text, source="eew", priority="high")
-
-
-async def _handle_nankai(data: dict) -> None:
-    # code=556: 南海トラフ地震臨時情報。固定案内 + LLM 解説。
-    nankai_key = data.get("id", "")
-    if _eq_already_seen(nankai_key):
-        return
-    _mark_eq_seen(nankai_key, "nankai", 0, 0.0)
-    fixed_text = ("南海トラフ地震に関する臨時情報が発表されました。"
-                  "詳しくはテレビやラジオ、気象庁のウェブサイトを確認してください。")
-    await _p2p_speak(fixed_text, source="nankai", priority="high")
-    asyncio.create_task(_unknown_p2p_llm(data))
 
 
 async def _unknown_p2p_llm(data: dict) -> None:
@@ -1943,8 +1932,21 @@ async def _p2pquake_ws_loop() -> None:
                                 areas = [a.get("name") for a in data.get("areas", [])]
                                 summary = f"cancelled={data.get('cancelled')} areas={areas}"
                             elif code == 554:
-                                summary = "EEW"
+                                summary = "EEW発表検出"
                             elif code == 555:
+                                # 各地域のP2P接続ピア数（感知情報ではなくネットワーク接続状況）
+                                areas = data.get("areas", [])
+                                total = sum(a.get("peer", 0) for a in areas)
+                                summary = f"接続ピア数: 合計{total}クライアント ({len(areas)}地域)"
+                            elif code == 556:
+                                eq = data.get("earthquake", {})
+                                hypo = eq.get("hypocenter", {})
+                                summary = (
+                                    f"EEW警報: {hypo.get('name', '?')} "
+                                    f"M{hypo.get('magnitude', '?')} "
+                                    f"最大予測{_scale_to_str(eq.get('maxScale', -1))}"
+                                )
+                            elif code == 561:
                                 areas = data.get("areas", [])
                                 total = sum(a.get("peer", 0) for a in areas)
                                 area_parts = [
@@ -1952,8 +1954,12 @@ async def _p2pquake_ws_loop() -> None:
                                     for a in sorted(areas, key=lambda x: x.get("peer", 0), reverse=True)[:5]
                                 ]
                                 summary = f"感知情報(ユーザー報告): 合計{total}件 [{', '.join(area_parts)}]"
-                            elif code == 556:
-                                summary = "南海トラフ臨時情報"
+                            elif code == 9611:
+                                summary = (
+                                    f"感知情報解析結果: "
+                                    f"confidence={data.get('confidence', '?')} "
+                                    f"count={data.get('count', '?')}"
+                                )
                             else:
                                 summary = str(data)[:120]
 
@@ -1972,11 +1978,15 @@ async def _p2pquake_ws_loop() -> None:
                             elif code == 552:
                                 asyncio.create_task(_handle_tsunami(data))
                             elif code == 554:
-                                asyncio.create_task(_handle_eew(data))
+                                asyncio.create_task(_handle_eew(data))  # EEW発表検出
                             elif code == 555:
-                                pass  # 感知情報（ユーザー報告）: ログのみ、発話しない
+                                pass  # 接続ピア数: ログのみ
                             elif code == 556:
-                                asyncio.create_task(_handle_nankai(data))
+                                asyncio.create_task(_handle_eew(data))  # EEW警報（予測震度つき）
+                            elif code == 561:
+                                pass  # 地震感知情報（ユーザー報告）: ログのみ
+                            elif code == 9611:
+                                pass  # 感知情報解析結果: ログのみ
                             else:
                                 asyncio.create_task(_unknown_p2p_llm(data))
 
@@ -2687,10 +2697,10 @@ async def debug_p2pquake(code: int = Query(551), force: bool = Query(False)):
         await _handle_earthquake(data)
     elif code == 552:
         await _handle_tsunami(data)
-    elif code == 554:
+    elif code in (554, 556):
         await _handle_eew(data)
-    elif code == 556:
-        await _handle_nankai(data)
+    elif code in (555, 561, 9611):
+        pass  # ログのみ
     else:
         await _unknown_p2p_llm(data)
 
