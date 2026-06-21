@@ -64,3 +64,6 @@ docker-compose.override.yml
 secrets/
 credentials.json
 token*.json
+
+# 調査・メモ（作業ファイル）
+docs/research/

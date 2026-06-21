@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from datetime import datetime, timezone, timedelta
 
+import aiohttp
 import httpx
 import openai
 import paho.mqtt.client as mqtt
@@ -77,6 +78,14 @@ DB_PATH = os.getenv("DB_PATH", "data/bridge.db")
 
 # Google Calendar / Tasks
 CALENDAR_ENABLED = os.getenv("CALENDAR_ENABLED", "false").lower() == "true"
+
+# P2P地震情報 WebSocket
+P2PQUAKE_ENABLED = os.getenv("P2PQUAKE_ENABLED", "false").lower() == "true"
+P2PQUAKE_WS_URL = os.getenv("P2PQUAKE_WS_URL", "wss://api.p2pquake.net/v2/ws")
+P2PQUAKE_MIN_SCALE = int(os.getenv("P2PQUAKE_MIN_SCALE", "30"))  # 震度3以上で通知
+P2PQUAKE_TSUNAMI_TARGET_AREAS: set[str] = set(
+    os.getenv("P2PQUAKE_TSUNAMI_TARGET_AREAS", "相模湾・三浦半島,神奈川県,伊豆諸島").split(",")
+)
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "secrets/credentials.json")
 GOOGLE_TOKEN_DIR = os.getenv("GOOGLE_TOKEN_DIR", "secrets")
 CALENDAR_SYNC_INTERVAL_MINUTES = int(os.getenv("CALENDAR_SYNC_INTERVAL_MINUTES", "30"))
@@ -319,6 +328,22 @@ def _init_db() -> None:
             mac_address    TEXT,
             created_at     TEXT NOT NULL,
             updated_at     TEXT NOT NULL
+        )
+    """)
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS earthquake_log (
+            earthquake_id TEXT PRIMARY KEY,
+            place         TEXT,
+            scale         INTEGER,
+            magnitude     REAL,
+            notified_at   TEXT NOT NULL
+        )
+    """)
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS tsunami_state (
+            area       TEXT PRIMARY KEY,
+            grade      TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
     """)
     _db_conn.commit()
@@ -982,6 +1007,10 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_calendar_notification_loop())
         logger.info("Calendar sync and notification started")
 
+    if P2PQUAKE_ENABLED:
+        asyncio.create_task(_p2pquake_ws_loop())
+        logger.info("P2P地震情報 WebSocket started")
+
     yield
 
     if slack_handler:
@@ -1092,6 +1121,301 @@ class _MqttConnection:
 
 
 _mqtt_conn = _MqttConnection()
+
+
+# ── P2P地震情報 WebSocket ─────────────────────────────────────────────────────
+
+_SCALE_MAP = {
+    -1: "震度不明",
+    10: "震度1", 20: "震度2", 30: "震度3",
+    40: "震度4", 45: "震度4強",
+    50: "震度5弱", 55: "震度5強",
+    60: "震度6弱", 65: "震度6強",
+    70: "震度7",
+}
+_TSUNAMI_GRADE_ORDER = {"Watch": 1, "Warning": 2, "MajorWarning": 3}
+_TSUNAMI_GRADE_LABEL = {
+    "Watch": "津波注意報",
+    "Warning": "津波警報",
+    "MajorWarning": "大津波警報",
+}
+
+
+def _scale_to_str(scale: int) -> str:
+    return _SCALE_MAP.get(scale, f"震度{scale}")
+
+
+def _eq_already_seen(earthquake_id: str) -> bool:
+    row = _db_conn.execute(
+        "SELECT 1 FROM earthquake_log WHERE earthquake_id = ?", (earthquake_id,)
+    ).fetchone()
+    return row is not None
+
+
+def _mark_eq_seen(earthquake_id: str, place: str, scale: int, magnitude: float) -> None:
+    with _db_lock:
+        _db_conn.execute(
+            "INSERT OR IGNORE INTO earthquake_log "
+            "(earthquake_id, place, scale, magnitude, notified_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'))",
+            (earthquake_id, place, scale, magnitude),
+        )
+        _db_conn.commit()
+
+
+def _get_tsunami_grade(area: str) -> str | None:
+    row = _db_conn.execute(
+        "SELECT grade FROM tsunami_state WHERE area = ?", (area,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _save_tsunami_grade(area: str, grade: str) -> None:
+    with _db_lock:
+        _db_conn.execute(
+            "INSERT INTO tsunami_state (area, grade, updated_at) VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(area) DO UPDATE SET grade=excluded.grade, updated_at=excluded.updated_at",
+            (area, grade),
+        )
+        _db_conn.commit()
+
+
+def _clear_tsunami_state() -> None:
+    with _db_lock:
+        _db_conn.execute("DELETE FROM tsunami_state")
+        _db_conn.commit()
+
+
+def _build_earthquake_fixed_text(data: dict) -> str | None:
+    eq    = data["earthquake"]
+    scale = eq["maxScale"]
+    place = eq["hypocenter"]["name"]
+    mag   = eq["hypocenter"]["magnitude"]
+    tsun  = eq["domesticTsunami"]
+
+    min_scale = int(_get_setting("p2pquake_min_scale", str(P2PQUAKE_MIN_SCALE)))
+    if scale < min_scale:
+        return None
+
+    scale_str = _scale_to_str(scale)
+    info = f"{place}でマグニチュード{mag}の地震が発生しました。"
+
+    if scale <= 20:
+        msg = f"最大{scale_str}です。"
+    elif scale <= 30:
+        msg = f"最大{scale_str}です。落下物に気をつけてください。"
+    elif scale <= 45:
+        msg = f"最大{scale_str}です。棚の物が落ちることがあります。揺れが収まるまで様子を見てください。"
+    elif scale <= 50:
+        msg = f"【緊急地震速報】最大{scale_str}です。今すぐ低い姿勢をとり、頭を守ってください。"
+    elif scale <= 55:
+        msg = (f"【緊急地震速報】最大{scale_str}です。"
+               "固定されていない家具が倒れることがあります。今すぐ安全な場所に身を隠してください。")
+    elif scale <= 60:
+        msg = (f"【緊急地震速報】最大{scale_str}です。"
+               "非常に危険です。今すぐ頭を守り、揺れが収まるまで動かないでください。")
+    elif scale <= 65:
+        msg = f"【最大警戒】最大{scale_str}です。今すぐ頭を守り、絶対に動かないでください。"
+    else:
+        msg = ("【最大警戒・震度7】極めて激しい揺れです。"
+               "頭を守り、揺れが完全に収まるまで待ってください。")
+
+    tsunami_suffix = ""
+    if tsun == "Watch":
+        tsunami_suffix = "津波注意報が発令されています。海岸や川には近づかないでください。"
+    elif tsun == "Warning":
+        tsunami_suffix = "【津波警報】海岸・川から直ちに離れてください。"
+    elif tsun == "Checking":
+        tsunami_suffix = "津波の有無を確認中です。海岸には近づかないでください。"
+
+    return info + msg + tsunami_suffix
+
+
+async def _p2p_speak(text: str, source: str, priority: str, expression: str = "neutral") -> None:
+    audio_url, stream_url = await resolve_audio_url(text)
+    publish_speak(audio_url, stream_url, text,
+                  source=source, priority=priority,
+                  request_id=str(uuid.uuid4()), expression=expression)
+
+
+async def _handle_earthquake(data: dict) -> None:
+    if data.get("issue", {}).get("type") != "DetailScale":
+        return  # 速報段階はスキップ、確定詳細情報のみ処理
+
+    earthquake_id = data["id"]
+    if _eq_already_seen(earthquake_id):
+        return
+
+    eq    = data["earthquake"]
+    place = eq["hypocenter"]["name"]
+    scale = eq["maxScale"]
+    mag   = eq["hypocenter"]["magnitude"]
+
+    fixed_text = _build_earthquake_fixed_text(data)
+    if not fixed_text:
+        return  # P2PQUAKE_MIN_SCALE 未満
+
+    _mark_eq_seen(earthquake_id, place, scale, mag)
+    logger.info("earthquake notify: id=%s place=%s scale=%s", earthquake_id, place, scale)
+
+    # ① 固定テキストを即時発話
+    await _p2p_speak(fixed_text, source="earthquake", priority="high")
+
+    # ② LLM コメントを非同期で続けて発話
+    asyncio.create_task(_earthquake_llm_comment(place, _scale_to_str(scale), mag))
+
+
+async def _earthquake_llm_comment(place: str, scale_str: str, mag: float) -> None:
+    prompt = (
+        f"先ほど地震速報をお知らせしました（{place} / {scale_str} / M{mag}）。"
+        "情報の繰り返しは不要です。家族への短い一言コメントを1〜2文で追加してください。"
+    )
+    try:
+        comment = await chat_with_llm(prompt, session_key="family", use_functions=False)
+        await _p2p_speak(comment, source="earthquake_comment", priority="normal")
+    except Exception:
+        logger.exception("earthquake LLM comment failed")
+
+
+async def _handle_tsunami(data: dict) -> None:
+    earthquake_id = data["id"]
+
+    if data.get("cancelled"):
+        cancel_key = earthquake_id + ":cancelled"
+        if _eq_already_seen(cancel_key):
+            return
+        _mark_eq_seen(cancel_key, "tsunami_cancel", 0, 0.0)
+        _clear_tsunami_state()
+        fixed_text = "津波予報が解除されました。海岸付近の方は安全を確認してから戻るようにしてください。"
+        await _p2p_speak(fixed_text, source="tsunami", priority="high", expression="sad")
+        asyncio.create_task(_tsunami_llm_comment(fixed_text, cancelled=True))
+        return
+
+    for area in data.get("areas", []):
+        areas_str = _get_setting("p2pquake_tsunami_areas", ",".join(P2PQUAKE_TSUNAMI_TARGET_AREAS))
+        target_areas = set(areas_str.split(","))
+        if area["name"] not in target_areas:
+            continue
+
+        new_grade     = area["grade"]
+        current_grade = _get_tsunami_grade(area["name"])
+        new_order     = _TSUNAMI_GRADE_ORDER.get(new_grade, 0)
+        current_order = _TSUNAMI_GRADE_ORDER.get(current_grade or "", 0)
+
+        if new_order <= current_order:
+            continue  # 同グレードまたは格下げは通知しない
+
+        _save_tsunami_grade(area["name"], new_grade)
+        grade_label = _TSUNAMI_GRADE_LABEL.get(new_grade, new_grade)
+        height  = area.get("maxHeight", {}).get("description", "")
+        arrival = area.get("firstHeight", {}).get("arrivalTime", "")
+
+        fixed_text = f"相模湾・三浦半島に{grade_label}が発令されました。"
+        if height:
+            fixed_text += f"予想される津波の高さは{height}です。"
+        if arrival:
+            fixed_text += f"第一波到達予想は{arrival}です。"
+        fixed_text += "海岸・川から直ちに離れてください。"
+
+        logger.info("tsunami notify: area=%s grade=%s", area["name"], new_grade)
+        await _p2p_speak(fixed_text, source="tsunami", priority="high", expression="sad")
+        asyncio.create_task(_tsunami_llm_comment(fixed_text, cancelled=False))
+
+
+async def _tsunami_llm_comment(fixed_text: str, cancelled: bool) -> None:
+    if cancelled:
+        prompt = "津波予報が解除されました。安堵の一言を1文で、話し言葉で。"
+    else:
+        prompt = (
+            f"以下の津波警報をお知らせしました。緊急の一言コメントを1文で。情報の繰り返し不要。\n{fixed_text}"
+        )
+    try:
+        comment = await chat_with_llm(prompt, session_key="family", use_functions=False)
+        await _p2p_speak(comment, source="tsunami_comment", priority="normal")
+    except Exception:
+        logger.exception("tsunami LLM comment failed")
+
+
+async def _handle_eew(data: dict) -> None:
+    # code=554: 緊急地震速報（警報）。揺れが来る数秒前。LLMなしで即発話のみ。
+    eew_key = data.get("id", "") + ":eew"
+    if _eq_already_seen(eew_key):
+        return
+    _mark_eq_seen(eew_key, "eew", 0, 0.0)
+    text = "緊急地震速報！強い揺れが来る可能性があります。今すぐ身を低くして頭を守ってください。"
+    await _p2p_speak(text, source="eew", priority="high", expression="sad")
+
+
+async def _handle_nankai(data: dict) -> None:
+    # code=556: 南海トラフ地震臨時情報。固定案内 + LLM 解説。
+    nankai_key = data.get("id", "")
+    if _eq_already_seen(nankai_key):
+        return
+    _mark_eq_seen(nankai_key, "nankai", 0, 0.0)
+    fixed_text = ("南海トラフ地震に関する臨時情報が発表されました。"
+                  "詳しくはテレビやラジオ、気象庁のウェブサイトを確認してください。")
+    await _p2p_speak(fixed_text, source="nankai", priority="high")
+    asyncio.create_task(_unknown_p2p_llm(data))
+
+
+async def _unknown_p2p_llm(data: dict) -> None:
+    prompt = (
+        "以下はP2P地震情報APIから届いた防災通知JSONです。\n"
+        "内容を読み取り、家族に向けて簡潔に伝えてください。\n"
+        "重要な情報は省かず、1〜3文の話し言葉にしてください。\n\n"
+        f"{json.dumps(data, ensure_ascii=False, indent=2)}"
+    )
+    try:
+        text = await chat_with_llm(prompt, session_key="family", use_functions=False)
+        await _p2p_speak(text, source="p2pquake_unknown", priority="normal")
+    except Exception:
+        logger.exception("unknown p2p LLM failed")
+
+
+async def _p2pquake_ws_loop() -> None:
+    backoff = 1
+    seen_ids: set[str] = set()  # 再接続時の直近重複対策（メモリ内）
+
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(P2PQUAKE_WS_URL) as ws:
+                    logger.info("P2P地震情報 WebSocket connected: %s", P2PQUAKE_WS_URL)
+                    backoff = 1
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            eid  = data.get("id", "")
+                            code = data.get("code")
+
+                            if eid and eid in seen_ids:
+                                continue
+                            if eid:
+                                seen_ids.add(eid)
+                                if len(seen_ids) > 500:
+                                    seen_ids.pop()
+
+                            if code == 551:
+                                asyncio.create_task(_handle_earthquake(data))
+                            elif code == 552:
+                                asyncio.create_task(_handle_tsunami(data))
+                            elif code == 554:
+                                asyncio.create_task(_handle_eew(data))
+                            elif code == 556:
+                                asyncio.create_task(_handle_nankai(data))
+                            else:
+                                logger.info("p2pquake: unknown code=%s id=%s", code, eid)
+                                asyncio.create_task(_unknown_p2p_llm(data))
+
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            logger.warning("p2pquake ws closed/error, reconnecting")
+                            break
+
+        except Exception:
+            logger.exception("p2pquake ws error, retry in %ds", backoff)
+
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, 60)
 
 
 class SpeakRequest(BaseModel):
@@ -1299,6 +1623,25 @@ _EDITABLE_SETTINGS = {
         "description": "この値以上のスコアで話者を確定（0〜1、デフォルト 0.75）",
         "env_fallback": lambda: str(SPEAKER_ID_THRESHOLD),
     },
+    "p2pquake_min_scale": {
+        "label": "地震通知 最小震度",
+        "description": "この震度以上の地震を通知します。震度5弱以上はスマホの緊急速報と重複します。",
+        "env_fallback": lambda: str(P2PQUAKE_MIN_SCALE),
+        "type": "select",
+        "options": [
+            {"value": "10", "label": "震度1以上"},
+            {"value": "20", "label": "震度2以上"},
+            {"value": "30", "label": "震度3以上（推奨）"},
+            {"value": "40", "label": "震度4以上"},
+            {"value": "50", "label": "震度5弱以上"},
+        ],
+    },
+    "p2pquake_tsunami_areas": {
+        "label": "津波通知 対象予報区",
+        "description": "通知する津波予報区名をカンマ区切りで指定。予報区名は気象庁の正式名称を使用してください。",
+        "env_fallback": lambda: ",".join(P2PQUAKE_TSUNAMI_TARGET_AREAS),
+        "type": "textarea",
+    },
 }
 
 
@@ -1307,14 +1650,18 @@ def api_get_settings():
     result = []
     for key, meta in _EDITABLE_SETTINGS.items():
         db_value = _get_setting(key, "")
-        result.append({
+        entry = {
             "key": key,
             "label": meta["label"],
             "description": meta["description"],
             "value": db_value,
             "env_default": meta["env_fallback"](),
             "effective": db_value or meta["env_fallback"](),
-        })
+            "type": meta.get("type", "text"),
+        }
+        if "options" in meta:
+            entry["options"] = meta["options"]
+        result.append(entry)
     return result
 
 

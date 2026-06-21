@@ -13,21 +13,37 @@
 
 {% block scripts %}
 <script>
+  function renderInput(s) {
+    const effective = s.value || s.env_default || '';
+    if (s.type === 'select' && s.options) {
+      const opts = s.options.map(o =>
+        `<option value="${esc(o.value)}" ${effective === o.value ? 'selected' : ''}>${esc(o.label)}</option>`
+      ).join('');
+      return `<select id="input-${esc(s.key)}"
+          class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400 bg-white">
+          ${opts}
+        </select>`;
+    }
+    if (s.type === 'textarea') {
+      return `<textarea id="input-${esc(s.key)}" rows="3" placeholder="${esc(s.env_default || '未設定')}"
+          class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400 font-mono resize-y">${esc(s.value)}</textarea>`;
+    }
+    return `<input id="input-${esc(s.key)}" value="${esc(s.value)}" placeholder="${esc(s.env_default || '未設定')}"
+        class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400 font-mono">`;
+  }
+
   async function loadSettings() {
     const settings = await apiFetch('/api/settings');
     const list = document.getElementById('settingsList');
     list.innerHTML = settings.map(s => `
       <div class="bg-white rounded-lg border border-gray-200 p-5">
-        <div class="flex items-start justify-between gap-4">
-          <div class="flex-1 min-w-0">
-            <p class="font-medium text-sm text-gray-800">${esc(s.label)}</p>
-            <p class="text-xs text-gray-400 mt-0.5">${esc(s.description)}</p>
-            ${s.env_default ? `<p class="text-xs text-gray-400 mt-1">環境変数デフォルト: <code class="bg-gray-100 px-1 rounded">${esc(s.env_default)}</code></p>` : ''}
-          </div>
+        <div class="flex-1 min-w-0 mb-3">
+          <p class="font-medium text-sm text-gray-800">${esc(s.label)}</p>
+          <p class="text-xs text-gray-400 mt-0.5">${esc(s.description)}</p>
+          ${s.env_default ? `<p class="text-xs text-gray-400 mt-1">環境変数デフォルト: <code class="bg-gray-100 px-1 rounded">${esc(s.env_default)}</code></p>` : ''}
         </div>
-        <div class="flex gap-2 mt-3">
-          <input id="input-${esc(s.key)}" value="${esc(s.value)}" placeholder="${esc(s.env_default || '未設定')}"
-            class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400 font-mono">
+        <div class="flex gap-2 items-start">
+          ${renderInput(s)}
           <button onclick="saveSetting('${esc(s.key)}')" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded whitespace-nowrap">保存</button>
           <button onclick="resetSetting('${esc(s.key)}')" class="text-gray-400 hover:text-gray-600 text-sm px-3 py-2 whitespace-nowrap" title="デフォルトに戻す">↺</button>
         </div>
