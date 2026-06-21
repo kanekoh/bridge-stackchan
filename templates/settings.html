@@ -11,7 +11,12 @@
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
   <p class="font-medium text-sm text-gray-800">住所から座標を設定</p>
   <p class="text-xs text-gray-400 mt-0.5">雨・地震通知の基準となる場所です。番地まで入力するとより正確になります。個人情報保護のためデフォルト値はありません。</p>
-  <div class="flex gap-2 mt-3">
+  <button onclick="scanLocation()" class="mt-3 bg-green-500 hover:bg-green-600 text-white text-sm px-4 py-2 rounded">
+    ラズパイの Wi-Fi から自動取得
+  </button>
+  <p id="scanMsg" class="text-xs mt-1 text-gray-400"></p>
+  <p class="text-xs text-gray-400 mt-3 mb-1">または住所で手動入力:</p>
+  <div class="flex gap-2">
     <input id="locationInput" type="text" placeholder="日本国内の住所（市区町村・丁目・番地など）"
       class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
     <button onclick="geocode()" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded whitespace-nowrap">座標を検索</button>
@@ -107,6 +112,21 @@
   }
 
   // ── 設置場所 ──────────────────────────────────────
+  async function scanLocation() {
+    const msg = document.getElementById('scanMsg');
+    msg.textContent = 'Wi-Fi スキャン中...';
+    msg.className = 'text-xs mt-1 text-gray-400';
+    try {
+      const data = await apiFetch('/api/location/scan', { method: 'POST' });
+      msg.textContent = `✅ 取得成功: ${data.title}（精度 ±${Math.round(data.accuracy)}m）`;
+      msg.className = 'text-xs mt-1 text-green-600';
+      loadCurrentLocation();
+    } catch(e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.className = 'text-xs mt-1 text-red-500';
+    }
+  }
+
   let _pendingGeo = null;
 
   async function geocode() {

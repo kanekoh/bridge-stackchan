@@ -1851,38 +1851,42 @@ async def _reverse_geocode(lat: float, lon: float) -> tuple[str, str]:
     return pref, title
 
 
-class LocationUpdateRequest(BaseModel):
-    wifiAccessPoints: list[dict] = []
-    considerIp: bool = True
+def _scan_local_wifi() -> list[dict]:
+    """ラズパイ自身が nmcli で周辺 Wi-Fi をスキャンして AP リストを返す。
+    nmcli が使えない環境では空リストを返す（IP フォールバックに委ねる）。"""
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ["nmcli", "-t", "-f", "BSSID,SIGNAL", "dev", "wifi", "list"],
+            timeout=10, stderr=subprocess.DEVNULL, text=True,
+        )
+    except Exception:
+        return []
+    aps = []
+    for line in out.splitlines():
+        parts = line.strip().split(":")
+        # nmcli -t 出力: AA\:BB\:CC\:DD\:EE\:FF:signal  (BSSID のコロンはバックスラッシュエスケープ)
+        if len(parts) < 7:
+            continue
+        bssid  = ":".join(p.lstrip("\\") for p in parts[:6])
+        signal = parts[6]
+        try:
+            # nmcli は 0〜100 の強度を返す → dBm に近似変換
+            dbm = int(signal) // 2 - 100
+            aps.append({"macAddress": bssid.lower(), "signalStrength": dbm})
+        except ValueError:
+            continue
+    return aps
 
 
-@app.post("/api/location/update")
-async def api_location_update(req: LocationUpdateRequest):
-    """Stack-chan から Wi-Fi スキャン結果を受け取り、Google Geolocation API で
-    緯度経度を解決して app_settings に保存する。
-
-    Stack-chan 側インタフェース仕様:
-      POST /api/location/update
-      Content-Type: application/json
-      {
-        "wifiAccessPoints": [
-          {"macAddress": "aa:bb:cc:dd:ee:ff", "signalStrength": -65},
-          ...
-        ],
-        "considerIp": true
-      }
-
-    レスポンス (200):
-      {"lat": 35.32, "lon": 139.55, "accuracy": 45.0,
-       "pref": "神奈川県", "title": "神奈川県、鎌倉市、大町", "updated": true}
-    """
+async def _geolocate_and_save(wifi_aps: list[dict], consider_ip: bool = True) -> dict:
+    """Google Geolocation API + Nominatim で位置を解決して app_settings に保存する。"""
     if not GOOGLE_GEOLOCATION_API_KEY:
         raise HTTPException(status_code=503, detail="GOOGLE_GEOLOCATION_API_KEY が設定されていません")
 
-    # ① Google Geolocation API で緯度経度を取得
-    geo_payload: dict = {"considerIp": req.considerIp}
-    if req.wifiAccessPoints:
-        geo_payload["wifiAccessPoints"] = req.wifiAccessPoints
+    geo_payload: dict = {"considerIp": consider_ip}
+    if wifi_aps:
+        geo_payload["wifiAccessPoints"] = wifi_aps
 
     try:
         geo_resp = await _http_client.post(
@@ -1900,15 +1904,13 @@ async def api_location_update(req: LocationUpdateRequest):
     lon      = geo_data["location"]["lng"]
     accuracy = geo_data.get("accuracy", 0.0)
 
-    # ② Nominatim で逆ジオコーディング → 都道府県 + 住所文字列
     try:
         pref, title = await _reverse_geocode(lat, lon)
     except Exception as e:
-        logger.warning("reverse geocode failed, using coordinates only: %s", e)
+        logger.warning("reverse geocode failed: %s", e)
         pref  = ""
         title = f"緯度{lat:.4f} 経度{lon:.4f}"
 
-    # ③ app_settings に保存（既存の地震フィルタ・LLM コンテキストがそのまま利用）
     _set_setting("location_lat",   str(lat))
     _set_setting("location_lon",   str(lon))
     _set_setting("location_pref",  pref)
@@ -1919,6 +1921,25 @@ async def api_location_update(req: LocationUpdateRequest):
 
     return {"lat": lat, "lon": lon, "accuracy": accuracy,
             "pref": pref, "title": title, "updated": True}
+
+
+class LocationUpdateRequest(BaseModel):
+    wifiAccessPoints: list[dict] = []
+    considerIp: bool = True
+
+
+@app.post("/api/location/update")
+async def api_location_update(req: LocationUpdateRequest):
+    """Stack-chan から Wi-Fi スキャン結果を受け取り位置を更新する。"""
+    return await _geolocate_and_save(req.wifiAccessPoints, req.considerIp)
+
+
+@app.post("/api/location/scan")
+async def api_location_scan():
+    """ラズパイ自身が Wi-Fi をスキャンして位置を更新する（WebUI テスト用）。"""
+    aps = _scan_local_wifi()
+    logger.info("local wifi scan: %d APs found", len(aps))
+    return await _geolocate_and_save(aps, consider_ip=True)
 
 
 # ── REST API (UI test) ────────────────────────────────────────────────────────
