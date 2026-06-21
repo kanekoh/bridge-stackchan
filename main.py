@@ -18,7 +18,7 @@ import httpx
 import openai
 import paho.mqtt.client as mqtt
 import yaml
-from fastapi import FastAPI, Form, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, Form, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -1349,13 +1349,13 @@ async def _handle_earthquake(data: dict) -> None:
     fixed_text = _build_earthquake_fixed_text(data, local_scale)
 
     _mark_eq_seen(earthquake_id, place, local_scale, mag)
-    logger.info("earthquake notify: id=%s place=%s scale=%s", earthquake_id, place, scale)
+    logger.info("earthquake notify: id=%s place=%s scale=%s", earthquake_id, place, local_scale)
 
     # ① 固定テキストを即時発話
     await _p2p_speak(fixed_text, source="earthquake", priority="high")
 
     # ② LLM コメントを非同期で続けて発話
-    asyncio.create_task(_earthquake_llm_comment(place, _scale_to_str(scale), mag))
+    asyncio.create_task(_earthquake_llm_comment(place, _scale_to_str(local_scale), mag))
 
 
 async def _earthquake_llm_comment(place: str, scale_str: str, mag: float) -> None:
@@ -1926,6 +1926,49 @@ def debug_connectivity():
             results["tcp"][f"{host}:{port}"] = _tcp_check(host, port)
 
     return results
+
+
+@app.post("/api/debug/p2pquake")
+async def debug_p2pquake(code: int = Query(551), force: bool = Query(False)):
+    """
+    P2P地震情報の直近データを取得してハンドラに流す（テスト用）。
+    code: 551=地震, 552=津波, 554=EEW, 556=南海トラフ, それ以外=unknown LLM
+    force=true: dedup をスキップして必ず発話する
+    """
+    p2p_history_url = f"https://api.p2pquake.net/v2/history?codes={code}&limit=1"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(p2p_history_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                raise HTTPException(status_code=502, detail=f"P2P API returned {resp.status}")
+            events = await resp.json()
+
+    if not events:
+        raise HTTPException(status_code=404, detail=f"code={code} の直近データが見つかりません")
+
+    data = events[0]
+    event_id = data.get("id", "")
+
+    if force and event_id:
+        # dedup エントリを一時削除して再処理できるようにする
+        with _db_lock:
+            _db_conn.execute(  # type: ignore[union-attr]
+                "DELETE FROM earthquake_log WHERE earthquake_id = ? OR earthquake_id LIKE ?",
+                (event_id, event_id + ":%"),
+            )
+            _db_conn.commit()  # type: ignore[union-attr]
+
+    if code == 551:
+        await _handle_earthquake(data)
+    elif code == 552:
+        await _handle_tsunami(data)
+    elif code == 554:
+        await _handle_eew(data)
+    elif code == 556:
+        await _handle_nankai(data)
+    else:
+        await _unknown_p2p_llm(data)
+
+    return {"ok": True, "code": code, "event_id": event_id, "force": force}
 
 
 @app.get("/debug/calendar-items")
