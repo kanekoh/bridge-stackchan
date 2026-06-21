@@ -6,6 +6,29 @@
 <h1 class="text-xl font-bold text-gray-800 mb-2">設定</h1>
 <p class="text-sm text-gray-500 mb-6">DB に保存された値が優先されます。空欄にリセットすると環境変数のデフォルト値が使われます。</p>
 
+<!-- 設置場所 -->
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">設置場所</h2>
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+  <p class="font-medium text-sm text-gray-800">住所から座標を設定</p>
+  <p class="text-xs text-gray-400 mt-0.5">雨・地震通知の基準となる場所です。番地まで入力するとより正確になります。個人情報保護のためデフォルト値はありません。</p>
+  <div class="flex gap-2 mt-3">
+    <input id="locationInput" type="text" placeholder="日本国内の住所（市区町村・丁目・番地など）"
+      class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+    <button onclick="geocode()" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded whitespace-nowrap">座標を検索</button>
+  </div>
+  <div id="geocodeResult" class="mt-3 hidden">
+    <div class="bg-gray-50 rounded p-3 text-sm space-y-1">
+      <p class="text-gray-600">解決された住所: <span id="geoTitle" class="font-medium text-gray-800"></span></p>
+      <p class="text-gray-500 text-xs">緯度: <span id="geoLat"></span>　経度: <span id="geoLon"></span>　都道府県: <span id="geoPref"></span></p>
+    </div>
+    <button onclick="saveLocation()" class="mt-2 bg-green-500 hover:bg-green-600 text-white text-sm px-4 py-2 rounded">この場所で保存</button>
+  </div>
+  <div id="locationCurrent" class="mt-3 text-xs text-gray-400"></div>
+  <p id="locationMsg" class="text-sm mt-2"></p>
+</div>
+
+<!-- その他の設定 -->
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">その他の設定</h2>
 <div id="settingsList" class="space-y-4"></div>
 
 <p id="saveMsg" class="text-sm mt-4"></p>
@@ -83,6 +106,71 @@
     return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
+  // ── 設置場所 ──────────────────────────────────────
+  let _pendingGeo = null;
+
+  async function geocode() {
+    const addr = document.getElementById('locationInput').value.trim();
+    if (!addr) return;
+    const msg = document.getElementById('locationMsg');
+    msg.textContent = '検索中...';
+    msg.className = 'text-sm mt-2 text-gray-400';
+    try {
+      const fd = new FormData();
+      fd.append('address', addr);
+      // ブラウザから直接ジオコーディング（国土地理院）
+      const res = await fetch(
+        `https://msearch.gsi.go.jp/address-search/AddressSearch?q=${encodeURIComponent(addr)}`
+      );
+      const data = await res.json();
+      if (!data.length) throw new Error('住所が見つかりませんでした');
+      const top = data[0];
+      const [lon, lat] = top.geometry.coordinates;
+      const title = top.properties.title;
+      const pref  = title.match(/^(東京都|北海道|(?:京都|大阪)府|.+?県)/)?.[1] ?? '';
+      _pendingGeo = { lat, lon, title, pref, address: addr };
+
+      document.getElementById('geoTitle').textContent = title;
+      document.getElementById('geoLat').textContent   = lat;
+      document.getElementById('geoLon').textContent   = lon;
+      document.getElementById('geoPref').textContent  = pref || '（判定できませんでした）';
+      document.getElementById('geocodeResult').classList.remove('hidden');
+      msg.textContent = '';
+    } catch(e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.className = 'text-sm mt-2 text-red-500';
+    }
+  }
+
+  async function saveLocation() {
+    if (!_pendingGeo) return;
+    const msg = document.getElementById('locationMsg');
+    try {
+      const fd = new FormData();
+      fd.append('address', _pendingGeo.address);
+      await apiFetch('/api/geocode', { method: 'POST', body: fd });
+      msg.textContent = '✅ 保存しました';
+      msg.className = 'text-sm mt-2 text-green-600';
+      loadCurrentLocation();
+    } catch(e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.className = 'text-sm mt-2 text-red-500';
+    }
+  }
+
+  async function loadCurrentLocation() {
+    try {
+      const loc = await apiFetch('/api/location');
+      const el  = document.getElementById('locationCurrent');
+      if (loc.title) {
+        el.textContent = `現在の設定: ${loc.title}（${loc.pref}）`;
+      } else {
+        el.textContent = '設置場所は未設定です。設定すると地震通知が設置場所基準になります。';
+      }
+    } catch {}
+  }
+
   loadSettings();
+  loadCurrentLocation();
 </script>
 {% endblock %}

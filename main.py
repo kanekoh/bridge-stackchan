@@ -665,6 +665,28 @@ _MESSAGE_TOOLS = [
     },
 ]
 
+_ALERT_TOOLS = [
+    {
+        "type": "function",
+        "name": "get_recent_alerts",
+        "description": (
+            "直近の地震・津波の通知履歴と現在の津波警報状況を返す。"
+            "「さっきの地震は？」「最近地震あった？」「津波情報は？」"
+            "「もう一回教えて」「また揺れた？」などの質問に答えるために使う。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "hours": {
+                    "type": "integer",
+                    "description": "何時間前までの情報を取得するか（1〜72、省略時は24）",
+                },
+            },
+            "required": [],
+        },
+    },
+]
+
 # ON_DEMAND モード時のみ Pass 1 のツール一覧に追加される。
 # LLM がこれを呼ぶと notify_context に enable_web_search フラグが立ち、
 # 次のループで本物の web_search_preview に差し替えられる。
@@ -820,6 +842,47 @@ def _tool_get_upcoming_items(args: dict) -> dict:
     return {"status": "ok", "count": len(items), "items": items}
 
 
+def _tool_get_recent_alerts(args: dict) -> dict:
+    hours = min(max(int(args.get("hours", 24)), 1), 72)
+
+    with _db_lock:
+        eq_rows = _db_conn.execute(  # type: ignore[union-attr]
+            """SELECT place, scale, magnitude, notified_at FROM earthquake_log
+               WHERE notified_at >= datetime('now', ?)
+               AND earthquake_id NOT LIKE '%:eew' AND earthquake_id NOT LIKE '%:cancelled'
+               ORDER BY notified_at DESC LIMIT 10""",
+            (f"-{hours} hours",),
+        ).fetchall()
+        ts_rows = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT area, grade, updated_at FROM tsunami_state ORDER BY updated_at DESC"
+        ).fetchall()
+
+    earthquakes = [
+        {
+            "place": r[0],
+            "scale": _scale_to_str(r[1]),
+            "magnitude": r[2],
+            "notified_at": r[3],
+        }
+        for r in eq_rows
+    ]
+    tsunami_active = [
+        {
+            "area": r[0],
+            "grade": _TSUNAMI_GRADE_LABEL.get(r[1], r[1]),
+            "updated_at": r[2],
+        }
+        for r in ts_rows
+    ]
+    logger.info("Tool get_recent_alerts: hours=%d eq=%d tsunami=%d", hours, len(earthquakes), len(tsunami_active))
+    return {
+        "status": "ok",
+        "period_hours": hours,
+        "earthquakes": earthquakes,
+        "tsunami_active": tsunami_active,
+    }
+
+
 async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
     """Execute a named tool and return the raw result dict (protocol-agnostic)."""
     if name == "set_timer":
@@ -859,6 +922,8 @@ async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
         }
     if name == "get_upcoming_items":
         return _tool_get_upcoming_items(args)
+    if name == "get_recent_alerts":
+        return _tool_get_recent_alerts(args)
     if name == "get_pending_messages":
         messages = _fetch_pending_messages()
         for msg in messages:
@@ -1123,6 +1188,32 @@ class _MqttConnection:
 _mqtt_conn = _MqttConnection()
 
 
+# ── 設置場所ユーティリティ ────────────────────────────────────────────────────
+
+_PREF_RE = re.compile(r"^(東京都|北海道|(?:京都|大阪)府|[^\s]{2,4}?県)")
+
+
+def _extract_pref(title: str) -> str:
+    m = _PREF_RE.match(title)
+    return m.group(1) if m else ""
+
+
+def _get_local_scale(data: dict) -> int | None:
+    """設置場所の都道府県で観測された最大震度コードを返す。
+    全国モードまたは設置場所未設定なら全国最大値を返す。
+    設置場所が設定されていてその県に観測点がなければ None（通知しない）。
+    """
+    if _get_setting("p2pquake_nationwide", "false") == "true":
+        return data["earthquake"]["maxScale"]
+    pref = _get_setting("location_pref", "")
+    if not pref:
+        return data["earthquake"]["maxScale"]
+    local = [p for p in data.get("points", []) if p.get("pref") == pref]
+    if not local:
+        return None
+    return max(p["scale"] for p in local)
+
+
 # ── P2P地震情報 WebSocket ─────────────────────────────────────────────────────
 
 _SCALE_MAP = {
@@ -1186,16 +1277,12 @@ def _clear_tsunami_state() -> None:
         _db_conn.commit()
 
 
-def _build_earthquake_fixed_text(data: dict) -> str | None:
+def _build_earthquake_fixed_text(data: dict, local_scale: int) -> str:
     eq    = data["earthquake"]
-    scale = eq["maxScale"]
     place = eq["hypocenter"]["name"]
     mag   = eq["hypocenter"]["magnitude"]
     tsun  = eq["domesticTsunami"]
-
-    min_scale = int(_get_setting("p2pquake_min_scale", str(P2PQUAKE_MIN_SCALE)))
-    if scale < min_scale:
-        return None
+    scale = local_scale  # 設置場所の都道府県での震度を使う
 
     scale_str = _scale_to_str(scale)
     info = f"{place}でマグニチュード{mag}の地震が発生しました。"
@@ -1246,16 +1333,22 @@ async def _handle_earthquake(data: dict) -> None:
     if _eq_already_seen(earthquake_id):
         return
 
+    local_scale = _get_local_scale(data)
+    if local_scale is None:
+        logger.debug("earthquake: no shaking in location pref, skipping id=%s", earthquake_id)
+        return
+
+    min_scale = int(_get_setting("p2pquake_min_scale", str(P2PQUAKE_MIN_SCALE)))
+    if local_scale < min_scale:
+        return
+
     eq    = data["earthquake"]
     place = eq["hypocenter"]["name"]
-    scale = eq["maxScale"]
     mag   = eq["hypocenter"]["magnitude"]
 
-    fixed_text = _build_earthquake_fixed_text(data)
-    if not fixed_text:
-        return  # P2PQUAKE_MIN_SCALE 未満
+    fixed_text = _build_earthquake_fixed_text(data, local_scale)
 
-    _mark_eq_seen(earthquake_id, place, scale, mag)
+    _mark_eq_seen(earthquake_id, place, local_scale, mag)
     logger.info("earthquake notify: id=%s place=%s scale=%s", earthquake_id, place, scale)
 
     # ① 固定テキストを即時発話
@@ -1623,6 +1716,16 @@ _EDITABLE_SETTINGS = {
         "description": "この値以上のスコアで話者を確定（0〜1、デフォルト 0.75）",
         "env_fallback": lambda: str(SPEAKER_ID_THRESHOLD),
     },
+    "p2pquake_nationwide": {
+        "label": "地震通知 全国モード",
+        "description": "ON にすると設置場所に関わらず日本全国の地震を通知します。OFF（デフォルト）は設置場所の都道府県のみ。",
+        "env_fallback": lambda: "false",
+        "type": "select",
+        "options": [
+            {"value": "false", "label": "OFF — 設置場所の都道府県のみ（推奨）"},
+            {"value": "true",  "label": "ON — 全国すべて通知"},
+        ],
+    },
     "p2pquake_min_scale": {
         "label": "地震通知 最小震度",
         "description": "この震度以上の地震を通知します。震度5弱以上はスマホの緊急速報と重複します。",
@@ -1681,6 +1784,46 @@ def api_reset_setting(key: str):
     with _db_lock:
         _db_conn.execute("DELETE FROM app_settings WHERE key=?", (key,))  # type: ignore[union-attr]
         _db_conn.commit()
+
+
+@app.post("/api/geocode")
+async def api_geocode(address: str = Form(...)):
+    """住所文字列を国土地理院APIで緯度経度に変換し app_settings に保存する。"""
+    if not address.strip():
+        raise HTTPException(status_code=400, detail="住所を入力してください")
+    resp = await _http_client.get(
+        "https://msearch.gsi.go.jp/address-search/AddressSearch",
+        params={"q": address.strip()},
+    )
+    resp.raise_for_status()
+    results = resp.json()
+    if not results:
+        raise HTTPException(status_code=404, detail="住所が見つかりませんでした")
+
+    top   = results[0]
+    lon, lat = top["geometry"]["coordinates"]
+    title = top["properties"]["title"]
+    pref  = _extract_pref(title)
+
+    _set_setting("location_address", address.strip())
+    _set_setting("location_lat",     str(lat))
+    _set_setting("location_lon",     str(lon))
+    _set_setting("location_pref",    pref)
+    _set_setting("location_title",   title)
+
+    return {"lat": lat, "lon": lon, "pref": pref, "title": title}
+
+
+@app.get("/api/location")
+def api_get_location():
+    """現在の設置場所設定を返す。"""
+    return {
+        "address": _get_setting("location_address", ""),
+        "lat":     _get_setting("location_lat", ""),
+        "lon":     _get_setting("location_lon", ""),
+        "pref":    _get_setting("location_pref", ""),
+        "title":   _get_setting("location_title", ""),
+    }
 
 
 # ── REST API (UI test) ────────────────────────────────────────────────────────
@@ -1953,6 +2096,15 @@ def _build_datetime_context() -> str:
     return f"【現在の日時】{now.year}年{now.month}月{now.day}日（{weekday}）{now.hour:02d}:{now.minute:02d} JST"
 
 
+def _build_location_context() -> str:
+    """設置場所が設定されていればシステムプロンプト用の文字列を返す。未設定なら空文字。"""
+    title = _get_setting("location_title", "")
+    pref  = _get_setting("location_pref", "")
+    if not title:
+        return ""
+    return f"【設置場所】{title}（{pref}）— 地元の話題や距離感はこの場所を基準にすること。"
+
+
 # ── LLM Backend Protocol + implementations ───────────────────────────────────
 
 class LLMBackend(Protocol):
@@ -1992,6 +2144,9 @@ class OpenClawResponsesBackend:
 
         user_input: str | list = f"[話者: {speaker}] {text}" if speaker else text
         instructions_parts = [_build_datetime_context()]
+        loc_ctx = _build_location_context()
+        if loc_ctx:
+            instructions_parts.append(loc_ctx)
         if system_prompt_append:
             instructions_parts.append(system_prompt_append)
         tools = list(_TIMER_TOOLS) if use_functions else []
@@ -1999,6 +2154,8 @@ class OpenClawResponsesBackend:
             tools.extend(_CALENDAR_TOOLS)
         if use_functions:
             tools.extend(_MESSAGE_TOOLS)
+        if use_functions and P2PQUAKE_ENABLED:
+            tools.extend(_ALERT_TOOLS)
 
         logger.info(
             "OpenClaw request: url=%s model=%s session_key=%s",
@@ -2063,6 +2220,9 @@ class OpenAIResponsesBackend:
         notify_ctx: dict = notify_context if notify_context is not None else {}
 
         instructions_parts = [_STACKCHAN_SYSTEM_PROMPT, _build_datetime_context()]
+        loc_ctx = _build_location_context()
+        if loc_ctx:
+            instructions_parts.append(loc_ctx)
         if OPENAI_RESPONSES_WEB_SEARCH and OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
             instructions_parts.append(
                 "Web検索ガイドライン:\n"
@@ -2087,6 +2247,8 @@ class OpenAIResponsesBackend:
             tools.extend(_CALENDAR_TOOLS)
         if use_functions and not DISABLE_TOOLS:
             tools.extend(_MESSAGE_TOOLS)
+        if use_functions and P2PQUAKE_ENABLED and not DISABLE_TOOLS:
+            tools.extend(_ALERT_TOOLS)
         if OPENAI_RESPONSES_WEB_SEARCH and not DISABLE_TOOLS:
             if OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
                 tools.append(_REQUEST_WEB_SEARCH_TOOL)
