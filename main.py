@@ -83,6 +83,7 @@ CALENDAR_ENABLED = os.getenv("CALENDAR_ENABLED", "false").lower() == "true"
 GOOGLE_GEOLOCATION_API_KEY = os.getenv("GOOGLE_GEOLOCATION_API_KEY", "")
 
 # 天気通知
+WEATHER_NOTIFY_RAIN     = os.getenv("WEATHER_NOTIFY_RAIN", "false")
 WEATHER_CHECK_INTERVAL  = int(os.getenv("WEATHER_CHECK_INTERVAL", "900"))   # 15分
 WEATHER_RAIN_THRESHOLD  = float(os.getenv("WEATHER_RAIN_THRESHOLD", "0.3")) # mm/15min で雨とみなす
 WEATHER_RAIN_SUDDEN_MUL = 5.0  # 閾値の何倍以上で「急な雨」とみなすか
@@ -1099,24 +1100,53 @@ async def _check_rain_notification() -> None:
         except ValueError:
             pass
 
-    sudden = precip[1] >= threshold * WEATHER_RAIN_SUDDEN_MUL
-    if sudden:
-        fixed_text = "急に雨が降り始めます！洗濯物や開けている窓に注意してください。"
-    else:
-        fixed_text = "30分以内に雨が降り始めそうです。外出の際は傘をお忘れなく。"
+    now      = datetime.now(_JST)
+    hour     = now.hour
+    sudden   = precip[1] >= threshold * WEATHER_RAIN_SUDDEN_MUL
 
-    _set_setting("weather_rain_notified", datetime.now(_JST).isoformat())
-    logger.info("rain notify: sudden=%s precip_next=%s", sudden, precip[1:3])
+    # 時間帯区分
+    if 5 <= hour < 10:
+        time_label = "朝"
+    elif 10 <= hour < 14:
+        time_label = "昼"
+    elif 14 <= hour < 18:
+        time_label = "夕方"
+    elif 18 <= hour < 22:
+        time_label = "夜"
+    else:
+        time_label = "深夜"
+
+    if sudden:
+        fixed_text = f"急に雨が降り始めます！洗濯物や開けている窓に注意してください。"
+    else:
+        fixed_text = f"30分以内に雨が降り始めそうです。"
+
+    _set_setting("weather_rain_notified", now.isoformat())
+    logger.info("rain notify: sudden=%s time=%s precip_next=%s", sudden, time_label, precip[1:3])
 
     await _p2p_speak(fixed_text, source="weather_rain", priority="normal")
-    asyncio.create_task(_rain_llm_comment(sudden))
+    asyncio.create_task(_rain_llm_comment(sudden, time_label, hour))
 
 
-async def _rain_llm_comment(sudden: bool) -> None:
+async def _rain_llm_comment(sudden: bool, time_label: str, hour: int) -> None:
     title = _get_setting("location_title", "")
+
+    # 時間帯ごとの文脈ヒント
+    if hour < 10:
+        hint = "通勤・通学・洗濯物の取り込みなど朝の行動を意識して"
+    elif hour < 14:
+        hint = "外出中の傘や昼食時の移動を意識して"
+    elif hour < 18:
+        hint = "帰宅時の傘や洗濯物の取り込みを意識して"
+    elif hour < 22:
+        hint = "洗濯物・窓の締め忘れ・翌日の準備を意識して"
+    else:
+        hint = "翌朝の傘や洗濯物の準備を意識して"
+
     prompt = (
-        f"{'急な雨' if sudden else '30分以内の雨'}の通知をしました（場所: {title}）。"
-        "洗濯物・傘・窓など家族への短い一言を1文で。通知文の繰り返し不要。"
+        f"{'急な雨' if sudden else '30分以内の雨'}の通知をしました"
+        f"（{time_label}・場所: {title}）。"
+        f"{hint}、家族への短い一言を1文で。通知文の繰り返し不要。"
     )
     try:
         comment = await chat_with_llm(prompt, session_key="family", use_functions=False)
@@ -1130,7 +1160,7 @@ async def _weather_notify_loop() -> None:
     while True:
         await asyncio.sleep(WEATHER_CHECK_INTERVAL)
         try:
-            if _get_setting("weather_notify_rain", "false") == "true":
+            if _get_setting("weather_notify_rain", WEATHER_NOTIFY_RAIN) == "true":
                 await _check_rain_notification()
         except Exception:
             logger.exception("Weather notify loop error")
@@ -1984,7 +2014,7 @@ _EDITABLE_SETTINGS = {
     "weather_notify_rain": {
         "label": "天気通知 — 雨降り始め",
         "description": "30分以内に雨が降り始めると予測されたときに通知します。設置場所の位置情報が必要です。",
-        "env_fallback": lambda: "false",
+        "env_fallback": lambda: WEATHER_NOTIFY_RAIN,
         "type": "select",
         "options": [
             {"value": "false", "label": "OFF"},
