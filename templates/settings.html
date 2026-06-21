@@ -10,12 +10,22 @@
 <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">設置場所</h2>
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
   <p class="font-medium text-sm text-gray-800">住所から座標を設定</p>
-  <p class="text-xs text-gray-400 mt-0.5">雨・地震通知の基準となる場所です。番地まで入力するとより正確になります。個人情報保護のためデフォルト値はありません。</p>
-  <button onclick="scanLocation()" class="mt-3 bg-green-500 hover:bg-green-600 text-white text-sm px-4 py-2 rounded">
-    ラズパイの Wi-Fi から自動取得
+  <p class="text-xs text-gray-400 mt-0.5">雨・地震通知の基準となる場所です。個人情報保護のためデフォルト値はありません。</p>
+
+  <!-- ① ブラウザの現在地（推奨） -->
+  <button onclick="useMyLocation()" class="mt-3 bg-green-500 hover:bg-green-600 text-white text-sm px-4 py-2 rounded">
+    ブラウザの現在地を使う（推奨）
+  </button>
+  <p id="geolocMsg" class="text-xs mt-1 text-gray-400">ブラウザが Wi-Fi や IP から位置を解決します。API キー不要。</p>
+
+  <!-- ② ラズパイ Wi-Fi スキャン（Google API キー必要） -->
+  <button onclick="scanLocation()" class="mt-3 border border-gray-300 hover:bg-gray-50 text-gray-600 text-sm px-4 py-2 rounded">
+    ラズパイの Wi-Fi から取得（Google API キーが必要）
   </button>
   <p id="scanMsg" class="text-xs mt-1 text-gray-400"></p>
-  <p class="text-xs text-gray-400 mt-3 mb-1">または住所で手動入力:</p>
+
+  <!-- ③ 住所で検索 -->
+  <p class="text-xs text-gray-400 mt-4 mb-1">または住所で手動入力:</p>
   <div class="flex gap-2">
     <input id="locationInput" type="text" placeholder="日本国内の住所（市区町村・丁目・番地など）"
       class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
@@ -112,6 +122,38 @@
   }
 
   // ── 設置場所 ──────────────────────────────────────
+  async function useMyLocation() {
+    const msg = document.getElementById('geolocMsg');
+    if (!navigator.geolocation) {
+      msg.textContent = '❌ このブラウザは位置情報に対応していません';
+      msg.className = 'text-xs mt-1 text-red-500';
+      return;
+    }
+    msg.textContent = '位置情報を取得中...';
+    msg.className = 'text-xs mt-1 text-gray-400';
+    navigator.geolocation.getCurrentPosition(async pos => {
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+      msg.textContent = `座標取得 (${lat.toFixed(4)}, ${lon.toFixed(4)}) — 住所を解決中...`;
+      try {
+        const fd = new FormData();
+        fd.append('lat', lat);
+        fd.append('lon', lon);
+        const data = await apiFetch('/api/location/from-coords', { method: 'POST', body: fd });
+        msg.textContent = `✅ 設定しました: ${data.title}`;
+        msg.className = 'text-xs mt-1 text-green-600';
+        loadCurrentLocation();
+      } catch(e) {
+        msg.textContent = '❌ ' + e.message;
+        msg.className = 'text-xs mt-1 text-red-500';
+      }
+    }, err => {
+      const reasons = { 1: '位置情報の使用が拒否されました', 2: '位置情報を取得できませんでした', 3: 'タイムアウトしました' };
+      msg.textContent = '❌ ' + (reasons[err.code] || err.message);
+      msg.className = 'text-xs mt-1 text-red-500';
+    }, { timeout: 10000 });
+  }
+
   async function scanLocation() {
     const msg = document.getElementById('scanMsg');
     msg.textContent = 'Wi-Fi スキャン中...';

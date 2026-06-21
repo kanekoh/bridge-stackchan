@@ -1921,7 +1921,7 @@ async def _reverse_geocode(lat: float, lon: float) -> tuple[str, str]:
     resp.raise_for_status()
     data = resp.json()
     addr = data.get("address", {})
-    pref  = addr.get("state", "")
+    pref  = addr.get("prefecture") or addr.get("state") or addr.get("province") or ""
     city  = addr.get("city") or addr.get("town") or addr.get("village") or ""
     suburb = addr.get("suburb") or addr.get("neighbourhood") or addr.get("quarter") or ""
     parts = [p for p in [pref, city, suburb] if p]
@@ -2004,6 +2004,24 @@ async def _geolocate_and_save(wifi_aps: list[dict], consider_ip: bool = True) ->
 class LocationUpdateRequest(BaseModel):
     wifiAccessPoints: list[dict] = []
     considerIp: bool = True
+
+
+@app.post("/api/location/from-coords")
+async def api_location_from_coords(lat: float = Form(...), lon: float = Form(...)):
+    """ブラウザの位置情報（緯度経度）を受け取り設置場所として保存する。
+    Google API 不要。Nominatim で逆ジオコーディングして都道府県・住所を解決する。"""
+    try:
+        pref, title = await _reverse_geocode(lat, lon)
+    except Exception as e:
+        logger.warning("reverse geocode failed: %s", e)
+        pref  = ""
+        title = f"緯度{lat:.4f} 経度{lon:.4f}"
+    _set_setting("location_lat",   str(lat))
+    _set_setting("location_lon",   str(lon))
+    _set_setting("location_pref",  pref)
+    _set_setting("location_title", title)
+    logger.info("location set from browser coords: lat=%.4f lon=%.4f pref=%s", lat, lon, pref)
+    return {"lat": lat, "lon": lon, "pref": pref, "title": title}
 
 
 @app.post("/api/location/update")
