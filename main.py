@@ -2546,7 +2546,11 @@ def _build_location_context() -> str:
     pref  = _get_setting("location_pref", "")
     if not title:
         return ""
-    return f"【設置場所】{title}（{pref}）— 地元の話題や距離感はこの場所を基準にすること。"
+    return (
+        f"【あなたの設置場所】あなたは {title} に置かれています。"
+        "「どこにいる？」「ここはどこ？」などの質問にはこの場所名を答えること。"
+        "天気・地域の話題・距離感もこの場所を基準にすること。"
+    )
 
 
 # ── LLM Backend Protocol + implementations ───────────────────────────────────
