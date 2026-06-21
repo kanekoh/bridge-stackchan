@@ -1318,11 +1318,14 @@ def _build_earthquake_fixed_text(data: dict, local_scale: int) -> str:
     return info + msg + tsunami_suffix
 
 
-async def _p2p_speak(text: str, source: str, priority: str, expression: str = "neutral") -> None:
-    audio_url, stream_url = await resolve_audio_url(text)
-    publish_speak(audio_url, stream_url, text,
+async def _p2p_speak(text: str, source: str, priority: str) -> None:
+    # 防災通知は感情ラベルを捨てて常に neutral で発話する
+    _, clean_text = _parse_expression(text)
+    speaker_id, stackchan_expr = _resolve_expression("neutral")
+    audio_url, stream_url = await resolve_audio_url(clean_text, speaker_id)
+    publish_speak(audio_url, stream_url, clean_text,
                   source=source, priority=priority,
-                  request_id=str(uuid.uuid4()), expression=expression)
+                  request_id=str(uuid.uuid4()), expression=stackchan_expr)
 
 
 async def _handle_earthquake(data: dict) -> None:
@@ -1380,7 +1383,7 @@ async def _handle_tsunami(data: dict) -> None:
         _mark_eq_seen(cancel_key, "tsunami_cancel", 0, 0.0)
         _clear_tsunami_state()
         fixed_text = "津波予報が解除されました。海岸付近の方は安全を確認してから戻るようにしてください。"
-        await _p2p_speak(fixed_text, source="tsunami", priority="high", expression="sad")
+        await _p2p_speak(fixed_text, source="tsunami", priority="high")
         asyncio.create_task(_tsunami_llm_comment(fixed_text, cancelled=True))
         return
 
@@ -1411,7 +1414,7 @@ async def _handle_tsunami(data: dict) -> None:
         fixed_text += "海岸・川から直ちに離れてください。"
 
         logger.info("tsunami notify: area=%s grade=%s", area["name"], new_grade)
-        await _p2p_speak(fixed_text, source="tsunami", priority="high", expression="sad")
+        await _p2p_speak(fixed_text, source="tsunami", priority="high")
         asyncio.create_task(_tsunami_llm_comment(fixed_text, cancelled=False))
 
 
@@ -1436,7 +1439,7 @@ async def _handle_eew(data: dict) -> None:
         return
     _mark_eq_seen(eew_key, "eew", 0, 0.0)
     text = "緊急地震速報！強い揺れが来る可能性があります。今すぐ身を低くして頭を守ってください。"
-    await _p2p_speak(text, source="eew", priority="high", expression="sad")
+    await _p2p_speak(text, source="eew", priority="high")
 
 
 async def _handle_nankai(data: dict) -> None:
