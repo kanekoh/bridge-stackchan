@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}通知{% endblock %}
+{% block nav_notifications %}font-semibold text-blue-600{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-xl font-bold text-gray-800">カレンダー通知</h1>
+  <button onclick="load()" class="text-sm text-gray-400 hover:text-gray-600">↻ 更新</button>
+</div>
+
+<div class="flex gap-2 mb-4 text-xs">
+  <button onclick="setFilter('all')"      id="f-all"      class="filter-btn px-3 py-1 rounded-full border">すべて</button>
+  <button onclick="setFilter('pending')"  id="f-pending"  class="filter-btn px-3 py-1 rounded-full border">⏰ 未通知</button>
+  <button onclick="setFilter('notified')" id="f-notified" class="filter-btn px-3 py-1 rounded-full border">✅ 通知済</button>
+  <button onclick="setFilter('overdue')"  id="f-overdue"  class="filter-btn px-3 py-1 rounded-full border">⚠ 過去</button>
+</div>
+
+<div id="list" class="space-y-3"></div>
+<p id="empty" class="text-sm text-gray-400 hidden">該当するアイテムがありません</p>
+<p id="msg" class="text-sm mt-4"></p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let _items = [];
+  let _filter = 'all';
+
+  const STATE_LABEL = {
+    pending:  '⏰ 未通知',
+    notified: '✅ 通知済',
+    overdue:  '⚠ 過去',
+  };
+  const STATE_COLOR = {
+    pending:  'bg-blue-50 text-blue-700 border-blue-200',
+    notified: 'bg-green-50 text-green-700 border-green-200',
+    overdue:  'bg-yellow-50 text-yellow-700 border-yellow-200',
+  };
+
+  function esc(s) {
+    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function fmtDate(s) {
+    if (!s) return '—';
+    return s.replace('T', ' ').slice(0, 16);
+  }
+
+  function setFilter(f) {
+    _filter = f;
+    document.querySelectorAll('.filter-btn').forEach(b => {
+      b.className = 'filter-btn px-3 py-1 rounded-full border text-xs ' +
+        (b.id === 'f-' + f ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-500 hover:text-gray-800');
+    });
+    render();
+  }
+
+  function render() {
+    const list = document.getElementById('list');
+    const empty = document.getElementById('empty');
+    const filtered = _filter === 'all' ? _items : _items.filter(i => i.state === _filter);
+    if (!filtered.length) { list.innerHTML = ''; empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+    list.innerHTML = filtered.map(item => {
+      const badge = `<span class="text-xs px-2 py-0.5 rounded-full border ${STATE_COLOR[item.state]}">${STATE_LABEL[item.state]}</span>`;
+      const typeIcon = item.type === 'event' ? '📅' : '✔';
+      const timeRow = item.notify_at
+        ? `<span class="text-gray-400">通知予定: ${fmtDate(item.notify_at)}</span>`
+        : `<span class="text-gray-400">通知時刻未設定</span>`;
+      const notifiedRow = item.notified_at
+        ? `<span class="text-gray-400">通知日時: ${fmtDate(item.notified_at)}</span>`
+        : '';
+      return `
+        <div class="bg-white rounded-lg border border-gray-200 p-4">
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 mb-1">
+                ${badge}
+                <span class="text-xs text-gray-400">${typeIcon} ${esc(item.person_name)}</span>
+              </div>
+              <p class="font-medium text-sm text-gray-800 truncate">${esc(item.title)}</p>
+              <div class="flex flex-wrap gap-x-4 mt-1 text-xs">
+                ${timeRow}
+                ${notifiedRow}
+              </div>
+            </div>
+            <div class="flex flex-col gap-1.5 shrink-0">
+              <button onclick="resend('${esc(item.id)}')"
+                class="bg-blue-500 hover:bg-blue-600 text-white text-xs px-3 py-1.5 rounded whitespace-nowrap">
+                今すぐ通知
+              </button>
+              ${item.notified_at ? `
+              <button onclick="clearLog('${esc(item.id)}')"
+                class="text-gray-400 hover:text-gray-600 text-xs px-3 py-1.5 rounded border whitespace-nowrap">
+                既読解除
+              </button>` : ''}
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  async function load() {
+    try {
+      const data = await apiFetch('/api/notifications');
+      _items = data.items;
+      render();
+    } catch(e) {
+      document.getElementById('msg').textContent = '❌ ' + e.message;
+    }
+  }
+
+  async function resend(id) {
+    const msg = document.getElementById('msg');
+    msg.textContent = '送信中...';
+    msg.className = 'text-sm mt-4 text-gray-400';
+    try {
+      await apiFetch(`/api/notifications/${id}/resend`, { method: 'POST' });
+      msg.textContent = '✅ 通知しました';
+      msg.className = 'text-sm mt-4 text-green-600';
+      await load();
+    } catch(e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.className = 'text-sm mt-4 text-red-500';
+    }
+  }
+
+  async function clearLog(id) {
+    const msg = document.getElementById('msg');
+    try {
+      await apiFetch(`/api/notifications/${id}/log`, { method: 'DELETE' });
+      msg.textContent = '✅ 既読を解除しました（次の通知ループで再送されます）';
+      msg.className = 'text-sm mt-4 text-green-600';
+      await load();
+    } catch(e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.className = 'text-sm mt-4 text-red-500';
+    }
+  }
+
+  setFilter('all');
+  load();
+</script>
+{% endblock %}
