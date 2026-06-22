@@ -721,6 +721,128 @@ _ALERT_TOOLS = [
     },
 ]
 
+_WEATHER_TOOLS = [
+    {
+        "type": "function",
+        "name": "get_weather",
+        "description": (
+            "現在の天気・気温・降水量、および今後数日間の天気予報を取得する。"
+            "「今日の天気は？」「明日雨降る？」「東京の天気は？」などに答えるために使う。"
+            "場所を指定しなければ、スタックちゃんが置かれている場所の天気を返す。"
+            "天気をウェブ検索で調べる代わりに必ずこのツールを使うこと。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": (
+                        "天気を取得したい場所の名前（例：東京、大阪、札幌）。"
+                        "省略するとスタックちゃんの設置場所の天気を返す。"
+                    ),
+                },
+                "forecast_days": {
+                    "type": "integer",
+                    "description": "何日分の予報を取得するか（0=現在のみ、1=今日、3=3日間、最大7）。省略時は3。",
+                },
+            },
+            "required": [],
+        },
+    },
+]
+
+
+async def _tool_get_weather(args: dict) -> dict:
+    """天気ツールの実装: Open-Meteo で天気を取得して LLM が読みやすい形式で返す。"""
+    location_name: str = args.get("location", "")
+    forecast_days: int = min(max(int(args.get("forecast_days", 3)), 0), 7)
+
+    if location_name:
+        # 場所名 → Nominatim でジオコーディング
+        try:
+            resp = await _http_client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": location_name, "format": "json", "limit": 1, "accept-language": "ja"},
+                headers={"User-Agent": "bridge-stackchan/1.0"},
+                timeout=8,
+            )
+            resp.raise_for_status()
+            hits = resp.json()
+            if not hits:
+                return {"status": "error", "message": f"「{location_name}」の場所が見つかりませんでした"}
+            lat = float(hits[0]["lat"])
+            lon = float(hits[0]["lon"])
+            display_name = hits[0].get("display_name", location_name).split(",")[0]
+        except Exception as e:
+            logger.warning("Nominatim geocoding failed: %s", e)
+            return {"status": "error", "message": f"場所の検索に失敗しました: {e}"}
+    else:
+        lat_str = _get_setting("location_lat", "")
+        lon_str = _get_setting("location_lon", "")
+        if not lat_str or not lon_str:
+            return {"status": "error", "message": "設置場所が未設定です。場所を指定して聞いてください。"}
+        lat = float(lat_str)
+        lon = float(lon_str)
+        display_name = _get_setting("location_title", _get_setting("location_pref", "設置場所"))
+
+    try:
+        params: dict = {
+            "latitude": lat,
+            "longitude": lon,
+            "timezone": "Asia/Tokyo",
+            "current": "temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,relative_humidity_2m",
+        }
+        if forecast_days > 0:
+            params["daily"] = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max"
+            params["forecast_days"] = forecast_days + 1  # 今日を含む日数
+
+        resp = await _http_client.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=10)
+        resp.raise_for_status()
+        d = resp.json()
+    except Exception as e:
+        logger.warning("Open-Meteo fetch failed: %s", e)
+        return {"status": "error", "message": f"天気データの取得に失敗しました: {e}"}
+
+    cur = d.get("current", {})
+    result: dict = {
+        "status": "ok",
+        "location": display_name,
+        "current": {
+            "description":     _WMO_DESC.get(cur.get("weather_code", -1), "不明"),
+            "temperature":     cur.get("temperature_2m"),
+            "apparent_temp":   cur.get("apparent_temperature"),
+            "humidity":        cur.get("relative_humidity_2m"),
+            "precipitation":   cur.get("precipitation"),
+            "wind_speed":      cur.get("wind_speed_10m"),
+            "time":            (cur.get("time") or "")[:16],
+        },
+    }
+
+    if forecast_days > 0 and "daily" in d:
+        daily = d["daily"]
+        times  = daily.get("time", [])
+        codes  = daily.get("weather_code", [])
+        t_max  = daily.get("temperature_2m_max", [])
+        t_min  = daily.get("temperature_2m_min", [])
+        prec   = daily.get("precipitation_sum", [])
+        prob   = daily.get("precipitation_probability_max", [])
+        result["forecast"] = [
+            {
+                "date":              times[i],
+                "description":       _WMO_DESC.get(codes[i] if i < len(codes) else -1, "不明"),
+                "temp_max":          t_max[i] if i < len(t_max) else None,
+                "temp_min":          t_min[i] if i < len(t_min) else None,
+                "precipitation_sum": prec[i]  if i < len(prec) else None,
+                "rain_probability":  prob[i]  if i < len(prob) else None,
+            }
+            for i in range(min(forecast_days + 1, len(times)))
+        ]
+
+    logger.info("Function call get_weather: location=%s lat=%.4f lon=%.4f days=%d",
+                display_name, lat, lon, forecast_days)
+    return result
+
+
 # ON_DEMAND モード時のみ Pass 1 のツール一覧に追加される。
 # LLM がこれを呼ぶと notify_context に enable_web_search フラグが立ち、
 # 次のループで本物の web_search_preview に差し替えられる。
@@ -728,9 +850,10 @@ _REQUEST_WEB_SEARCH_TOOL = {
     "type": "function",
     "name": "request_web_search",
     "description": (
-        "最新情報・天気・ニュース・株価・スポーツ結果など、"
+        "最新ニュース・株価・スポーツ結果など、"
         "学習データに含まれていない可能性が高い事実を答えるために"
         "Web 検索が必要なときだけ呼び出すこと。"
+        "天気・気温・降水量は get_weather ツールを使うこと（Web 検索不要）。"
         "雑談・感情表現・既に知っている内容では呼ばないこと。"
     ),
     "parameters": {
@@ -954,6 +1077,8 @@ async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
             "message": "Web検索が有効になりました。次のターンで検索を実行して回答してください。",
             "query": query,
         }
+    if name == "get_weather":
+        return await _tool_get_weather(args)
     if name == "get_upcoming_items":
         return _tool_get_upcoming_items(args)
     if name == "get_recent_alerts":
@@ -3193,6 +3318,8 @@ class OpenClawResponsesBackend:
         if system_prompt_append:
             instructions_parts.append(system_prompt_append)
         tools = list(_TIMER_TOOLS) if use_functions else []
+        if use_functions:
+            tools.extend(_WEATHER_TOOLS)
         if use_functions and CALENDAR_ENABLED:
             tools.extend(_CALENDAR_TOOLS)
         if use_functions:
@@ -3286,6 +3413,8 @@ class OpenAIResponsesBackend:
             )
 
         tools = list(_TIMER_TOOLS) if (use_functions and not DISABLE_TOOLS) else []
+        if use_functions and not DISABLE_TOOLS:
+            tools.extend(_WEATHER_TOOLS)
         if use_functions and CALENDAR_ENABLED and not DISABLE_TOOLS:
             tools.extend(_CALENDAR_TOOLS)
         if use_functions and not DISABLE_TOOLS:
