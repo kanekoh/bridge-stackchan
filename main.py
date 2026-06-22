@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Protocol
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 import ephem
@@ -380,6 +381,17 @@ def _init_db() -> None:
             updated_at TEXT NOT NULL
         )
     """)
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id   TEXT NOT NULL,
+            level       TEXT,
+            ts_ms       INTEGER,
+            msg         TEXT,
+            raw_json    TEXT NOT NULL,
+            received_at TEXT NOT NULL
+        )
+    """)
     _db_conn.commit()
     logger.info("DB initialized: path=%s", DB_PATH)
 
@@ -404,6 +416,15 @@ def _set_setting(key: str, value: str) -> None:
             (key, value, now),
         )
         _db_conn.commit()
+
+
+def _get_display_tz() -> timezone | ZoneInfo:
+    """設置場所から保存されたタイムゾーンを返す。未設定なら JST。"""
+    tz_name = _get_setting("location_timezone", "Asia/Tokyo")
+    try:
+        return ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, Exception):
+        return _JST
 
 
 def _get_all_family_members() -> list[dict]:
@@ -1607,7 +1628,9 @@ class _MqttConnection:
         def on_connect(client, userdata, flags, reason_code, properties):
             if reason_code == 0:
                 client.subscribe("stackchan/ack", qos=MQTT_QOS)
-                logger.info("MQTT (re)connected, subscribed to stackchan/ack qos=%d", MQTT_QOS)
+                client.subscribe(f"stackchan/{MQTT_DEVICE_ID}/log", qos=MQTT_QOS)
+                logger.info("MQTT (re)connected, subscribed to ack + %s/log qos=%d",
+                            MQTT_DEVICE_ID, MQTT_QOS)
                 connected.set()
             else:
                 logger.error("MQTT connect failed: reason_code=%s", reason_code)
@@ -1615,13 +1638,43 @@ class _MqttConnection:
         def on_disconnect(client, userdata, flags, reason_code, properties):
             logger.warning("MQTT disconnected: reason_code=%s", reason_code)
 
+        def _store_device_log(device_id: str, raw: str) -> None:
+            try:
+                data = json.loads(raw)
+                level = data.get("level", "")
+                ts_ms = data.get("ts")
+                msg   = data.get("msg", "")
+                now   = datetime.now(_JST).isoformat()
+                with _db_lock:
+                    _db_conn.execute(
+                        "INSERT INTO device_log (device_id, level, ts_ms, msg, raw_json, received_at)"
+                        " VALUES (?,?,?,?,?,?)",
+                        (device_id, level, ts_ms, msg, raw, now),
+                    )
+                    _db_conn.execute(
+                        "DELETE FROM device_log WHERE id NOT IN "
+                        "(SELECT id FROM device_log WHERE device_id=? ORDER BY id DESC LIMIT 500)",
+                        (device_id,),
+                    )
+                    _db_conn.commit()
+                logger.debug("device_log stored: device=%s level=%s msg=%s", device_id, level, msg)
+            except Exception as e:
+                logger.warning("device_log store error: %s", e)
+
         def on_message(client, userdata, message):
+            topic = message.topic
+            # ── ログトピック ──────────────────────────────────
+            parts = topic.split("/")
+            if len(parts) == 3 and parts[0] == "stackchan" and parts[2] == "log":
+                _store_device_log(parts[1], message.payload.decode("utf-8", errors="replace"))
+                return
+            # ── ACK トピック ──────────────────────────────────
             try:
                 data = json.loads(message.payload)
                 req_id = data.get("id")
                 logger.info(
                     "MQTT ACK on_message: topic=%s req_id=%s status=%s main_loop=%s",
-                    message.topic, req_id, data.get("status"), _main_loop is not None,
+                    topic, req_id, data.get("status"), _main_loop is not None,
                 )
                 if req_id and _main_loop:
                     event = _pending_acks.get(req_id)
@@ -1734,12 +1787,28 @@ def _apply_tsunami_areas_from_pref(pref: str) -> None:
     """都道府県から津波予報区を自動設定する。内陸県の場合は設定しない。"""
     areas = _PREF_TSUNAMI_AREAS.get(pref)
     if areas is None:
-        return  # マッピング未定義の県はそのまま
+        return
     if areas:
         _set_setting("p2pquake_tsunami_areas", ",".join(areas))
         logger.info("tsunami areas auto-set from pref=%s: %s", pref, areas)
     else:
         logger.info("tsunami areas: %s is inland, no coastal areas", pref)
+
+
+async def _fetch_and_save_timezone(lat: float, lon: float) -> None:
+    """Open-Meteo からタイムゾーン文字列を取得して location_timezone に保存する。"""
+    try:
+        resp = await _http_client.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={"latitude": lat, "longitude": lon, "timezone": "auto", "forecast_days": 1},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        tz_name = resp.json().get("timezone", "Asia/Tokyo")
+        _set_setting("location_timezone", tz_name)
+        logger.info("location_timezone updated: %s", tz_name)
+    except Exception:
+        logger.debug("timezone fetch skipped (Open-Meteo unavailable)")
 
 
 def _get_local_scale(data: dict) -> int | None:
@@ -2241,6 +2310,38 @@ async def ui_notifications(request: Request):
     return _templates.TemplateResponse(request=request, name="notifications.html", context=_ui_context(request))
 
 
+@app.get("/ui/logs", response_class=HTMLResponse)
+async def ui_logs(request: Request):
+    return _templates.TemplateResponse(request=request, name="logs.html", context=_ui_context(request))
+
+
+@app.get("/api/device/log")
+def api_device_log(limit: int = Query(default=200, le=500)):
+    """スタックちゃんから受信したログを返す。ts_ms を表示用文字列に変換して返す。"""
+    tz = _get_display_tz()
+    with _db_lock:
+        rows = _db_conn.execute(
+            "SELECT device_id, level, ts_ms, msg, raw_json, received_at"
+            " FROM device_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    entries = []
+    for device_id, level, ts_ms, msg, raw_json, received_at in rows:
+        if ts_ms is not None:
+            ts_dt = datetime.fromtimestamp(ts_ms / 1000, tz=tz)
+            ts_str = ts_dt.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            ts_str = received_at[:19].replace("T", " ")
+        entries.append({
+            "device_id":   device_id,
+            "level":       level or "",
+            "ts_str":      ts_str,
+            "msg":         msg or "",
+            "received_at": received_at[:19].replace("T", " "),
+        })
+    return {"device_id": MQTT_DEVICE_ID, "timezone": _get_setting("location_timezone", "Asia/Tokyo"), "logs": entries}
+
+
 # ── REST API (notifications) ──────────────────────────────────────────────────
 
 @app.get("/api/notifications")
@@ -2531,6 +2632,7 @@ async def api_geocode(address: str = Form(...)):
     _set_setting("location_pref",    pref)
     _set_setting("location_title",   title)
     _apply_tsunami_areas_from_pref(pref)
+    asyncio.create_task(_fetch_and_save_timezone(lat, lon))
 
     return {"lat": lat, "lon": lon, "pref": pref, "title": title}
 
@@ -2631,6 +2733,7 @@ async def _geolocate_and_save(wifi_aps: list[dict], consider_ip: bool = True) ->
     _set_setting("location_pref",  pref)
     _set_setting("location_title", title)
     _apply_tsunami_areas_from_pref(pref)
+    asyncio.create_task(_fetch_and_save_timezone(lat, lon))
 
     logger.info("location updated: lat=%.4f lon=%.4f pref=%s title=%s acc=%.0fm",
                 lat, lon, pref, title, accuracy)
@@ -2659,6 +2762,7 @@ async def api_location_from_coords(lat: float = Form(...), lon: float = Form(...
     _set_setting("location_pref",  pref)
     _set_setting("location_title", title)
     _apply_tsunami_areas_from_pref(pref)
+    asyncio.create_task(_fetch_and_save_timezone(lat, lon))
     logger.info("location set from browser coords: lat=%.4f lon=%.4f pref=%s", lat, lon, pref)
     return {"lat": lat, "lon": lon, "pref": pref, "title": title}
 
