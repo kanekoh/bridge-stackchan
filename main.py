@@ -1580,6 +1580,9 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_iss_notify_loop())  # DB設定で後から有効化可能なため常時起動
     logger.info("ISS notify loop started")
 
+    _mqtt_conn.start()
+    logger.info("MQTT eager connect started")
+
     yield
 
     if slack_handler:
@@ -1699,6 +1702,17 @@ class _MqttConnection:
             raise RuntimeError("MQTT connection timeout (no CONNACK within 10s)")
 
         return client
+
+    def start(self) -> None:
+        """起動時にバックグラウンドスレッドで即時接続する。失敗しても後で publish 時にリトライされる。"""
+        def _try_connect():
+            try:
+                with self._lock:
+                    if self._client is None or not self._client.is_connected():
+                        self._client = self._connect()
+            except Exception as e:
+                logger.warning("MQTT eager connect failed (will retry on first publish): %s", e)
+        threading.Thread(target=_try_connect, daemon=True, name="mqtt-eager-connect").start()
 
     def publish(self, topic: str, payload: str) -> None:
         for attempt in range(2):
