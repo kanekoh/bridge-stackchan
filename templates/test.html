@@ -63,6 +63,16 @@
     <p id="weatherResult" class="text-xs mt-3 text-gray-500"></p>
   </div>
 
+  <!-- 雨データ比較 -->
+  <div class="bg-white rounded-lg border border-gray-200 p-5">
+    <div class="flex items-center justify-between mb-1">
+      <h2 class="font-semibold text-gray-700">雨データ比較</h2>
+      <button onclick="loadRainStatus()" class="text-xs text-gray-400 hover:text-gray-600">↻ 更新</button>
+    </div>
+    <p class="text-xs text-gray-400 mb-4">Open-Meteo と JMA ナウキャストの降水データを並べて確認できます</p>
+    <div id="rainStatus" class="text-xs text-gray-400">取得前</div>
+  </div>
+
   <!-- 防災通知テスト -->
   <div class="bg-white rounded-lg border border-gray-200 p-5">
     <h2 class="font-semibold text-gray-700 mb-1">防災通知テスト</h2>
@@ -199,17 +209,97 @@
     result.className = 'text-xs mt-3 text-gray-400';
     try {
       const d = await apiFetch('/api/debug/weather/rain-check', { method: 'POST' });
-      const p = d.precipitation_15min || [];
-      const labels = ['現在', '+15分', '+30分', '+45分', '+60分', '+75分'];
-      const detail = p.map((v, i) => `${labels[i]}: ${v}mm`).join('  ');
-      const hit = p.slice(1, 3).some(v => v >= d.threshold);
-      result.textContent = (hit ? '✅ 雨を検知、通知を送信しました' : '☀ 雨の予報なし') + `（閾値 ${d.threshold}mm）  ${detail}`;
-      result.className = 'text-xs mt-3 ' + (hit ? 'text-green-600' : 'text-gray-500');
+      result.textContent = d.ok ? `✅ 実行完了（ソース: ${d.active_source}）` : '❌ 失敗';
+      result.className = 'text-xs mt-3 ' + (d.ok ? 'text-green-600' : 'text-red-500');
     } catch(e) {
       result.textContent = '❌ ' + e.message;
       result.className = 'text-xs mt-3 text-red-500';
     }
   }
+
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  function rainBar(mmh, maxMmh) {
+    const pct = Math.min(100, (mmh / Math.max(maxMmh, 1)) * 100);
+    const color = mmh <= 0 ? 'bg-gray-200'
+                : mmh < 1  ? 'bg-blue-200'
+                : mmh < 5  ? 'bg-blue-400'
+                : mmh < 15 ? 'bg-yellow-400'
+                :             'bg-red-500';
+    return `<div class="flex items-center gap-1">
+      <div class="w-24 bg-gray-100 rounded h-2"><div class="${color} h-2 rounded" style="width:${pct}%"></div></div>
+      <span class="text-gray-600">${mmh > 0 ? mmh.toFixed(1) : '0'}</span>
+    </div>`;
+  }
+
+  function renderTimeline(entries, valueKey, unit, active) {
+    if (!entries || !entries.length) return '<span class="text-gray-400">データなし</span>';
+    const maxVal = Math.max(...entries.map(e => e[valueKey] || 0), 1);
+    return entries.map(e => {
+      const val = e[valueKey] || 0;
+      const typeColor = e.type === 'observed' ? 'text-gray-500' : 'text-blue-500';
+      const isCurrent = e.offset_min >= -5 && e.offset_min <= 5;
+      const rowClass = isCurrent ? 'bg-yellow-50 font-medium' : '';
+      return `<div class="flex items-center gap-2 py-0.5 ${rowClass}">
+        <span class="w-12 ${typeColor} shrink-0">${esc(e.time_jst)}</span>
+        <span class="w-14 text-gray-400 shrink-0">${e.offset_min >= 0 ? '+' : ''}${e.offset_min}分</span>
+        ${rainBar(val, maxVal)}
+        <span class="text-gray-400 text-xs shrink-0">${unit}</span>
+        ${isCurrent ? '<span class="text-yellow-600 text-xs">← 現在</span>' : ''}
+      </div>`;
+    }).join('');
+  }
+
+  async function loadRainStatus() {
+    const el = document.getElementById('rainStatus');
+    el.innerHTML = '<span class="text-gray-400">取得中...</span>';
+    try {
+      const d = await apiFetch('/api/debug/rain/status');
+      if (!d.ok) { el.textContent = '❌ ' + (d.detail || '失敗'); return; }
+
+      const src = d.active_source;
+      const om  = d.openmeteo;
+      const nc  = d.nowcast;
+
+      const srcBadge = s => `<span class="px-1.5 py-0.5 rounded text-xs ${s === src ? 'bg-blue-100 text-blue-700 font-bold' : 'bg-gray-100 text-gray-500'}">${s === 'nowcast' ? 'JMA ナウキャスト' : 'Open-Meteo'}${s === src ? '（使用中）' : ''}</span>`;
+
+      const omTl  = om.error  ? `<span class="text-red-500">${esc(om.error)}</span>`
+                               : renderTimeline([...( om.timeline || [])], 'mm_15min', 'mm/15min', src === 'openmeteo');
+      const ncObsTl = nc.error ? '' : renderTimeline([...(nc.timeline_obs || [])], 'mm_h', 'mm/h', false);
+      const ncFctTl = nc.error ? '' : renderTimeline([...(nc.timeline_fct || [])], 'mm_h', 'mm/h', false);
+      const ncHtml  = nc.error
+        ? `<span class="text-red-500">${esc(nc.error)}</span>`
+        : `<div class="text-gray-500 mb-1">観測 (N1) 観測時刻: ${esc(nc.obs_time_jst)}</div>${ncObsTl}
+           <div class="text-gray-500 mt-2 mb-1">予報 (N2) 基準: ${esc(nc.fct_bt_jst)}</div>${ncFctTl}`;
+
+      const judgment = data => {
+        if (data.error) return '';
+        const dry = data.now_dry !== undefined ? data.now_dry : true;
+        const wet = data.soon_wet;
+        return `<div class="mt-1 text-xs ${wet && dry ? 'text-orange-600 font-bold' : 'text-gray-400'}">
+          判定: ${dry ? '現在は乾燥' : '現在降雨中'}　${wet ? '⚠ 30分以内に雨の予報' : '雨の予報なし'}
+        </div>`;
+      };
+
+      el.innerHTML = `
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono">
+          <div>
+            <div class="mb-2">${srcBadge('openmeteo')}</div>
+            ${omTl}
+            ${judgment(om)}
+          </div>
+          <div>
+            <div class="mb-2">${srcBadge('nowcast')}</div>
+            ${ncHtml}
+            ${judgment(nc)}
+          </div>
+        </div>`;
+    } catch(e) {
+      el.textContent = '❌ ' + e.message;
+    }
+  }
+
+  loadRainStatus();
 
   async function speakWeather() {
     const result = document.getElementById('weatherResult');

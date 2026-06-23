@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 import ephem
+from PIL import Image
 import httpx
 import openai
 import paho.mqtt.client as mqtt
@@ -90,6 +91,19 @@ WEATHER_NOTIFY_RAIN     = os.getenv("WEATHER_NOTIFY_RAIN", "false")
 WEATHER_CHECK_INTERVAL  = int(os.getenv("WEATHER_CHECK_INTERVAL", "900"))   # 15分
 WEATHER_RAIN_THRESHOLD  = float(os.getenv("WEATHER_RAIN_THRESHOLD", "0.3")) # mm/15min で雨とみなす
 WEATHER_RAIN_SUDDEN_MUL = 5.0  # 閾値の何倍以上で「急な雨」とみなすか
+
+# ─── JMA ナウキャスト設定 ───────────────────────────────────────────────────
+_NOWCAST_ZOOM = 9
+_NOWCAST_COLOR_MAP: list[tuple[tuple[int, int, int], float]] = [
+    ((242, 242, 255), 0.3),   # 微雨
+    ((160, 210, 255), 0.7),   # 小雨
+    ((  0, 150, 255), 3.0),   # 雨
+    ((  0,  65, 255), 7.0),   # 強雨
+    ((250, 245,   0), 15.0),  # 激しい雨
+    ((255, 153,   0), 25.0),  # 非常に激しい雨
+    ((255,  40,   0), 40.0),  # 猛烈な雨
+    ((180,   0, 104), 65.0),  # 猛烈な雨+
+]
 
 # P2P地震情報 WebSocket
 P2PQUAKE_ENABLED = os.getenv("P2PQUAKE_ENABLED", "false").lower() == "true"
@@ -1225,43 +1239,187 @@ async def _calendar_notification_loop() -> None:
             logger.error("Calendar notification loop error: %s", e)
 
 
-async def _check_rain_notification() -> None:
-    """Open-Meteo minutely_15 で雨降り始めを検知して通知する。"""
-    lat = _get_setting("location_lat", "")
-    lon = _get_setting("location_lon", "")
-    if not lat or not lon:
-        return
+def _nowcast_tile_coords(lat: float, lon: float) -> tuple[int, int, int, int]:
+    """緯度経度 → ナウキャストタイル座標 (tx, ty, pixel_x, pixel_y)。"""
+    zoom = _NOWCAST_ZOOM
+    n = 2 ** zoom
+    px_f = (lon + 180) / 360 * n * 256
+    lat_r = math.radians(lat)
+    py_f = (1 - math.log(math.tan(lat_r) + 1 / math.cos(lat_r)) / math.pi) / 2 * n * 256
+    return int(px_f // 256), int(py_f // 256), int(px_f % 256), int(py_f % 256)
 
+
+async def _nowcast_pixel_intensity(bt: str, vt: str, lat: float, lon: float) -> float:
+    """指定 basetime/validtime のタイルから降水強度 (mm/h) を返す。取得失敗時は 0.0。"""
+    tx, ty, px, py = _nowcast_tile_coords(lat, lon)
+    url = (
+        f"https://www.jma.go.jp/bosai/jmatile/data/nowc"
+        f"/{bt}/none/{vt}/surface/hrpns/{_NOWCAST_ZOOM}/{tx}/{ty}.png"
+    )
+    try:
+        resp = await _http_client.get(url, headers={"User-Agent": "bridge-stackchan/1.0"}, timeout=8)
+        if resp.status_code == 404:
+            return 0.0
+        resp.raise_for_status()
+        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+        r, g, b, a = img.getpixel((px, py))
+        if a == 0:
+            return 0.0
+        best = min(_NOWCAST_COLOR_MAP, key=lambda c: sum((c[0][i] - (r, g, b)[i]) ** 2 for i in range(3)))
+        return best[1]
+    except Exception:
+        return 0.0
+
+
+async def _fetch_nowcast_rain_data(lat: float, lon: float) -> dict:
+    """N1（観測）・N2（予報）タイムラインを取得して返す。"""
+    n1_resp, n2_resp = await asyncio.gather(
+        _http_client.get("https://www.jma.go.jp/bosai/jmatile/data/nowc/targetTimes_N1.json", timeout=8),
+        _http_client.get("https://www.jma.go.jp/bosai/jmatile/data/nowc/targetTimes_N2.json", timeout=8),
+    )
+    n1_resp.raise_for_status()
+    n2_resp.raise_for_status()
+    n1_list = n1_resp.json()
+    n2_list = n2_resp.json()
+
+    # N1: 最新 basetime から直近 7 ステップ（35 分分の観測）
+    n1_basetimes = sorted(set(t["basetime"] for t in n1_list))[-7:]
+    # N2: 最新 basetime の全予報エントリ
+    n2_bt = max(t["basetime"] for t in n2_list)
+    n2_entries = sorted([t for t in n2_list if t["basetime"] == n2_bt], key=lambda t: t["validtime"])
+
+    obs_vals, fct_vals = await asyncio.gather(
+        asyncio.gather(*[_nowcast_pixel_intensity(bt, bt, lat, lon) for bt in n1_basetimes]),
+        asyncio.gather(*[_nowcast_pixel_intensity(e["basetime"], e["validtime"], lat, lon) for e in n2_entries]),
+    )
+
+    now_utc = datetime.now(timezone.utc)
+
+    obs_timeline = []
+    for bt, mm in zip(n1_basetimes, obs_vals):
+        dt = datetime.strptime(bt, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+        obs_timeline.append({
+            "offset_min": int((dt - now_utc).total_seconds() // 60),
+            "time_jst": dt.astimezone(_JST).strftime("%H:%M"),
+            "mm_h": mm,
+            "type": "observed",
+        })
+
+    fct_timeline = []
+    n2_bt_dt = datetime.strptime(n2_bt, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+    for entry, mm in zip(n2_entries, fct_vals):
+        dt = datetime.strptime(entry["validtime"], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+        fct_timeline.append({
+            "offset_min": int((dt - now_utc).total_seconds() // 60),
+            "time_jst": dt.astimezone(_JST).strftime("%H:%M"),
+            "mm_h": mm,
+            "type": "forecast",
+        })
+
+    threshold_mmh = WEATHER_RAIN_THRESHOLD * 4  # mm/15min → mm/h
+    current_mm = float(obs_vals[-1]) if obs_vals else 0.0
+    soon_mm = [e["mm_h"] for e in fct_timeline if 1 <= e["offset_min"] <= 35]
+    now_dry = current_mm < threshold_mmh
+    soon_wet = any(m >= threshold_mmh for m in soon_mm)
+    sudden = any(m >= threshold_mmh * WEATHER_RAIN_SUDDEN_MUL for m in soon_mm)
+
+    return {
+        "obs_time_jst": datetime.strptime(n1_basetimes[-1], "%Y%m%d%H%M%S")
+                        .replace(tzinfo=timezone.utc).astimezone(_JST).strftime("%H:%M"),
+        "fct_bt_jst": n2_bt_dt.astimezone(_JST).strftime("%H:%M"),
+        "timeline_obs": obs_timeline,
+        "timeline_fct": fct_timeline,
+        "current_mm_h": current_mm,
+        "now_dry": now_dry,
+        "soon_wet": soon_wet,
+        "sudden": sudden,
+        "threshold_mmh": threshold_mmh,
+    }
+
+
+async def _fetch_openmeteo_rain_data(lat: float, lon: float) -> dict:
+    """Open-Meteo minutely_15 データを取得して返す（通知判定付き）。"""
     resp = await _http_client.get(
         "https://api.open-meteo.com/v1/forecast",
         params={
             "latitude": lat, "longitude": lon,
             "minutely_15": "precipitation",
             "timezone": "Asia/Tokyo",
-            "forecast_minutely_15": 6,  # 90 分先まで（6 区間 × 15 分）
+            "past_minutely_15": 6,
+            "forecast_minutely_15": 6,
         },
     )
     resp.raise_for_status()
-    precip = resp.json().get("minutely_15", {}).get("precipitation", [])
-    if len(precip) < 3:
-        return
+    m15 = resp.json().get("minutely_15", {})
+    times  = m15.get("time", [])
+    precip = m15.get("precipitation", [])
+
+    # 現在に最も近いインデックスを特定
+    now_str = datetime.now(_JST).strftime("%Y-%m-%dT%H:%M")
+    cur_idx = 0
+    for i, t in enumerate(times):
+        if t <= now_str:
+            cur_idx = i
+
+    timeline = []
+    for i, (t, p) in enumerate(zip(times, precip)):
+        timeline.append({
+            "offset_min": (i - cur_idx) * 15,
+            "time_jst": t[11:16],
+            "mm_15min": p,
+            "type": "observed" if i <= cur_idx else "forecast",
+        })
 
     threshold = WEATHER_RAIN_THRESHOLD
-    now_dry   = precip[0] < threshold
-    soon_wet  = any(p >= threshold for p in precip[1:3])  # 15〜45 分後
+    current_val = precip[cur_idx] if cur_idx < len(precip) else 0.0
+    soon_vals   = [precip[j] for j in range(cur_idx + 1, min(cur_idx + 4, len(precip)))]
+    now_dry  = current_val < threshold
+    soon_wet = any(p >= threshold for p in soon_vals)
+    sudden   = any(p >= threshold * WEATHER_RAIN_SUDDEN_MUL for p in soon_vals)
+
+    return {
+        "timeline": timeline,
+        "current_mm_15min": current_val,
+        "now_dry": now_dry,
+        "soon_wet": soon_wet,
+        "sudden": sudden,
+        "threshold": threshold,
+    }
+
+
+async def _check_rain_notification() -> None:
+    """雨降り始めを検知して通知する。rain_source 設定でデータソースを切り替え可能。"""
+    lat_str = _get_setting("location_lat", "")
+    lon_str = _get_setting("location_lon", "")
+    if not lat_str or not lon_str:
+        return
+    lat, lon = float(lat_str), float(lon_str)
+
+    source = _get_setting("rain_source", "nowcast")
+    try:
+        if source == "nowcast":
+            data = await _fetch_nowcast_rain_data(lat, lon)
+            now_dry  = data["now_dry"]
+            soon_wet = data["soon_wet"]
+            sudden   = data["sudden"]
+        else:
+            data = await _fetch_openmeteo_rain_data(lat, lon)
+            now_dry  = data["now_dry"]
+            soon_wet = data["soon_wet"]
+            sudden   = data["sudden"]
+    except Exception as e:
+        logger.warning("rain check error (source=%s): %s", source, e)
+        return
 
     if not now_dry:
-        # 現在すでに降雨中 → 何もしない（クールダウンはリセットしない）
         return
 
     if not soon_wet:
-        # 乾燥状態かつ雨予報なし → クールダウンをリセットして次回通知を許可
         if _get_setting("weather_rain_notified", ""):
             _set_setting("weather_rain_notified", "")
-            logger.debug("rain cooldown reset: dry, no rain expected")
+            logger.debug("rain cooldown reset: dry, no rain expected (source=%s)", source)
         return
 
-    # クールダウンチェック（3 時間以内に通知済みならスキップ）
     last_str = _get_setting("weather_rain_notified", "")
     if last_str:
         try:
@@ -1271,29 +1429,20 @@ async def _check_rain_notification() -> None:
         except ValueError:
             pass
 
-    now      = datetime.now(_JST)
-    hour     = now.hour
-    sudden   = precip[1] >= threshold * WEATHER_RAIN_SUDDEN_MUL
+    now   = datetime.now(_JST)
+    hour  = now.hour
+    if 5 <= hour < 10:    time_label = "朝"
+    elif 10 <= hour < 14: time_label = "昼"
+    elif 14 <= hour < 18: time_label = "夕方"
+    elif 18 <= hour < 22: time_label = "夜"
+    else:                 time_label = "深夜"
 
-    # 時間帯区分
-    if 5 <= hour < 10:
-        time_label = "朝"
-    elif 10 <= hour < 14:
-        time_label = "昼"
-    elif 14 <= hour < 18:
-        time_label = "夕方"
-    elif 18 <= hour < 22:
-        time_label = "夜"
-    else:
-        time_label = "深夜"
-
-    if sudden:
-        fixed_text = f"急に雨が降り始めます！洗濯物や開けている窓に注意してください。"
-    else:
-        fixed_text = f"30分以内に雨が降り始めそうです。"
-
+    fixed_text = (
+        "急に雨が降り始めます！洗濯物や開けている窓に注意してください。" if sudden
+        else "30分以内に雨が降り始めそうです。"
+    )
     _set_setting("weather_rain_notified", now.isoformat())
-    logger.info("rain notify: sudden=%s time=%s precip_next=%s", sudden, time_label, precip[1:3])
+    logger.info("rain notify: source=%s sudden=%s time=%s", source, sudden, time_label)
 
     await _p2p_speak(fixed_text, source="weather_rain", priority="normal")
     asyncio.create_task(_rain_llm_comment(sudden, time_label, hour))
@@ -1534,13 +1683,16 @@ async def _iss_notify_loop() -> None:
 
 async def _weather_notify_loop() -> None:
     logger.info("Weather notify loop started: check_interval=%ds", WEATHER_CHECK_INTERVAL)
+    await asyncio.sleep(10)  # 起動直後に一度チェック
     while True:
-        await asyncio.sleep(WEATHER_CHECK_INTERVAL)
         try:
             if _get_setting("weather_notify_rain", WEATHER_NOTIFY_RAIN) == "true":
                 await _check_rain_notification()
         except Exception:
             logger.exception("Weather notify loop error")
+        source = _get_setting("rain_source", "nowcast")
+        interval = 300 if source == "nowcast" else WEATHER_CHECK_INTERVAL
+        await asyncio.sleep(interval)
 
 
 @asynccontextmanager
@@ -2567,6 +2719,16 @@ _EDITABLE_SETTINGS = {
             {"value": "true",  "label": "ON"},
         ],
     },
+    "rain_source": {
+        "label": "天気通知 — データソース",
+        "description": "雨通知に使うデータソース。ナウキャストはレーダー実観測の外挿で30分以内の予測に強く5分更新。Open-Meteoは数値予報モデルで15分更新。",
+        "env_fallback": lambda: "nowcast",
+        "type": "select",
+        "options": [
+            {"value": "nowcast",   "label": "JMA ナウキャスト（推奨・5分更新）"},
+            {"value": "openmeteo", "label": "Open-Meteo（15分更新）"},
+        ],
+    },
     "iss_notify_enabled": {
         "label": "ISS 通過通知",
         "description": (
@@ -3078,25 +3240,34 @@ async def api_debug_weather_speak():
 
 @app.post("/api/debug/weather/rain-check")
 async def api_debug_rain_check():
-    """雨検知チェックをその場で実行する（テスト用）。クールダウンをリセットしてから実行。"""
-    _set_setting("weather_rain_notified", "")  # クールダウンリセット
+    """雨検知チェックをその場で実行する（クールダウンリセット後）。"""
+    _set_setting("weather_rain_notified", "")
     await _check_rain_notification()
-    lat = _get_setting("location_lat", "")
-    lon = _get_setting("location_lon", "")
-    if not lat or not lon:
+    return {"ok": True, "active_source": _get_setting("rain_source", "nowcast")}
+
+
+@app.get("/api/debug/rain/status")
+async def api_debug_rain_status():
+    """Open-Meteo と JMA ナウキャスト両方のデータを取得して比較返却する。"""
+    lat_str = _get_setting("location_lat", "")
+    lon_str = _get_setting("location_lon", "")
+    if not lat_str or not lon_str:
         return {"ok": False, "detail": "位置情報未設定"}
-    resp = await _http_client.get(
-        "https://api.open-meteo.com/v1/forecast",
-        params={
-            "latitude": lat, "longitude": lon,
-            "minutely_15": "precipitation",
-            "timezone": "Asia/Tokyo",
-            "forecast_minutely_15": 6,
-        },
+    lat, lon = float(lat_str), float(lon_str)
+
+    results = await asyncio.gather(
+        _fetch_openmeteo_rain_data(lat, lon),
+        _fetch_nowcast_rain_data(lat, lon),
+        return_exceptions=True,
     )
-    resp.raise_for_status()
-    precip = resp.json().get("minutely_15", {}).get("precipitation", [])
-    return {"ok": True, "precipitation_15min": precip[:6], "threshold": WEATHER_RAIN_THRESHOLD}
+    openmeteo = results[0] if not isinstance(results[0], Exception) else {"error": str(results[0])}
+    nowcast   = results[1] if not isinstance(results[1], Exception) else {"error": str(results[1])}
+    return {
+        "ok": True,
+        "active_source": _get_setting("rain_source", "nowcast"),
+        "openmeteo": openmeteo,
+        "nowcast": nowcast,
+    }
 
 
 @app.get("/api/debug/iss")
