@@ -11,6 +11,7 @@ import logging
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Protocol
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -406,6 +407,37 @@ def _init_db() -> None:
             received_at TEXT NOT NULL
         )
     """)
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS web_checks (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            name               TEXT NOT NULL UNIQUE,
+            url                TEXT NOT NULL DEFAULT '',
+            check_prompt       TEXT NOT NULL DEFAULT '',
+            enabled            BOOLEAN NOT NULL DEFAULT 0,
+            notify_time        TEXT NOT NULL DEFAULT '07:55',
+            notify_expression  TEXT NOT NULL DEFAULT 'happy',
+            last_checked_at    TEXT,
+            last_status        TEXT,
+            last_notified_date TEXT,
+            created_at         TEXT NOT NULL,
+            updated_at         TEXT NOT NULL
+        )
+    """)
+    _now_iso = datetime.now(_JST).isoformat()
+    for _seed in [
+        ("リニア体験乗車",
+         "https://travel.jr-central.co.jp/plan/linear/",
+         "超電導リニア体験乗車の申し込みが現在受付中かどうかを判定してください。"),
+        ("関東ITS健保 健保大会",
+         "",
+         "健保大会の参加申し込みが現在受付中かどうかを判定してください。"),
+    ]:
+        _db_conn.execute(
+            "INSERT OR IGNORE INTO web_checks "
+            "(name, url, check_prompt, enabled, notify_time, notify_expression, created_at, updated_at) "
+            "VALUES (?, ?, ?, 0, '07:55', 'happy', ?, ?)",
+            (_seed[0], _seed[1], _seed[2], _now_iso, _now_iso),
+        )
     _db_conn.commit()
     logger.info("DB initialized: path=%s", DB_PATH)
 
@@ -1681,6 +1713,130 @@ async def _iss_notify_loop() -> None:
             logger.exception("ISS notify loop error")
 
 
+class _HtmlTextExtractor(HTMLParser):
+    """HTML から script/style を除いたプレーンテキストを抽出する。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._texts: list[str] = []
+        self._skip: int = 0
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag in ("script", "style", "noscript"):
+            self._skip += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("script", "style", "noscript"):
+            self._skip = max(0, self._skip - 1)
+
+    def handle_data(self, data: str) -> None:
+        if self._skip == 0:
+            t = data.strip()
+            if t:
+                self._texts.append(t)
+
+    def get_text(self, max_chars: int = 6000) -> str:
+        return " ".join(self._texts)[:max_chars]
+
+
+async def _run_web_check(
+    wc_id: int, name: str, url: str, check_prompt: str,
+    now_jst: datetime, today_str: str | None = None,
+) -> dict:
+    """URL を取得して LLM でステータスを判定し、受付中なら通知する。"""
+    try:
+        resp = await _http_client.get(url, follow_redirects=True, timeout=30)
+        resp.raise_for_status()
+        parser = _HtmlTextExtractor()
+        parser.feed(resp.text)
+        page_text = parser.get_text(6000)
+    except Exception as e:
+        logger.warning("Web check fetch failed: name=%s url=%s err=%s", name, url, e)
+        with _db_lock:
+            _db_conn.execute(
+                "UPDATE web_checks SET last_checked_at=?, last_status='error' WHERE id=?",
+                (now_jst.isoformat(), wc_id),
+            )
+            _db_conn.commit()
+        return {"status": "error", "message": str(e)}
+
+    prompt = (
+        f"以下はウェブページ「{name}」の本文テキストです（URL: {url}）。\n\n"
+        f"{check_prompt}\n\n"
+        "受付中・申し込み可能であれば「open」、"
+        "受付していない・終了・未開始であれば「closed」と一言だけ答えてください。\n\n"
+        f"ページ本文:\n{page_text}"
+    )
+    try:
+        answer = await chat_with_llm(prompt, session_key="__web_check__", use_functions=False)
+        status = "open" if "open" in answer.lower() else "closed"
+    except Exception as e:
+        logger.warning("Web check LLM failed: name=%s err=%s", name, e)
+        status = "error"
+
+    logger.info("Web check result: name=%s status=%s url=%s", name, status, url)
+
+    with _db_lock:
+        _db_conn.execute(
+            "UPDATE web_checks SET last_checked_at=?, last_status=? WHERE id=?",
+            (now_jst.isoformat(), status, wc_id),
+        )
+        _db_conn.commit()
+
+    if status == "open":
+        try:
+            speak_prompt = (
+                f"「{name}」の申し込みが現在受け付けられています。"
+                "家族に申し込みが始まっていることを短く教えてください。"
+                "1〜2文で、かわいく・話し言葉で。"
+            )
+            await _iss_speak(speak_prompt, source="web_check")
+            if today_str:
+                with _db_lock:
+                    _db_conn.execute(
+                        "UPDATE web_checks SET last_notified_date=? WHERE id=?",
+                        (today_str, wc_id),
+                    )
+                    _db_conn.commit()
+            logger.info("Web check notification sent: name=%s", name)
+        except Exception:
+            logger.exception("Web check speak failed: name=%s", name)
+
+    return {"status": status}
+
+
+async def _web_check_notify_loop() -> None:
+    """毎朝 notify_time ごろに有効な申し込み確認アイテムをチェックし、受付中なら通知する。"""
+    logger.info("Web check notify loop started")
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now_jst = datetime.now(_JST)
+            now_min = now_jst.hour * 60 + now_jst.minute
+            today_str = now_jst.strftime("%Y-%m-%d")
+
+            with _db_lock:
+                rows = _db_conn.execute(
+                    "SELECT id, name, url, check_prompt, notify_time, last_notified_date "
+                    "FROM web_checks WHERE enabled = 1 AND url != ''"
+                ).fetchall()
+
+            for wc_id, name, url, check_prompt, notify_time, last_notified_date in rows:
+                try:
+                    nh, nm = map(int, notify_time.split(":"))
+                except Exception:
+                    nh, nm = 7, 55
+                target_min = nh * 60 + nm
+                if not (0 <= now_min - target_min <= 10):
+                    continue
+                if last_notified_date == today_str:
+                    continue
+                await _run_web_check(wc_id, name, url, check_prompt, now_jst, today_str)
+
+        except Exception:
+            logger.exception("Web check notify loop error")
+
+
 async def _weather_notify_loop() -> None:
     logger.info("Weather notify loop started: check_interval=%ds", WEATHER_CHECK_INTERVAL)
     await asyncio.sleep(10)  # 起動直後に一度チェック
@@ -1731,6 +1887,9 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_iss_notify_loop())  # DB設定で後から有効化可能なため常時起動
     logger.info("ISS notify loop started")
+
+    asyncio.create_task(_web_check_notify_loop())
+    logger.info("Web check notify loop started")
 
     _mqtt_conn.start()
     logger.info("MQTT eager connect started")
@@ -2479,6 +2638,11 @@ async def ui_notifications(request: Request):
 @app.get("/ui/logs", response_class=HTMLResponse)
 async def ui_logs(request: Request):
     return _templates.TemplateResponse(request=request, name="logs.html", context=_ui_context(request))
+
+
+@app.get("/ui/web-checks", response_class=HTMLResponse)
+async def ui_web_checks(request: Request):
+    return _templates.TemplateResponse(request=request, name="web_checks.html", context=_ui_context(request))
 
 
 @app.get("/api/device/log")
@@ -3472,6 +3636,125 @@ def delete_calendar_source(source_id: int):
         raise HTTPException(status_code=404, detail=f"id={source_id} は見つかりませんでした")
     logger.info("Calendar source deleted: id=%d", source_id)
     return {"deleted": source_id}
+
+
+# ── 申し込み受付確認（Web チェック）──────────────────────────────────────────
+
+class WebCheckCreate(BaseModel):
+    name: str
+    url: str = ""
+    check_prompt: str = "申し込みが現在受付中かどうかを判定してください。"
+    enabled: bool = True
+    notify_time: str = "07:55"
+    notify_expression: str = "happy"
+
+
+class WebCheckUpdate(BaseModel):
+    name: str | None = None
+    url: str | None = None
+    check_prompt: str | None = None
+    enabled: bool | None = None
+    notify_time: str | None = None
+    notify_expression: str | None = None
+
+
+@app.get("/api/web-checks")
+def list_web_checks():
+    with _db_lock:
+        rows = _db_conn.execute(
+            "SELECT id, name, url, check_prompt, enabled, notify_time, notify_expression, "
+            "last_checked_at, last_status, last_notified_date, created_at, updated_at "
+            "FROM web_checks ORDER BY id"
+        ).fetchall()
+    return {
+        "items": [
+            {
+                "id": r[0], "name": r[1], "url": r[2], "check_prompt": r[3],
+                "enabled": bool(r[4]), "notify_time": r[5], "notify_expression": r[6],
+                "last_checked_at": r[7], "last_status": r[8],
+                "last_notified_date": r[9], "created_at": r[10], "updated_at": r[11],
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post("/api/web-checks", status_code=201)
+def create_web_check(req: WebCheckCreate):
+    now = datetime.now(_JST).isoformat()
+    try:
+        with _db_lock:
+            cursor = _db_conn.execute(
+                "INSERT INTO web_checks "
+                "(name, url, check_prompt, enabled, notify_time, notify_expression, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (req.name, req.url, req.check_prompt, int(req.enabled),
+                 req.notify_time, req.notify_expression, now, now),
+            )
+            _db_conn.commit()
+            row_id = cursor.lastrowid
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            raise HTTPException(status_code=409, detail=f"「{req.name}」はすでに登録されています")
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"id": row_id, "name": req.name}
+
+
+@app.put("/api/web-checks/{wc_id}")
+def update_web_check(wc_id: int, req: WebCheckUpdate):
+    now = datetime.now(_JST).isoformat()
+    fields: list[str] = []
+    vals: list = []
+    if req.name is not None:
+        fields.append("name = ?"); vals.append(req.name)
+    if req.url is not None:
+        fields.append("url = ?"); vals.append(req.url)
+    if req.check_prompt is not None:
+        fields.append("check_prompt = ?"); vals.append(req.check_prompt)
+    if req.enabled is not None:
+        fields.append("enabled = ?"); vals.append(int(req.enabled))
+    if req.notify_time is not None:
+        fields.append("notify_time = ?"); vals.append(req.notify_time)
+    if req.notify_expression is not None:
+        fields.append("notify_expression = ?"); vals.append(req.notify_expression)
+    if not fields:
+        raise HTTPException(status_code=422, detail="更新するフィールドがありません")
+    fields.append("updated_at = ?"); vals.append(now)
+    vals.append(wc_id)
+    with _db_lock:
+        c = _db_conn.execute(
+            f"UPDATE web_checks SET {', '.join(fields)} WHERE id = ?", vals
+        )
+        _db_conn.commit()
+    if c.rowcount == 0:
+        raise HTTPException(status_code=404, detail=f"id={wc_id} は見つかりません")
+    return {"updated": wc_id}
+
+
+@app.delete("/api/web-checks/{wc_id}", status_code=204)
+def delete_web_check(wc_id: int):
+    with _db_lock:
+        c = _db_conn.execute("DELETE FROM web_checks WHERE id = ?", (wc_id,))
+        _db_conn.commit()
+    if c.rowcount == 0:
+        raise HTTPException(status_code=404, detail=f"id={wc_id} は見つかりません")
+
+
+@app.post("/api/web-checks/{wc_id}/run")
+async def run_web_check_now(wc_id: int):
+    """手動で今すぐチェックを実行する。通知は行わない（テスト用）。"""
+    with _db_lock:
+        row = _db_conn.execute(
+            "SELECT id, name, url, check_prompt FROM web_checks WHERE id = ?", (wc_id,)
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"id={wc_id} は見つかりません")
+    _, name, url, check_prompt = row
+    if not url:
+        raise HTTPException(status_code=422, detail="URL が未設定です")
+    now_jst = datetime.now(_JST)
+    result = await _run_web_check(wc_id, name, url, check_prompt, now_jst, today_str=None)
+    return {"name": name, **result}
 
 
 @app.post("/speak")

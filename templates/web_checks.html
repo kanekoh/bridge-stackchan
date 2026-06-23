@@ -1,0 +1,241 @@
+{% extends "base.html" %}
+{% block title %}受付確認{% endblock %}
+{% block nav_web_checks %}font-semibold text-blue-600{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <div>
+    <h1 class="text-xl font-bold text-gray-800">申し込み受付確認</h1>
+    <p class="text-xs text-gray-400 mt-0.5">毎朝指定時刻にサイトをチェックし、申し込みが受付中なら通知します</p>
+  </div>
+  <button onclick="showAddForm()" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">
+    ＋ 追加
+  </button>
+</div>
+
+<div id="list" class="space-y-3"></div>
+<p id="empty" class="text-sm text-gray-400 hidden">登録されたチェック項目がありません</p>
+<p id="msg" class="text-sm mt-4"></p>
+
+<!-- 追加 / 編集 モーダル -->
+<div id="modal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 hidden">
+  <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-lg mx-4">
+    <h2 id="modalTitle" class="text-base font-bold text-gray-800 mb-4">チェック項目を追加</h2>
+    <div class="space-y-3">
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">名前</label>
+        <input id="f-name" type="text" placeholder="リニア体験乗車"
+          class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">URL</label>
+        <input id="f-url" type="url" placeholder="https://..."
+          class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">判定プロンプト</label>
+        <textarea id="f-prompt" rows="2"
+          class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 resize-none"
+          placeholder="申し込みが現在受付中かどうかを判定してください。"></textarea>
+      </div>
+      <div class="flex gap-4">
+        <div class="flex-1">
+          <label class="block text-xs text-gray-500 mb-1">通知時刻</label>
+          <input id="f-time" type="time" value="07:55"
+            class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+        </div>
+        <div class="flex items-end pb-0.5">
+          <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input id="f-enabled" type="checkbox" class="w-4 h-4">
+            <span class="text-gray-700">有効</span>
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="flex gap-3 mt-5">
+      <button onclick="saveForm()"
+        class="flex-1 bg-blue-500 hover:bg-blue-600 text-white text-sm py-2 rounded font-medium">保存</button>
+      <button onclick="closeModal()"
+        class="flex-1 border text-gray-600 hover:text-gray-800 text-sm py-2 rounded">キャンセル</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let _items = [];
+  let _editId = null;
+
+  const STATUS_LABEL = { open: '受付中', closed: '受付なし', error: 'エラー' };
+  const STATUS_COLOR = {
+    open:   'bg-green-100 text-green-700 border-green-300',
+    closed: 'bg-gray-100 text-gray-500 border-gray-300',
+    error:  'bg-red-100 text-red-600 border-red-300',
+  };
+
+  function esc(s) {
+    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function fmtDate(s) {
+    if (!s) return '—';
+    return s.replace('T', ' ').slice(0, 16);
+  }
+
+  function render() {
+    const list  = document.getElementById('list');
+    const empty = document.getElementById('empty');
+    if (!_items.length) {
+      list.innerHTML = '';
+      empty.classList.remove('hidden');
+      return;
+    }
+    empty.classList.add('hidden');
+    list.innerHTML = _items.map(item => {
+      const statusBadge = item.last_status
+        ? `<span class="text-xs px-2 py-0.5 rounded-full border ${STATUS_COLOR[item.last_status] ?? 'bg-gray-100 text-gray-400 border-gray-200'}">${STATUS_LABEL[item.last_status] ?? item.last_status}</span>`
+        : `<span class="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-400 border-gray-200">未チェック</span>`;
+      const enabledBadge = item.enabled
+        ? '<span class="text-xs text-green-600">● 有効</span>'
+        : '<span class="text-xs text-gray-400">○ 無効</span>';
+      const urlLink = item.url
+        ? `<a href="${esc(item.url)}" target="_blank" class="text-xs text-blue-500 hover:underline truncate block max-w-xs">${esc(item.url)}</a>`
+        : '<span class="text-xs text-red-400">URL未設定</span>';
+      return `
+        <div class="bg-white rounded-lg border border-gray-200 p-4">
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 mb-1 flex-wrap">
+                ${statusBadge}
+                ${enabledBadge}
+                <span class="text-xs text-gray-400">毎朝 ${esc(item.notify_time)}</span>
+              </div>
+              <p class="font-medium text-sm text-gray-800">${esc(item.name)}</p>
+              <div class="mt-1">${urlLink}</div>
+              <div class="flex flex-wrap gap-x-4 mt-1 text-xs text-gray-400">
+                ${item.last_checked_at ? `最終チェック: ${fmtDate(item.last_checked_at)}` : '未チェック'}
+                ${item.last_notified_date ? `　通知済: ${esc(item.last_notified_date)}` : ''}
+              </div>
+            </div>
+            <div class="flex flex-col gap-1.5 shrink-0">
+              <button onclick="runNow(${item.id})"
+                class="bg-blue-500 hover:bg-blue-600 text-white text-xs px-3 py-1.5 rounded whitespace-nowrap">
+                今すぐチェック
+              </button>
+              <button onclick="editItem(${item.id})"
+                class="border text-gray-500 hover:text-gray-700 text-xs px-3 py-1.5 rounded whitespace-nowrap">
+                編集
+              </button>
+              <button onclick="deleteItem(${item.id}, '${esc(item.name)}')"
+                class="text-red-400 hover:text-red-600 text-xs px-3 py-1.5 rounded whitespace-nowrap">
+                削除
+              </button>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  async function load() {
+    try {
+      const d = await apiFetch('/api/web-checks');
+      _items = d.items;
+      render();
+    } catch(e) {
+      document.getElementById('msg').textContent = '❌ ' + e.message;
+    }
+  }
+
+  function showAddForm() {
+    _editId = null;
+    document.getElementById('modalTitle').textContent = 'チェック項目を追加';
+    document.getElementById('f-name').value = '';
+    document.getElementById('f-url').value = '';
+    document.getElementById('f-prompt').value = '申し込みが現在受付中かどうかを判定してください。';
+    document.getElementById('f-time').value = '07:55';
+    document.getElementById('f-enabled').checked = true;
+    document.getElementById('modal').classList.remove('hidden');
+  }
+
+  function editItem(id) {
+    const item = _items.find(i => i.id === id);
+    if (!item) return;
+    _editId = id;
+    document.getElementById('modalTitle').textContent = 'チェック項目を編集';
+    document.getElementById('f-name').value = item.name;
+    document.getElementById('f-url').value = item.url;
+    document.getElementById('f-prompt').value = item.check_prompt;
+    document.getElementById('f-time').value = item.notify_time;
+    document.getElementById('f-enabled').checked = item.enabled;
+    document.getElementById('modal').classList.remove('hidden');
+  }
+
+  function closeModal() {
+    document.getElementById('modal').classList.add('hidden');
+  }
+
+  async function saveForm() {
+    const body = {
+      name:         document.getElementById('f-name').value.trim(),
+      url:          document.getElementById('f-url').value.trim(),
+      check_prompt: document.getElementById('f-prompt').value.trim(),
+      notify_time:  document.getElementById('f-time').value,
+      enabled:      document.getElementById('f-enabled').checked,
+    };
+    if (!body.name) { alert('名前を入力してください'); return; }
+    const msg = document.getElementById('msg');
+    try {
+      if (_editId) {
+        await apiFetch(`/api/web-checks/${_editId}`, { method: 'PUT',
+          headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+        msg.textContent = '✅ 更新しました';
+      } else {
+        await apiFetch('/api/web-checks', { method: 'POST',
+          headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+        msg.textContent = '✅ 追加しました';
+      }
+      msg.className = 'text-sm mt-4 text-green-600';
+      closeModal();
+      await load();
+    } catch(e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.className = 'text-sm mt-4 text-red-500';
+    }
+  }
+
+  async function deleteItem(id, name) {
+    if (!confirm(`「${name}」を削除しますか？`)) return;
+    const msg = document.getElementById('msg');
+    try {
+      await apiFetch(`/api/web-checks/${id}`, { method: 'DELETE' });
+      msg.textContent = '✅ 削除しました';
+      msg.className = 'text-sm mt-4 text-green-600';
+      await load();
+    } catch(e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.className = 'text-sm mt-4 text-red-500';
+    }
+  }
+
+  async function runNow(id) {
+    const msg = document.getElementById('msg');
+    msg.textContent = 'チェック中...';
+    msg.className = 'text-sm mt-4 text-gray-400';
+    try {
+      const r = await apiFetch(`/api/web-checks/${id}/run`, { method: 'POST' });
+      const label = { open: '受付中', closed: '受付なし', error: 'エラー' }[r.status] ?? r.status;
+      msg.textContent = `✅ チェック完了: ${r.name} → ${label}`;
+      msg.className = r.status === 'open'
+        ? 'text-sm mt-4 text-green-600 font-semibold'
+        : 'text-sm mt-4 text-gray-600';
+      await load();
+    } catch(e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.className = 'text-sm mt-4 text-red-500';
+    }
+  }
+
+  load();
+</script>
+{% endblock %}
