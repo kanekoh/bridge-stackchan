@@ -6,7 +6,7 @@
 <div class="flex items-center justify-between mb-6">
   <div>
     <h1 class="text-xl font-bold text-gray-800">Web チェック</h1>
-    <p class="text-xs text-gray-400 mt-0.5">申し込み受付確認・定期コンテンツ読み上げ</p>
+    <p class="text-xs text-gray-400 mt-0.5">申し込み受付確認（受付中のときだけ通知）・週次コンテンツ読み上げ（週1回）</p>
   </div>
   <button onclick="showAddForm()" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">
     ＋ 追加
@@ -22,11 +22,11 @@
   <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-lg mx-4 max-h-screen overflow-y-auto">
     <h2 id="modalTitle" class="text-base font-bold text-gray-800 mb-4">チェック項目を追加</h2>
 
-    <!-- しいたけ占いヘルパー -->
-    <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-      <p class="text-xs font-medium text-amber-700 mb-2">🍄 しいたけ占いクイック設定</p>
+    <!-- クイック設定ヘルパー -->
+    <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 mb-4">
+      <p class="text-xs font-medium text-gray-500 mb-2">🍄 しいたけ占い（週次読み上げの例）</p>
       <div class="flex gap-2">
-        <select id="shiitake-sign" class="flex-1 border border-amber-300 rounded px-2 py-1.5 text-sm bg-white">
+        <select id="shiitake-sign" class="flex-1 border border-gray-300 rounded px-2 py-1.5 text-sm bg-white">
           <option value="">星座を選択...</option>
           <option value="aries">牡羊座（おひつじ）</option>
           <option value="taurus">牡牛座（おうし）</option>
@@ -42,7 +42,7 @@
           <option value="pisces">魚座（うお）</option>
         </select>
         <button onclick="fillShiitake()"
-          class="bg-amber-500 hover:bg-amber-600 text-white text-xs px-3 py-1.5 rounded whitespace-nowrap">
+          class="bg-gray-500 hover:bg-gray-600 text-white text-xs px-3 py-1.5 rounded whitespace-nowrap">
           入力する
         </button>
       </div>
@@ -66,8 +66,8 @@
         <label class="block text-xs text-gray-500 mb-1">モード</label>
         <select id="f-mode" onchange="onModeChange()"
           class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
-          <option value="check">受付確認（open のときだけ通知）</option>
-          <option value="read">内容読み上げ（毎回読む）</option>
+          <option value="check">受付確認（open のときだけ通知・1日1回）</option>
+          <option value="read">内容読み上げ（週1回・月曜以降初回）</option>
         </select>
       </div>
       <div>

@@ -1891,6 +1891,8 @@ async def _web_check_notify_loop() -> None:
                     "FROM web_checks WHERE enabled = 1 AND url != ''"
                 ).fetchall()
 
+            monday_str = (now_jst - timedelta(days=now_jst.weekday())).strftime("%Y-%m-%d")
+
             for wc_id, name, url, check_prompt, notify_time, last_notified_date, mode, notify_expression in rows:
                 try:
                     nh, nm = map(int, notify_time.split(":"))
@@ -1899,8 +1901,13 @@ async def _web_check_notify_loop() -> None:
                 target_min = nh * 60 + nm
                 if not (0 <= now_min - target_min <= 10):
                     continue
-                if last_notified_date == today_str:
-                    continue
+                # read モードは週1回（今週すでに読んだらスキップ）、check モードは日1回
+                if mode == "read":
+                    if last_notified_date and last_notified_date >= monday_str:
+                        continue
+                else:
+                    if last_notified_date == today_str:
+                        continue
                 await _run_web_check(
                     wc_id, name, url, check_prompt, now_jst, today_str,
                     mode=mode or "check", notify_expression=notify_expression or "happy",
