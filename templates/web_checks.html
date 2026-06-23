@@ -5,8 +5,8 @@
 {% block content %}
 <div class="flex items-center justify-between mb-6">
   <div>
-    <h1 class="text-xl font-bold text-gray-800">申し込み受付確認</h1>
-    <p class="text-xs text-gray-400 mt-0.5">毎朝指定時刻にサイトをチェックし、申し込みが受付中なら通知します</p>
+    <h1 class="text-xl font-bold text-gray-800">Web チェック</h1>
+    <p class="text-xs text-gray-400 mt-0.5">申し込み受付確認・定期コンテンツ読み上げ</p>
   </div>
   <button onclick="showAddForm()" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">
     ＋ 追加
@@ -19,24 +19,65 @@
 
 <!-- 追加 / 編集 モーダル -->
 <div id="modal" class="fixed inset-0 bg-black/40 flex items-center justify-center z-50 hidden">
-  <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-lg mx-4">
+  <div class="bg-white rounded-xl shadow-xl p-6 w-full max-w-lg mx-4 max-h-screen overflow-y-auto">
     <h2 id="modalTitle" class="text-base font-bold text-gray-800 mb-4">チェック項目を追加</h2>
+
+    <!-- しいたけ占いヘルパー -->
+    <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+      <p class="text-xs font-medium text-amber-700 mb-2">🍄 しいたけ占いクイック設定</p>
+      <div class="flex gap-2">
+        <select id="shiitake-sign" class="flex-1 border border-amber-300 rounded px-2 py-1.5 text-sm bg-white">
+          <option value="">星座を選択...</option>
+          <option value="aries">牡羊座（おひつじ）</option>
+          <option value="taurus">牡牛座（おうし）</option>
+          <option value="gemini">双子座（ふたご）</option>
+          <option value="cancer">蟹座（かに）</option>
+          <option value="leo">獅子座（しし）</option>
+          <option value="virgo">乙女座（おとめ）</option>
+          <option value="libra">天秤座（てんびん）</option>
+          <option value="scorpio">蠍座（さそり）</option>
+          <option value="sagittarius">射手座（いて）</option>
+          <option value="capricorn">山羊座（やぎ）</option>
+          <option value="aquarius">水瓶座（みずがめ）</option>
+          <option value="pisces">魚座（うお）</option>
+        </select>
+        <button onclick="fillShiitake()"
+          class="bg-amber-500 hover:bg-amber-600 text-white text-xs px-3 py-1.5 rounded whitespace-nowrap">
+          入力する
+        </button>
+      </div>
+    </div>
+
     <div class="space-y-3">
       <div>
         <label class="block text-xs text-gray-500 mb-1">名前</label>
-        <input id="f-name" type="text" placeholder="リニア体験乗車"
+        <input id="f-name" type="text" placeholder="しいたけ占い 牡羊座"
           class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
       </div>
       <div>
-        <label class="block text-xs text-gray-500 mb-1">URL</label>
-        <input id="f-url" type="url" placeholder="https://..."
+        <label class="block text-xs text-gray-500 mb-1">
+          URL
+          <span class="text-gray-400 ml-1">（<code class="bg-gray-100 px-1 rounded">{weekly_monday}</code> = 今週月曜日、<code class="bg-gray-100 px-1 rounded">{today}</code> = 今日）</span>
+        </label>
+        <input id="f-url" type="text" placeholder="https://..."
           class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
       </div>
       <div>
-        <label class="block text-xs text-gray-500 mb-1">判定プロンプト</label>
-        <textarea id="f-prompt" rows="2"
+        <label class="block text-xs text-gray-500 mb-1">モード</label>
+        <select id="f-mode" onchange="onModeChange()"
+          class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+          <option value="check">受付確認（open のときだけ通知）</option>
+          <option value="read">内容読み上げ（毎回読む）</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">
+          <span id="prompt-label">判定プロンプト</span>
+        </label>
+        <textarea id="f-prompt" rows="3"
           class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 resize-none"
           placeholder="申し込みが現在受付中かどうかを判定してください。"></textarea>
+        <p id="prompt-hint" class="text-xs text-gray-400 mt-1"></p>
       </div>
       <div class="flex gap-4">
         <div class="flex-1">
@@ -67,17 +108,25 @@
   let _items = [];
   let _editId = null;
 
-  const STATUS_LABEL = { open: '受付中', closed: '受付なし', error: 'エラー' };
+  const STATUS_LABEL = { open: '受付中', closed: '受付なし', read: '読み上げ済', error: 'エラー' };
   const STATUS_COLOR = {
-    open:   'bg-green-100 text-green-700 border-green-300',
-    closed: 'bg-gray-100 text-gray-500 border-gray-300',
-    error:  'bg-red-100 text-red-600 border-red-300',
+    open:  'bg-green-100 text-green-700 border-green-300',
+    closed:'bg-gray-100 text-gray-500 border-gray-300',
+    read:  'bg-blue-100 text-blue-600 border-blue-300',
+    error: 'bg-red-100 text-red-600 border-red-300',
+  };
+  const MODE_LABEL = { check: '受付確認', read: '読み上げ' };
+  const MODE_COLOR = { check: 'text-purple-600', read: 'text-teal-600' };
+
+  const SHIITAKE_SIGNS = {
+    aries:'牡羊座', taurus:'牡牛座', gemini:'双子座', cancer:'蟹座',
+    leo:'獅子座', virgo:'乙女座', libra:'天秤座', scorpio:'蠍座',
+    sagittarius:'射手座', capricorn:'山羊座', aquarius:'水瓶座', pisces:'魚座',
   };
 
   function esc(s) {
     return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
-
   function fmtDate(s) {
     if (!s) return '—';
     return s.replace('T', ' ').slice(0, 16);
@@ -86,21 +135,19 @@
   function render() {
     const list  = document.getElementById('list');
     const empty = document.getElementById('empty');
-    if (!_items.length) {
-      list.innerHTML = '';
-      empty.classList.remove('hidden');
-      return;
-    }
+    if (!_items.length) { list.innerHTML = ''; empty.classList.remove('hidden'); return; }
     empty.classList.add('hidden');
     list.innerHTML = _items.map(item => {
       const statusBadge = item.last_status
-        ? `<span class="text-xs px-2 py-0.5 rounded-full border ${STATUS_COLOR[item.last_status] ?? 'bg-gray-100 text-gray-400 border-gray-200'}">${STATUS_LABEL[item.last_status] ?? item.last_status}</span>`
+        ? `<span class="text-xs px-2 py-0.5 rounded-full border ${STATUS_COLOR[item.last_status] ?? 'bg-gray-50 text-gray-400 border-gray-200'}">${STATUS_LABEL[item.last_status] ?? item.last_status}</span>`
         : `<span class="text-xs px-2 py-0.5 rounded-full border bg-gray-50 text-gray-400 border-gray-200">未チェック</span>`;
-      const enabledBadge = item.enabled
+      const modeLabel = `<span class="text-xs ${MODE_COLOR[item.mode] ?? 'text-gray-500'}">${MODE_LABEL[item.mode] ?? item.mode}</span>`;
+      const enabledDot = item.enabled
         ? '<span class="text-xs text-green-600">● 有効</span>'
         : '<span class="text-xs text-gray-400">○ 無効</span>';
-      const urlLink = item.url
-        ? `<a href="${esc(item.url)}" target="_blank" class="text-xs text-blue-500 hover:underline truncate block max-w-xs">${esc(item.url)}</a>`
+      const displayUrl = item.url || '—';
+      const urlDisplay = item.url
+        ? `<span class="text-xs text-gray-400 truncate block max-w-xs" title="${esc(item.url)}">${esc(item.url)}</span>`
         : '<span class="text-xs text-red-400">URL未設定</span>';
       return `
         <div class="bg-white rounded-lg border border-gray-200 p-4">
@@ -108,11 +155,12 @@
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2 mb-1 flex-wrap">
                 ${statusBadge}
-                ${enabledBadge}
+                ${modeLabel}
+                ${enabledDot}
                 <span class="text-xs text-gray-400">毎朝 ${esc(item.notify_time)}</span>
               </div>
               <p class="font-medium text-sm text-gray-800">${esc(item.name)}</p>
-              <div class="mt-1">${urlLink}</div>
+              <div class="mt-0.5">${urlDisplay}</div>
               <div class="flex flex-wrap gap-x-4 mt-1 text-xs text-gray-400">
                 ${item.last_checked_at ? `最終チェック: ${fmtDate(item.last_checked_at)}` : '未チェック'}
                 ${item.last_notified_date ? `　通知済: ${esc(item.last_notified_date)}` : ''}
@@ -147,14 +195,47 @@
     }
   }
 
+  function onModeChange() {
+    const mode = document.getElementById('f-mode').value;
+    const label = document.getElementById('prompt-label');
+    const hint  = document.getElementById('prompt-hint');
+    const prompt = document.getElementById('f-prompt');
+    if (mode === 'read') {
+      label.textContent = '読み上げプロンプト（LLM への指示）';
+      hint.textContent = '例: 今週の〇〇座の運勢を3文以内で要約してください。';
+      prompt.placeholder = '今週の今週の星座の運勢を3文以内で、かわいい話し言葉で要約してください。';
+    } else {
+      label.textContent = '判定プロンプト';
+      hint.textContent = 'LLM が「open」と答えたときだけ通知します。';
+      prompt.placeholder = '申し込みが現在受付中かどうかを判定してください。';
+    }
+  }
+
+  function fillShiitake() {
+    const sign = document.getElementById('shiitake-sign').value;
+    if (!sign) { alert('星座を選んでください'); return; }
+    const signJa = SHIITAKE_SIGNS[sign] ?? sign;
+    document.getElementById('f-name').value = `しいたけ占い ${signJa}`;
+    document.getElementById('f-url').value  = `https://shiitakeuranai.jp/weekly-horoscope/{weekly_monday}/${sign}/`;
+    document.getElementById('f-mode').value = 'read';
+    document.getElementById('f-prompt').value =
+      `今週の${signJa}の運勢を3文以内で読み上げ用に要約してください。かわいい話し言葉で。`;
+    document.getElementById('f-time').value  = '07:55';
+    document.getElementById('f-enabled').checked = true;
+    onModeChange();
+  }
+
   function showAddForm() {
     _editId = null;
     document.getElementById('modalTitle').textContent = 'チェック項目を追加';
-    document.getElementById('f-name').value = '';
-    document.getElementById('f-url').value = '';
-    document.getElementById('f-prompt').value = '申し込みが現在受付中かどうかを判定してください。';
-    document.getElementById('f-time').value = '07:55';
+    document.getElementById('f-name').value    = '';
+    document.getElementById('f-url').value     = '';
+    document.getElementById('f-mode').value    = 'check';
+    document.getElementById('f-prompt').value  = '申し込みが現在受付中かどうかを判定してください。';
+    document.getElementById('f-time').value    = '07:55';
     document.getElementById('f-enabled').checked = true;
+    document.getElementById('shiitake-sign').value = '';
+    onModeChange();
     document.getElementById('modal').classList.remove('hidden');
   }
 
@@ -163,11 +244,14 @@
     if (!item) return;
     _editId = id;
     document.getElementById('modalTitle').textContent = 'チェック項目を編集';
-    document.getElementById('f-name').value = item.name;
-    document.getElementById('f-url').value = item.url;
-    document.getElementById('f-prompt').value = item.check_prompt;
-    document.getElementById('f-time').value = item.notify_time;
+    document.getElementById('f-name').value    = item.name;
+    document.getElementById('f-url').value     = item.url;
+    document.getElementById('f-mode').value    = item.mode || 'check';
+    document.getElementById('f-prompt').value  = item.check_prompt;
+    document.getElementById('f-time').value    = item.notify_time;
     document.getElementById('f-enabled').checked = item.enabled;
+    document.getElementById('shiitake-sign').value = '';
+    onModeChange();
     document.getElementById('modal').classList.remove('hidden');
   }
 
@@ -179,6 +263,7 @@
     const body = {
       name:         document.getElementById('f-name').value.trim(),
       url:          document.getElementById('f-url').value.trim(),
+      mode:         document.getElementById('f-mode').value,
       check_prompt: document.getElementById('f-prompt').value.trim(),
       notify_time:  document.getElementById('f-time').value,
       enabled:      document.getElementById('f-enabled').checked,
@@ -219,14 +304,16 @@
   }
 
   async function runNow(id) {
+    const item = _items.find(i => i.id === id);
     const msg = document.getElementById('msg');
     msg.textContent = 'チェック中...';
     msg.className = 'text-sm mt-4 text-gray-400';
     try {
       const r = await apiFetch(`/api/web-checks/${id}/run`, { method: 'POST' });
-      const label = { open: '受付中', closed: '受付なし', error: 'エラー' }[r.status] ?? r.status;
-      msg.textContent = `✅ チェック完了: ${r.name} → ${label}`;
-      msg.className = r.status === 'open'
+      const label = STATUS_LABEL[r.status] ?? r.status;
+      const text  = r.text ? `「${r.text.slice(0, 40)}…」` : '';
+      msg.textContent = `✅ ${r.name} → ${label} ${text}`;
+      msg.className = r.status === 'open' || r.status === 'read'
         ? 'text-sm mt-4 text-green-600 font-semibold'
         : 'text-sm mt-4 text-gray-600';
       await load();

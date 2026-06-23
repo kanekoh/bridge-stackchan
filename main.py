@@ -416,6 +416,7 @@ def _init_db() -> None:
             enabled            BOOLEAN NOT NULL DEFAULT 0,
             notify_time        TEXT NOT NULL DEFAULT '07:55',
             notify_expression  TEXT NOT NULL DEFAULT 'happy',
+            mode               TEXT NOT NULL DEFAULT 'check',
             last_checked_at    TEXT,
             last_status        TEXT,
             last_notified_date TEXT,
@@ -423,6 +424,10 @@ def _init_db() -> None:
             updated_at         TEXT NOT NULL
         )
     """)
+    try:
+        _db_conn.execute("ALTER TABLE web_checks ADD COLUMN mode TEXT NOT NULL DEFAULT 'check'")
+    except sqlite3.OperationalError:
+        pass  # already exists
     _now_iso = datetime.now(_JST).isoformat()
     for _seed in [
         ("リニア体験乗車",
@@ -1714,23 +1719,33 @@ async def _iss_notify_loop() -> None:
 
 
 class _HtmlTextExtractor(HTMLParser):
-    """HTML から script/style を除いたプレーンテキストを抽出する。"""
+    """HTML から本文テキストを抽出する。
+    script/style/noscript および nav/header/footer/aside（広告・ナビ領域）をスキップ。
+    """
+
+    _SKIP_TAGS = frozenset({"script", "style", "noscript"})
+    _BLOCK_TAGS = frozenset({"nav", "header", "footer", "aside"})
 
     def __init__(self) -> None:
         super().__init__()
         self._texts: list[str] = []
         self._skip: int = 0
+        self._block: int = 0
 
     def handle_starttag(self, tag: str, attrs: list) -> None:
-        if tag in ("script", "style", "noscript"):
+        if tag in self._SKIP_TAGS:
             self._skip += 1
+        elif tag in self._BLOCK_TAGS:
+            self._block += 1
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in ("script", "style", "noscript"):
+        if tag in self._SKIP_TAGS:
             self._skip = max(0, self._skip - 1)
+        elif tag in self._BLOCK_TAGS:
+            self._block = max(0, self._block - 1)
 
     def handle_data(self, data: str) -> None:
-        if self._skip == 0:
+        if self._skip == 0 and self._block == 0:
             t = data.strip()
             if t:
                 self._texts.append(t)
@@ -1739,19 +1754,38 @@ class _HtmlTextExtractor(HTMLParser):
         return " ".join(self._texts)[:max_chars]
 
 
+def _expand_url_template(url: str, now_jst: datetime) -> str:
+    """URL テンプレート変数を展開する。
+    {weekly_monday} → 今週月曜日の YYYY-MM-DD
+    {today}         → 今日の YYYY-MM-DD
+    """
+    monday = now_jst - timedelta(days=now_jst.weekday())
+    return (
+        url.replace("{weekly_monday}", monday.strftime("%Y-%m-%d"))
+           .replace("{today}", now_jst.strftime("%Y-%m-%d"))
+    )
+
+
 async def _run_web_check(
     wc_id: int, name: str, url: str, check_prompt: str,
     now_jst: datetime, today_str: str | None = None,
+    mode: str = "check", notify_expression: str = "happy",
 ) -> dict:
-    """URL を取得して LLM でステータスを判定し、受付中なら通知する。"""
+    """URL を取得して LLM でステータス判定または内容読み上げを行う。
+
+    mode='check': open/closed を判定し、open のときだけ通知する。
+    mode='read' : LLM が抽出したテキストを毎回読み上げる。
+    """
+    expanded_url = _expand_url_template(url, now_jst)
+
     try:
-        resp = await _http_client.get(url, follow_redirects=True, timeout=30)
+        resp = await _http_client.get(expanded_url, follow_redirects=True, timeout=30)
         resp.raise_for_status()
         parser = _HtmlTextExtractor()
         parser.feed(resp.text)
         page_text = parser.get_text(6000)
     except Exception as e:
-        logger.warning("Web check fetch failed: name=%s url=%s err=%s", name, url, e)
+        logger.warning("Web check fetch failed: name=%s url=%s err=%s", name, expanded_url, e)
         with _db_lock:
             _db_conn.execute(
                 "UPDATE web_checks SET last_checked_at=?, last_status='error' WHERE id=?",
@@ -1760,8 +1794,44 @@ async def _run_web_check(
             _db_conn.commit()
         return {"status": "error", "message": str(e)}
 
+    if mode == "read":
+        prompt = (
+            f"以下はウェブページ「{name}」の本文テキストです。\n\n"
+            f"{check_prompt}\n\n"
+            "返答フォーマット: 1行目に感情ラベル(neutral/happy/sad/sleepy/angry/doubt)、"
+            "2行目以降に読み上げ本文（話し言葉・短め）。\n\n"
+            f"ページ本文:\n{page_text}"
+        )
+        try:
+            answer = await chat_with_llm(prompt, session_key="__web_check__", use_functions=False)
+            expr_label, clean_text = _parse_expression(answer)
+            speaker_id, stackchan_expr = _resolve_expression(expr_label or notify_expression)
+            audio_url, stream_url = await resolve_audio_url(clean_text, speaker_id)
+            publish_speak(audio_url, stream_url, clean_text,
+                          source="web_check", priority="normal",
+                          request_id=str(uuid.uuid4()), expression=stackchan_expr)
+            if today_str:
+                with _db_lock:
+                    _db_conn.execute(
+                        "UPDATE web_checks SET last_notified_date=?, last_checked_at=?, last_status='read' WHERE id=?",
+                        (today_str, now_jst.isoformat(), wc_id),
+                    )
+                    _db_conn.commit()
+            logger.info("Web check read done: name=%s", name)
+        except Exception:
+            logger.exception("Web check read failed: name=%s", name)
+            with _db_lock:
+                _db_conn.execute(
+                    "UPDATE web_checks SET last_checked_at=?, last_status='error' WHERE id=?",
+                    (now_jst.isoformat(), wc_id),
+                )
+                _db_conn.commit()
+            return {"status": "error"}
+        return {"status": "read", "text": clean_text}
+
+    # mode == "check"
     prompt = (
-        f"以下はウェブページ「{name}」の本文テキストです（URL: {url}）。\n\n"
+        f"以下はウェブページ「{name}」の本文テキストです（URL: {expanded_url}）。\n\n"
         f"{check_prompt}\n\n"
         "受付中・申し込み可能であれば「open」、"
         "受付していない・終了・未開始であれば「closed」と一言だけ答えてください。\n\n"
@@ -1774,7 +1844,7 @@ async def _run_web_check(
         logger.warning("Web check LLM failed: name=%s err=%s", name, e)
         status = "error"
 
-    logger.info("Web check result: name=%s status=%s url=%s", name, status, url)
+    logger.info("Web check result: name=%s status=%s url=%s", name, status, expanded_url)
 
     with _db_lock:
         _db_conn.execute(
@@ -1806,7 +1876,7 @@ async def _run_web_check(
 
 
 async def _web_check_notify_loop() -> None:
-    """毎朝 notify_time ごろに有効な申し込み確認アイテムをチェックし、受付中なら通知する。"""
+    """毎朝 notify_time ごろに有効なアイテムをチェックする。"""
     logger.info("Web check notify loop started")
     while True:
         await asyncio.sleep(60)
@@ -1817,11 +1887,11 @@ async def _web_check_notify_loop() -> None:
 
             with _db_lock:
                 rows = _db_conn.execute(
-                    "SELECT id, name, url, check_prompt, notify_time, last_notified_date "
+                    "SELECT id, name, url, check_prompt, notify_time, last_notified_date, mode, notify_expression "
                     "FROM web_checks WHERE enabled = 1 AND url != ''"
                 ).fetchall()
 
-            for wc_id, name, url, check_prompt, notify_time, last_notified_date in rows:
+            for wc_id, name, url, check_prompt, notify_time, last_notified_date, mode, notify_expression in rows:
                 try:
                     nh, nm = map(int, notify_time.split(":"))
                 except Exception:
@@ -1831,7 +1901,10 @@ async def _web_check_notify_loop() -> None:
                     continue
                 if last_notified_date == today_str:
                     continue
-                await _run_web_check(wc_id, name, url, check_prompt, now_jst, today_str)
+                await _run_web_check(
+                    wc_id, name, url, check_prompt, now_jst, today_str,
+                    mode=mode or "check", notify_expression=notify_expression or "happy",
+                )
 
         except Exception:
             logger.exception("Web check notify loop error")
@@ -3644,6 +3717,7 @@ class WebCheckCreate(BaseModel):
     name: str
     url: str = ""
     check_prompt: str = "申し込みが現在受付中かどうかを判定してください。"
+    mode: str = "check"
     enabled: bool = True
     notify_time: str = "07:55"
     notify_expression: str = "happy"
@@ -3653,6 +3727,7 @@ class WebCheckUpdate(BaseModel):
     name: str | None = None
     url: str | None = None
     check_prompt: str | None = None
+    mode: str | None = None
     enabled: bool | None = None
     notify_time: str | None = None
     notify_expression: str | None = None
@@ -3662,7 +3737,7 @@ class WebCheckUpdate(BaseModel):
 def list_web_checks():
     with _db_lock:
         rows = _db_conn.execute(
-            "SELECT id, name, url, check_prompt, enabled, notify_time, notify_expression, "
+            "SELECT id, name, url, check_prompt, enabled, notify_time, notify_expression, mode, "
             "last_checked_at, last_status, last_notified_date, created_at, updated_at "
             "FROM web_checks ORDER BY id"
         ).fetchall()
@@ -3671,8 +3746,9 @@ def list_web_checks():
             {
                 "id": r[0], "name": r[1], "url": r[2], "check_prompt": r[3],
                 "enabled": bool(r[4]), "notify_time": r[5], "notify_expression": r[6],
-                "last_checked_at": r[7], "last_status": r[8],
-                "last_notified_date": r[9], "created_at": r[10], "updated_at": r[11],
+                "mode": r[7] or "check",
+                "last_checked_at": r[8], "last_status": r[9],
+                "last_notified_date": r[10], "created_at": r[11], "updated_at": r[12],
             }
             for r in rows
         ]
@@ -3686,9 +3762,9 @@ def create_web_check(req: WebCheckCreate):
         with _db_lock:
             cursor = _db_conn.execute(
                 "INSERT INTO web_checks "
-                "(name, url, check_prompt, enabled, notify_time, notify_expression, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (req.name, req.url, req.check_prompt, int(req.enabled),
+                "(name, url, check_prompt, mode, enabled, notify_time, notify_expression, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (req.name, req.url, req.check_prompt, req.mode, int(req.enabled),
                  req.notify_time, req.notify_expression, now, now),
             )
             _db_conn.commit()
@@ -3711,6 +3787,8 @@ def update_web_check(wc_id: int, req: WebCheckUpdate):
         fields.append("url = ?"); vals.append(req.url)
     if req.check_prompt is not None:
         fields.append("check_prompt = ?"); vals.append(req.check_prompt)
+    if req.mode is not None:
+        fields.append("mode = ?"); vals.append(req.mode)
     if req.enabled is not None:
         fields.append("enabled = ?"); vals.append(int(req.enabled))
     if req.notify_time is not None:
@@ -3742,18 +3820,21 @@ def delete_web_check(wc_id: int):
 
 @app.post("/api/web-checks/{wc_id}/run")
 async def run_web_check_now(wc_id: int):
-    """手動で今すぐチェックを実行する。通知は行わない（テスト用）。"""
+    """手動で今すぐチェックを実行する（read モードは実際に読み上げも行う）。"""
     with _db_lock:
         row = _db_conn.execute(
-            "SELECT id, name, url, check_prompt FROM web_checks WHERE id = ?", (wc_id,)
+            "SELECT id, name, url, check_prompt, mode, notify_expression FROM web_checks WHERE id = ?", (wc_id,)
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail=f"id={wc_id} は見つかりません")
-    _, name, url, check_prompt = row
+    _, name, url, check_prompt, mode, notify_expression = row
     if not url:
         raise HTTPException(status_code=422, detail="URL が未設定です")
     now_jst = datetime.now(_JST)
-    result = await _run_web_check(wc_id, name, url, check_prompt, now_jst, today_str=None)
+    result = await _run_web_check(
+        wc_id, name, url, check_prompt, now_jst, today_str=None,
+        mode=mode or "check", notify_expression=notify_expression or "happy",
+    )
     return {"name": name, **result}
 
 
