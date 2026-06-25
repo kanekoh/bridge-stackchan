@@ -3232,12 +3232,11 @@ _EDITABLE_SETTINGS = {
     },
     "rain_source": {
         "label": "天気通知 — データソース",
-        "description": "雨通知に使うデータソース。ナウキャストはレーダー実観測の外挿で30分以内の予測に強く5分更新。Open-Meteoは数値予報モデルで15分更新。",
-        "env_fallback": lambda: "nowcast",
+        "description": "雨通知に使うデータソース。AMeDAS+Open-Meteoは公式観測と数値予報の組み合わせで推奨。Open-Meteoのみは軽量だが現況精度が劣る。",
+        "env_fallback": lambda: "amedas+openmeteo",
         "type": "select",
         "options": [
             {"value": "amedas+openmeteo", "label": "AMeDAS + Open-Meteo（推奨・公式・10分更新）"},
-            {"value": "nowcast",          "label": "JMA ナウキャスト（非公式API・不安定）"},
             {"value": "openmeteo",        "label": "Open-Meteo のみ（15分更新）"},
         ],
     },

@@ -258,20 +258,9 @@
       if (!d.ok) { el.textContent = '❌ ' + (d.detail || '失敗'); return; }
 
       const src = d.active_source;
-      const om  = d.openmeteo  || {};
       const ac  = d['amedas+openmeteo'] || {};
 
-      const SOURCE_LABELS = {
-        'openmeteo':        'Open-Meteo',
-        'nowcast':          'JMA ナウキャスト',
-        'amedas+openmeteo': 'AMeDAS + Open-Meteo',
-      };
-      const srcBadge = s => {
-        const active = s === src;
-        return `<span class="px-2 py-0.5 rounded text-xs font-medium ${active ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-400'}">
-          ${SOURCE_LABELS[s] || s}${active ? ' ✓使用中' : ''}
-        </span>`;
-      };
+      const activeBadge = `<span class="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">AMeDAS + Open-Meteo ✓使用中</span>`;
 
       const confColor = c => c === 'high' ? 'text-green-600' : c === 'medium' ? 'text-yellow-600' : 'text-gray-400';
       const confLabel = c => c === 'high' ? '確信度 高' : c === 'medium' ? '確信度 中' : '確信度 低';
@@ -338,31 +327,10 @@
         }
       }
 
-      // ── Open-Meteo 単体パネル ──
-      const omTl = om.error
-        ? `<span class="text-red-500">${esc(om.error)}</span>`
-        : renderTimeline([...(om.timeline || [])], 'mm_15min', 'mm/15min', src === 'openmeteo');
-      const omJudge = !om.error
-        ? `<div class="mt-2 text-xs ${om.soon_wet && om.now_dry ? 'text-orange-600 font-bold' : 'text-gray-400'}">
-             判定: ${om.now_dry ? '現在は乾燥' : '現在降雨中'}　${om.soon_wet ? '⚠ 雨の予報あり' : '雨の予報なし'}
-           </div>` : '';
-
       el.innerHTML = `
-        <div class="space-y-5">
-          <div>
-            <div class="flex items-center gap-2 mb-3">
-              ${srcBadge('amedas+openmeteo')}
-            </div>
-            ${amedas_html}
-          </div>
-          <hr class="border-gray-100">
-          <div>
-            <div class="flex items-center gap-2 mb-3">
-              ${srcBadge('openmeteo')}
-              <span class="text-gray-400 text-xs">（単体・参考）</span>
-            </div>
-            ${omTl}${omJudge}
-          </div>
+        <div>
+          <div class="mb-3">${activeBadge}</div>
+          ${amedas_html}
         </div>`;
 
     } catch(e) {
