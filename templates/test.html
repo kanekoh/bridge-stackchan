@@ -69,7 +69,7 @@
       <h2 class="font-semibold text-gray-700">雨データ比較</h2>
       <button onclick="loadRainStatus()" class="text-xs text-gray-400 hover:text-gray-600">↻ 更新</button>
     </div>
-    <p class="text-xs text-gray-400 mb-4">Open-Meteo と JMA ナウキャストの降水データを並べて確認できます</p>
+    <p class="text-xs text-gray-400 mb-4">AMeDAS 多点観測・Open-Meteo の降水データを並べて確認できます</p>
     <div id="rainStatus" class="text-xs text-gray-400">取得前</div>
   </div>
 
@@ -252,48 +252,119 @@
 
   async function loadRainStatus() {
     const el = document.getElementById('rainStatus');
-    el.innerHTML = '<span class="text-gray-400">取得中...</span>';
+    el.innerHTML = '<span class="text-gray-400">取得中（AMeDAS 7スナップ並列取得）...</span>';
     try {
       const d = await apiFetch('/api/debug/rain/status');
       if (!d.ok) { el.textContent = '❌ ' + (d.detail || '失敗'); return; }
 
       const src = d.active_source;
-      const om  = d.openmeteo;
-      const nc  = d.nowcast;
+      const om  = d.openmeteo  || {};
+      const ac  = d['amedas+openmeteo'] || {};
 
-      const srcBadge = s => `<span class="px-1.5 py-0.5 rounded text-xs ${s === src ? 'bg-blue-100 text-blue-700 font-bold' : 'bg-gray-100 text-gray-500'}">${s === 'nowcast' ? 'JMA ナウキャスト' : 'Open-Meteo'}${s === src ? '（使用中）' : ''}</span>`;
-
-      const omTl  = om.error  ? `<span class="text-red-500">${esc(om.error)}</span>`
-                               : renderTimeline([...( om.timeline || [])], 'mm_15min', 'mm/15min', src === 'openmeteo');
-      const ncObsTl = nc.error ? '' : renderTimeline([...(nc.timeline_obs || [])], 'mm_h', 'mm/h', false);
-      const ncFctTl = nc.error ? '' : renderTimeline([...(nc.timeline_fct || [])], 'mm_h', 'mm/h', false);
-      const ncHtml  = nc.error
-        ? `<span class="text-red-500">${esc(nc.error)}</span>`
-        : `<div class="text-gray-500 mb-1">観測 (N1) 観測時刻: ${esc(nc.obs_time_jst)}</div>${ncObsTl}
-           <div class="text-gray-500 mt-2 mb-1">予報 (N2) 基準: ${esc(nc.fct_bt_jst)}</div>${ncFctTl}`;
-
-      const judgment = data => {
-        if (data.error) return '';
-        const dry = data.now_dry !== undefined ? data.now_dry : true;
-        const wet = data.soon_wet;
-        return `<div class="mt-1 text-xs ${wet && dry ? 'text-orange-600 font-bold' : 'text-gray-400'}">
-          判定: ${dry ? '現在は乾燥' : '現在降雨中'}　${wet ? '⚠ 30分以内に雨の予報' : '雨の予報なし'}
-        </div>`;
+      const SOURCE_LABELS = {
+        'openmeteo':        'Open-Meteo',
+        'nowcast':          'JMA ナウキャスト',
+        'amedas+openmeteo': 'AMeDAS + Open-Meteo',
+      };
+      const srcBadge = s => {
+        const active = s === src;
+        return `<span class="px-2 py-0.5 rounded text-xs font-medium ${active ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-400'}">
+          ${SOURCE_LABELS[s] || s}${active ? ' ✓使用中' : ''}
+        </span>`;
       };
 
+      const confColor = c => c === 'high' ? 'text-green-600' : c === 'medium' ? 'text-yellow-600' : 'text-gray-400';
+      const confLabel = c => c === 'high' ? '確信度 高' : c === 'medium' ? '確信度 中' : '確信度 低';
+
+      // ── AMeDAS パネル ──
+      const mv = ac.amedas || {};
+      let amedas_html = '';
+      if (ac.error) {
+        amedas_html = `<span class="text-red-500">${esc(ac.error)}</span>`;
+      } else {
+        // 現在の判定バナー
+        const nowDry  = ac.now_dry;
+        const soonWet = ac.soon_wet;
+        const bannerCls = !nowDry ? 'bg-blue-50 text-blue-700 border-blue-200'
+                        : soonWet ? 'bg-orange-50 text-orange-700 border-orange-200'
+                        :           'bg-green-50 text-green-700 border-green-200';
+        const bannerTxt = !nowDry ? '🌧 現在降雨中（近隣観測点で検知）'
+                        : soonWet ? '⚠ もうすぐ雨（接近中）'
+                        :           '☀ 現在乾燥・30分以内の雨なし';
+        amedas_html += `<div class="border rounded px-3 py-2 mb-3 text-xs font-semibold ${bannerCls}">${bannerTxt}</div>`;
+
+        // 移動ベクトル
+        if (mv.method === 'regression') {
+          const widespread = (mv.speed_kmh || 0) > 250;
+          const arrTxt = widespread ? '広域降雨（方向推定不可）'
+                       : mv.approaching ? `あと <b>${mv.arrival_min}</b> 分で到達予測`
+                       : mv.arrival_min === null ? '60分以内の接近なし'
+                       : '（すでに通過済み）';
+          amedas_html += `
+            <div class="bg-gray-50 rounded p-3 mb-3 space-y-1">
+              <div class="font-semibold text-gray-700 mb-1">雨の移動推定（AMeDAS 回帰）</div>
+              <div>移動方向: <b>${esc(mv.direction_str)}</b> (${mv.direction_deg}°)
+                   速度: <b>${widespread ? '—' : mv.speed_kmh + ' km/h'}</b></div>
+              <div>到達: ${arrTxt}</div>
+              <div class="${confColor(mv.confidence)}">${confLabel(mv.confidence)}
+                （${mv.n_stations}点回帰・RMSE ${mv.rmse_min}分）</div>
+              ${ac.openmeteo_confirms ? '<div class="text-green-600 font-semibold">✓ Open-Meteo も雨を予報</div>' : ''}
+            </div>`;
+        } else if (mv.method === 'insufficient_data') {
+          amedas_html += `<div class="text-gray-400 text-xs mb-3">回帰データ不足（${mv.n_stations}点）— 方向推定スキップ</div>`;
+        }
+
+        // 現在の降水観測点
+        const wet = mv.wet_now || [];
+        if (wet.length > 0) {
+          const rows = wet.slice(0, 8).map(s =>
+            `<tr class="border-t border-gray-100">
+               <td class="py-1 pr-3 font-medium">${esc(s.name)}</td>
+               <td class="pr-3 text-gray-500">${s.dist_km}km ${esc(s.direction)}</td>
+               <td class="text-blue-600">${s.prec_mm}mm/10min</td>
+             </tr>`).join('');
+          amedas_html += `
+            <div class="font-semibold text-gray-600 mb-1">現在降水中の観測点（近い順）</div>
+            <table class="w-full text-xs mb-3">${rows}</table>`;
+        } else {
+          amedas_html += `<div class="text-gray-400 text-xs mb-3">現在降水中の近隣観測点なし</div>`;
+        }
+
+        // Open-Meteo タイムライン（統合データ内）
+        const omInner = ac.openmeteo || {};
+        if (!omInner.error && omInner.timeline) {
+          amedas_html += `<div class="font-semibold text-gray-600 mb-1">Open-Meteo 予報タイムライン</div>`;
+          amedas_html += renderTimeline([...(omInner.timeline)], 'mm_15min', 'mm/15min', src === 'amedas+openmeteo');
+        }
+      }
+
+      // ── Open-Meteo 単体パネル ──
+      const omTl = om.error
+        ? `<span class="text-red-500">${esc(om.error)}</span>`
+        : renderTimeline([...(om.timeline || [])], 'mm_15min', 'mm/15min', src === 'openmeteo');
+      const omJudge = !om.error
+        ? `<div class="mt-2 text-xs ${om.soon_wet && om.now_dry ? 'text-orange-600 font-bold' : 'text-gray-400'}">
+             判定: ${om.now_dry ? '現在は乾燥' : '現在降雨中'}　${om.soon_wet ? '⚠ 雨の予報あり' : '雨の予報なし'}
+           </div>` : '';
+
       el.innerHTML = `
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono">
+        <div class="space-y-5">
           <div>
-            <div class="mb-2">${srcBadge('openmeteo')}</div>
-            ${omTl}
-            ${judgment(om)}
+            <div class="flex items-center gap-2 mb-3">
+              ${srcBadge('amedas+openmeteo')}
+            </div>
+            ${amedas_html}
           </div>
+          <hr class="border-gray-100">
           <div>
-            <div class="mb-2">${srcBadge('nowcast')}</div>
-            ${ncHtml}
-            ${judgment(nc)}
+            <div class="flex items-center gap-2 mb-3">
+              ${srcBadge('openmeteo')}
+              <span class="text-gray-400 text-xs">（単体・参考）</span>
+            </div>
+            ${omTl}${omJudge}
           </div>
         </div>`;
+
     } catch(e) {
       el.textContent = '❌ ' + e.message;
     }

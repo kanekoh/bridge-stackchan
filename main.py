@@ -1424,6 +1424,274 @@ async def _fetch_openmeteo_rain_data(lat: float, lon: float) -> dict:
     }
 
 
+# ── AMeDAS + Open-Meteo 複合雨予報 ──────────────────────────────────────────
+
+_amedas_station_cache: dict | None = None
+_AMEDAS_RADIUS_KM = 120.0
+_AMEDAS_N_SNAPSHOTS = 7   # 10分刻み × 6間隔 = 60分
+
+
+async def _load_amedas_station_table() -> dict:
+    """AMeDAS 観測点マスタをキャッシュ取得（初回のみ HTTP）。"""
+    global _amedas_station_cache
+    if _amedas_station_cache is not None:
+        return _amedas_station_cache
+    resp = await _http_client.get(
+        "https://www.jma.go.jp/bosai/amedas/const/amedastable.json"
+    )
+    resp.raise_for_status()
+    _amedas_station_cache = resp.json()
+    return _amedas_station_cache
+
+
+async def _fetch_amedas_snapshots(
+    lat: float, lon: float
+) -> tuple[list[dict], dict, list[int]]:
+    """
+    過去 60 分の AMeDAS スナップショット 7 枚を並列取得する。
+
+    Returns:
+        snapshots   : list[dict]  各時刻の {station_id: obs_dict}（古い→新しい順）
+        station_meta: dict         {station_id: {name, lat, lon, dist_km, direction}}
+        t_minutes   : list[int]   各スナップの相対時刻 [-60, -50, ..., 0]
+    """
+    table = await _load_amedas_station_table()
+    cos_lat = math.cos(math.radians(lat))
+
+    # 最新時刻を取得（JST ISO 形式 → UTC タイムスタンプ文字列）
+    r = await _http_client.get(
+        "https://www.jma.go.jp/bosai/amedas/data/latest_time.txt"
+    )
+    r.raise_for_status()
+    latest_dt = datetime.fromisoformat(r.text.strip()).astimezone(timezone.utc)
+
+    # 7 スナップショットの UTC タイムスタンプを生成（古い→新しい順）
+    timestamps = [
+        (latest_dt - timedelta(minutes=(_AMEDAS_N_SNAPSHOTS - 1 - i) * 10))
+        .strftime("%Y%m%d%H%M%S")
+        for i in range(_AMEDAS_N_SNAPSHOTS)
+    ]
+    t_minutes = [-((_AMEDAS_N_SNAPSHOTS - 1 - i) * 10) for i in range(_AMEDAS_N_SNAPSHOTS)]
+
+    # 並列取得
+    urls = [
+        f"https://www.jma.go.jp/bosai/amedas/data/map/{ts}.json"
+        for ts in timestamps
+    ]
+    responses = await asyncio.gather(
+        *[_http_client.get(url) for url in urls], return_exceptions=True
+    )
+
+    snapshots: list[dict] = []
+    for resp in responses:
+        if isinstance(resp, Exception) or resp.status_code != 200:
+            snapshots.append({})
+            continue
+        try:
+            snapshots.append(resp.json())
+        except Exception:
+            snapshots.append({})
+
+    # 半径フィルタ＋メタデータ構築
+    dirs16 = ["北","北北東","北東","東北東","東","東南東","南東","南南東",
+               "南","南南西","南西","西南西","西","西北西","北西","北北西"]
+    station_meta: dict = {}
+    for sid, info in table.items():
+        if "lat" not in info or "lon" not in info:
+            continue
+        s_lat = info["lat"][0] + info["lat"][1] / 60
+        s_lon = info["lon"][0] + info["lon"][1] / 60
+        dist_km = math.sqrt(
+            ((s_lat - lat) * 111) ** 2 + ((s_lon - lon) * 111 * cos_lat) ** 2
+        )
+        if dist_km > _AMEDAS_RADIUS_KM:
+            continue
+        ang = math.degrees(math.atan2((s_lon - lon) * cos_lat, s_lat - lat))
+        station_meta[sid] = {
+            "name": info.get("kjName", sid),
+            "lat": s_lat,
+            "lon": s_lon,
+            "dist_km": round(dist_km, 1),
+            "direction": dirs16[int((ang + 360 + 11.25) % 360 / 22.5)],
+        }
+
+    return snapshots, station_meta, t_minutes
+
+
+def _estimate_rain_movement(
+    snapshots: list[dict],
+    station_meta: dict,
+    t_minutes: list[int],
+    target_lat: float,
+    target_lon: float,
+) -> dict:
+    """
+    AMeDAS 多点・多時刻観測から雨の移動ベクトルと到達時刻を推定する。
+
+    手法: 降水開始時刻 t_i = a*x_i + b*y_i + c の最小二乗回帰
+    (x,y) は目標地点を原点とした km 単位の平面座標。
+    詳細は docs/rain_prediction_design.md を参照。
+    """
+    import numpy as np
+
+    cos_lat = math.cos(math.radians(target_lat))
+    dirs16 = ["北","北北東","北東","東北東","東","東南東","南東","南南東",
+               "南","南南西","南西","西南西","西","西北西","北西","北北西"]
+
+    # 各観測点の降水開始時刻を特定（最初に precipitation10m > 0 となった時刻）
+    onset: dict[str, float] = {}
+    for i, (snap, t) in enumerate(zip(snapshots, t_minutes)):
+        for sid, obs in snap.items():
+            if sid not in station_meta or sid in onset:
+                continue
+            prec = (obs.get("precipitation10m") or [0])[0] or 0
+            if prec > 0:
+                onset[sid] = float(t)
+
+    # 現在（最新スナップ）の降水観測点
+    cur_snap = snapshots[-1]
+    wet_now: list[dict] = []
+    for sid, obs in cur_snap.items():
+        if sid not in station_meta:
+            continue
+        prec = (obs.get("precipitation10m") or [0])[0] or 0
+        if prec > 0:
+            wet_now.append({
+                "name": station_meta[sid]["name"],
+                "dist_km": station_meta[sid]["dist_km"],
+                "direction": station_meta[sid]["direction"],
+                "prec_mm": prec,
+            })
+    wet_now.sort(key=lambda s: s["dist_km"])
+
+    # 回帰に使えるデータが 3 点未満 → 低確信度で返す
+    if len(onset) < 3:
+        nearby_wet = [s for s in wet_now if s["dist_km"] <= 30]
+        return {
+            "method": "insufficient_data",
+            "n_stations": len(onset),
+            "wet_now": wet_now,
+            "approaching": len(nearby_wet) > 0,
+            "arrival_min": None,
+            "direction_str": "不明",
+            "speed_kmh": 0.0,
+            "confidence": "low",
+        }
+
+    # 回帰行列を構築
+    xs, ys, ts = [], [], []
+    for sid, t in onset.items():
+        m = station_meta[sid]
+        xs.append((m["lon"] - target_lon) * 111 * cos_lat)
+        ys.append((m["lat"] - target_lat) * 111)
+        ts.append(t)
+
+    A = np.column_stack([xs, ys, np.ones(len(xs))])
+    t_vec = np.array(ts)
+    try:
+        coeffs, residuals, rank, _ = np.linalg.lstsq(A, t_vec, rcond=None)
+        a, b, c = float(coeffs[0]), float(coeffs[1]), float(coeffs[2])
+    except Exception:
+        return {"method": "regression_failed", "confidence": "low",
+                "wet_now": wet_now, "approaching": False, "arrival_min": None,
+                "direction_str": "不明", "speed_kmh": 0.0, "n_stations": len(onset)}
+
+    # 移動方向・速度
+    grad_mag = math.sqrt(a ** 2 + b ** 2)
+    if grad_mag < 1e-9:
+        speed_kmh, direction_deg = 0.0, 0.0
+    else:
+        speed_kmh = (1.0 / grad_mag) * 60   # km/h
+        move_x = -a / grad_mag              # 東向き成分
+        move_y = -b / grad_mag              # 北向き成分
+        direction_deg = (math.degrees(math.atan2(move_x, move_y)) + 360) % 360
+
+    direction_str = dirs16[int((direction_deg + 11.25) % 360 / 22.5)]
+
+    # 目標地点への到達予測: t_target = c (minutes, 負 = 過去)
+    arrival_min = float(c)   # 正なら未来（あと arrival_min 分）
+
+    # 確信度
+    n_pts = len(onset)
+    rmse = 0.0
+    if len(residuals) > 0 and residuals[0] > 0:
+        rmse = math.sqrt(float(residuals[0]) / n_pts)
+
+    # 速度が物理的にあり得ない場合（>250km/h）は「広域降雨で方向不明」
+    widespread = speed_kmh > 250
+    if widespread:
+        confidence = "low"
+    elif n_pts >= 6 and rmse < 15:
+        confidence = "high"
+    elif n_pts >= 3 and rmse < 25:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    approaching = 0 < arrival_min <= 60 and not widespread
+
+    return {
+        "method": "regression",
+        "n_stations": n_pts,
+        "direction_deg": round(direction_deg, 1),
+        "direction_str": direction_str,
+        "speed_kmh": round(speed_kmh, 1),
+        "arrival_min": round(arrival_min) if approaching else None,
+        "approaching": approaching,
+        "wet_now": wet_now,
+        "confidence": confidence,
+        "rmse_min": round(rmse, 1),
+    }
+
+
+async def _fetch_amedas_openmeteo_rain_data(lat: float, lon: float) -> dict:
+    """
+    AMeDAS 多点観測 + Open-Meteo を組み合わせた雨予報。
+    docs/rain_prediction_design.md 参照。
+    """
+    # 並列取得
+    amedas_task = asyncio.create_task(_fetch_amedas_snapshots(lat, lon))
+    om_task = asyncio.create_task(_fetch_openmeteo_rain_data(lat, lon))
+    (snapshots, station_meta, t_minutes), om_data = await asyncio.gather(
+        amedas_task, om_task
+    )
+
+    movement = _estimate_rain_movement(snapshots, station_meta, t_minutes, lat, lon)
+
+    # 現在乾燥かどうか: 半径 20km 以内に降水なし
+    nearby_wet = [s for s in movement.get("wet_now", []) if s["dist_km"] <= 20]
+    now_dry = len(nearby_wet) == 0
+
+    # 30 分以内に到達予測か（AMeDAS）
+    amedas_soon_wet = movement.get("approaching", False) and (
+        movement.get("arrival_min") or 999
+    ) <= 30
+
+    # Open-Meteo の 30 分先予報
+    om_soon_wet = om_data.get("soon_wet", False)
+    om_sudden  = om_data.get("sudden", False)
+
+    # どちらかが「もうすぐ雨」なら通知
+    soon_wet = amedas_soon_wet or om_soon_wet
+    openmeteo_confirms = amedas_soon_wet and om_soon_wet
+
+    # 確信度に応じた sudden 判定
+    sudden = om_sudden or (
+        amedas_soon_wet
+        and (movement.get("arrival_min") or 999) <= 15
+        and movement.get("confidence") in ("high", "medium")
+    )
+
+    return {
+        "amedas": movement,
+        "openmeteo": om_data,
+        "now_dry": now_dry,
+        "soon_wet": soon_wet,
+        "sudden": sudden,
+        "openmeteo_confirms": openmeteo_confirms,
+    }
+
+
 async def _check_rain_notification() -> None:
     """雨降り始めを検知して通知する。rain_source 設定でデータソースを切り替え可能。"""
     lat_str = _get_setting("location_lat", "")
@@ -1436,14 +1704,13 @@ async def _check_rain_notification() -> None:
     try:
         if source == "nowcast":
             data = await _fetch_nowcast_rain_data(lat, lon)
-            now_dry  = data["now_dry"]
-            soon_wet = data["soon_wet"]
-            sudden   = data["sudden"]
+        elif source == "amedas+openmeteo":
+            data = await _fetch_amedas_openmeteo_rain_data(lat, lon)
         else:
             data = await _fetch_openmeteo_rain_data(lat, lon)
-            now_dry  = data["now_dry"]
-            soon_wet = data["soon_wet"]
-            sudden   = data["sudden"]
+        now_dry  = data["now_dry"]
+        soon_wet = data["soon_wet"]
+        sudden   = data["sudden"]
     except Exception as e:
         logger.warning("rain check error (source=%s): %s", source, e)
         return
@@ -2969,8 +3236,9 @@ _EDITABLE_SETTINGS = {
         "env_fallback": lambda: "nowcast",
         "type": "select",
         "options": [
-            {"value": "nowcast",   "label": "JMA ナウキャスト（推奨・5分更新）"},
-            {"value": "openmeteo", "label": "Open-Meteo（15分更新）"},
+            {"value": "amedas+openmeteo", "label": "AMeDAS + Open-Meteo（推奨・公式・10分更新）"},
+            {"value": "nowcast",          "label": "JMA ナウキャスト（非公式API・不安定）"},
+            {"value": "openmeteo",        "label": "Open-Meteo のみ（15分更新）"},
         ],
     },
     "iss_notify_enabled": {
@@ -3492,7 +3760,7 @@ async def api_debug_rain_check():
 
 @app.get("/api/debug/rain/status")
 async def api_debug_rain_status():
-    """Open-Meteo と JMA ナウキャスト両方のデータを取得して比較返却する。"""
+    """全ソースのデータを並列取得して比較返却する。"""
     lat_str = _get_setting("location_lat", "")
     lon_str = _get_setting("location_lon", "")
     if not lat_str or not lon_str:
@@ -3502,15 +3770,18 @@ async def api_debug_rain_status():
     results = await asyncio.gather(
         _fetch_openmeteo_rain_data(lat, lon),
         _fetch_nowcast_rain_data(lat, lon),
+        _fetch_amedas_openmeteo_rain_data(lat, lon),
         return_exceptions=True,
     )
-    openmeteo = results[0] if not isinstance(results[0], Exception) else {"error": str(results[0])}
-    nowcast   = results[1] if not isinstance(results[1], Exception) else {"error": str(results[1])}
+    def _safe(r):
+        return r if not isinstance(r, Exception) else {"error": str(r)}
+
     return {
         "ok": True,
         "active_source": _get_setting("rain_source", "nowcast"),
-        "openmeteo": openmeteo,
-        "nowcast": nowcast,
+        "openmeteo":        _safe(results[0]),
+        "nowcast":          _safe(results[1]),
+        "amedas+openmeteo": _safe(results[2]),
     }
 
 
