@@ -3653,11 +3653,14 @@ async def debug_p2pquake(code: int = Query(551), force: bool = Query(False)):
     force=true: dedup をスキップして必ず発話する
     """
     p2p_history_url = f"https://api.p2pquake.net/v2/history?codes={code}&limit=1"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(p2p_history_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status != 200:
-                raise HTTPException(status_code=502, detail=f"P2P API returned {resp.status}")
-            events = await resp.json()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(p2p_history_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=502, detail=f"P2P API returned {resp.status}")
+                events = await resp.json()
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="P2P history API がタイムアウトしました。しばらく待ってから再試行してください。")
 
     if not events:
         raise HTTPException(status_code=404, detail=f"code={code} の直近データが見つかりません")
