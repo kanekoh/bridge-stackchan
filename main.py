@@ -1564,6 +1564,22 @@ def _estimate_rain_movement(
             })
     wet_now.sort(key=lambda s: s["dist_km"])
 
+    # 全観測点の現在降水量（地図表示用）
+    all_stations = []
+    for sid, meta in station_meta.items():
+        prec = 0.0
+        if sid in cur_snap:
+            obs = cur_snap[sid]
+            prec = (obs.get("precipitation10m") or [0])[0] or 0
+        all_stations.append({
+            "name": meta["name"],
+            "lat": meta["lat"],
+            "lon": meta["lon"],
+            "dist_km": meta["dist_km"],
+            "prec_mm": prec,
+        })
+    all_stations.sort(key=lambda s: s["dist_km"])
+
     # 回帰に使えるデータが 3 点未満 → 低確信度で返す
     if len(onset) < 3:
         nearby_wet = [s for s in wet_now if s["dist_km"] <= 30]
@@ -1571,14 +1587,16 @@ def _estimate_rain_movement(
             "method": "insufficient_data",
             "n_stations": len(onset),
             "wet_now": wet_now,
+            "all_stations": all_stations,
             "approaching": len(nearby_wet) > 0,
             "arrival_min": None,
             "direction_str": "不明",
+            "direction_deg": 0.0,
             "speed_kmh": 0.0,
             "confidence": "low",
         }
 
-    # 回帰行列を構築
+    # 回帰行列を構築（距離逆数重み付き最小二乗法）
     xs, ys, ts = [], [], []
     for sid, t in onset.items():
         m = station_meta[sid]
@@ -1586,15 +1604,24 @@ def _estimate_rain_movement(
         ys.append((m["lat"] - target_lat) * 111)
         ts.append(t)
 
-    A = np.column_stack([xs, ys, np.ones(len(xs))])
+    xs_arr = np.array(xs)
+    ys_arr = np.array(ys)
+    dists  = np.sqrt(xs_arr ** 2 + ys_arr ** 2)
+    weights = 1.0 / np.maximum(dists, 5.0)  # 最低 5km でクランプ（ゼロ除算回避）
+
+    A     = np.column_stack([xs_arr, ys_arr, np.ones(len(xs_arr))])
     t_vec = np.array(ts)
+    A_w   = A * weights[:, np.newaxis]
+    t_w   = t_vec * weights
     try:
-        coeffs, residuals, rank, _ = np.linalg.lstsq(A, t_vec, rcond=None)
+        coeffs, residuals, rank, _ = np.linalg.lstsq(A_w, t_w, rcond=None)
         a, b, c = float(coeffs[0]), float(coeffs[1]), float(coeffs[2])
     except Exception:
         return {"method": "regression_failed", "confidence": "low",
-                "wet_now": wet_now, "approaching": False, "arrival_min": None,
-                "direction_str": "不明", "speed_kmh": 0.0, "n_stations": len(onset)}
+                "wet_now": wet_now, "all_stations": all_stations,
+                "approaching": False, "arrival_min": None,
+                "direction_str": "不明", "direction_deg": 0.0,
+                "speed_kmh": 0.0, "n_stations": len(onset)}
 
     # 移動方向・速度
     grad_mag = math.sqrt(a ** 2 + b ** 2)
@@ -1639,6 +1666,7 @@ def _estimate_rain_movement(
         "arrival_min": round(arrival_min) if approaching else None,
         "approaching": approaching,
         "wet_now": wet_now,
+        "all_stations": all_stations,
         "confidence": confidence,
         "rmse_min": round(rmse, 1),
     }
@@ -3839,6 +3867,8 @@ async def api_debug_rain_status():
     return {
         "ok": True,
         "active_source": _get_setting("rain_source", "amedas+openmeteo"),
+        "target_lat": lat,
+        "target_lon": lon,
         "cooldown_notified_at": cooldown_str or None,
         "cooldown_remaining_min": cooldown_remaining_min,
         "next_action": next_action,

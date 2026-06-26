@@ -2,6 +2,11 @@
 {% block title %}テスト{% endblock %}
 {% block nav_test %}font-semibold text-blue-600{% endblock %}
 
+{% block extra_head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+{% endblock %}
+
 {% block content %}
 <h1 class="text-xl font-bold text-gray-800 mb-4">スタックちゃんテスト</h1>
 
@@ -73,6 +78,7 @@
       <button onclick="checkRain()" class="bg-indigo-500 hover:bg-indigo-600 text-white text-sm px-4 py-2 rounded whitespace-nowrap">雨チェックを今すぐ実行</button>
       <p id="rainCheckResult" class="text-xs mt-2 text-gray-500"></p>
     </div>
+    <div id="rainMap" style="height:380px" class="rounded border border-gray-200 mb-4 bg-gray-50"></div>
     <div id="rainStatus" class="text-xs text-gray-400">取得前</div>
   </div>
 
@@ -350,8 +356,88 @@
           ${amedas_html}
         </div>`;
 
+      updateRainMap(d);
+
     } catch(e) {
       el.textContent = '❌ ' + e.message;
+    }
+  }
+
+  // ── 雨マップ（Leaflet.js） ──────────────────────────────
+  let _rainMap = null;
+  let _rainMapLayers = [];
+
+  function _offsetLatLon(lat, lon, bearingDeg, distKm) {
+    const R = 6371, d = distKm / R, b = bearingDeg * Math.PI / 180;
+    const φ1 = lat * Math.PI / 180, λ1 = lon * Math.PI / 180;
+    const φ2 = Math.asin(Math.sin(φ1)*Math.cos(d) + Math.cos(φ1)*Math.sin(d)*Math.cos(b));
+    const λ2 = λ1 + Math.atan2(Math.sin(b)*Math.sin(d)*Math.cos(φ1), Math.cos(d) - Math.sin(φ1)*Math.sin(φ2));
+    return [φ2 * 180/Math.PI, λ2 * 180/Math.PI];
+  }
+
+  function _addMapLayer(layer) {
+    layer.addTo(_rainMap);
+    _rainMapLayers.push(layer);
+  }
+
+  function updateRainMap(d) {
+    const tLat = d.target_lat, tLon = d.target_lon;
+    if (!tLat || !tLon) return;
+
+    if (!_rainMap) {
+      _rainMap = L.map('rainMap').setView([tLat, tLon], 10);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxZoom: 13,
+      }).addTo(_rainMap);
+    }
+
+    _rainMapLayers.forEach(l => _rainMap.removeLayer(l));
+    _rainMapLayers = [];
+
+    const ac = d['amedas+openmeteo'] || {};
+    const mv = ac.amedas || {};
+    const stations = mv.all_stations || [];
+
+    // 観測点の円
+    for (const s of stations) {
+      const p = s.prec_mm;
+      const color = p > 5  ? '#1e3a8a'   // 強い雨 – 濃紺
+                  : p > 2  ? '#1d4ed8'   // 雨 – 青
+                  : p > 0.5? '#60a5fa'   // 小雨 – 薄青
+                  : p > 0  ? '#bfdbfe'   // 微量 – 極薄青
+                  :           '#e5e7eb';  // 乾燥 – グレー
+      const r = p > 0 ? Math.max(3000, p * 3000) : 1500;
+      _addMapLayer(L.circle([s.lat, s.lon], {
+        radius: r, color, fillColor: color, fillOpacity: 0.55, weight: 1,
+      }).bindPopup(`<b>${esc(s.name)}</b><br>${p > 0 ? p + ' mm/10min' : '乾燥'}<br>距離 ${s.dist_km} km`));
+    }
+
+    // 設置場所マーカー
+    _addMapLayer(L.marker([tLat, tLon], {
+      icon: L.divIcon({ html: '<div style="font-size:22px;line-height:1;filter:drop-shadow(0 1px 2px #0008)">★</div>', iconAnchor:[11,11], className:'' }),
+      zIndexOffset: 1000,
+    }).bindPopup('設置場所'));
+
+    // 移動ベクトル矢印
+    if (mv.method === 'regression' && mv.speed_kmh < 250 && mv.direction_deg != null) {
+      const dir = mv.direction_deg;
+      const fromDir = (dir + 180) % 360;
+      const halfLen = Math.min(mv.speed_kmh * 0.4, 50);  // 矢印長さ = 24分移動距離、最大50km
+      const upstream   = _offsetLatLon(tLat, tLon, fromDir, halfLen);
+      const downstream = _offsetLatLon(tLat, tLon, dir, halfLen);
+      const arrowColor = mv.approaching ? '#ea580c' : '#94a3b8';
+
+      // 軸線（破線）
+      _addMapLayer(L.polyline([upstream, [tLat, tLon], downstream], {
+        color: arrowColor, weight: 3, dashArray: '8 5', opacity: 0.85,
+      }).bindPopup(`移動方向: ${esc(mv.direction_str)} / ${mv.speed_kmh} km/h${mv.approaching ? ' / あと'+mv.arrival_min+'分' : ''}`));
+
+      // 矢じり
+      const tip  = _offsetLatLon(downstream[0], downstream[1], dir, 4);
+      const left = _offsetLatLon(downstream[0], downstream[1], (dir+145)%360, 5);
+      const rght = _offsetLatLon(downstream[0], downstream[1], (dir-145+360)%360, 5);
+      _addMapLayer(L.polygon([tip, left, rght], { color: arrowColor, fillOpacity: 0.85, weight: 1 }));
     }
   }
 
