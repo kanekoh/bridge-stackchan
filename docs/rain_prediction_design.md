@@ -114,7 +114,18 @@ arrival_min = (6 - t_target) * 10  # スナップ単位 → 分
 `arrival_min > 0`: まだ到達していない（あと arrival_min 分で来る）  
 `arrival_min <= 0`: すでに到達しているはず
 
-### ステップ 4: Open-Meteo と照合
+### ステップ 4: Open-Meteo と照合・統合判定
+
+#### `now_dry`（現在乾燥か）
+
+AMeDAS と Open-Meteo の **両方** が乾燥を示す場合のみ `now_dry=True`。
+どちらか一方でも雨を検知していれば `now_dry=False`（観測データ優先）。
+
+```
+now_dry = (AMeDAS 20km 内に降水局なし) AND (Open-Meteo 現在値 < 閾値)
+```
+
+#### 予報照合
 
 ```
 AMeDAS 推定                Open-Meteo 予報
@@ -122,6 +133,21 @@ AMeDAS 推定                Open-Meteo 予報
 arrival_min ≤ 30   AND    forecast_prec > 0    → 確信度: HIGH
 arrival_min ≤ 60   OR     forecast_prec > 0    → 確信度: MEDIUM
 arrival_min > 60   AND    forecast_prec = 0    → 確信度: LOW（雨来ない可能性大）
+```
+
+#### 通知フロー（`_check_rain_notification`）
+
+```
+now_dry=False
+  └─ 通知未送信  → 「気づいたら雨が降り始めてる！」（予報外れ通知）
+  └─ 通知済み   → スルー（クールダウン維持）
+
+now_dry=True AND soon_wet=False
+  └─ AMeDAS 接近中  → クールダウン保持（まだリセットしない）
+  └─ 接近なし      → クールダウンリセット
+
+now_dry=True AND soon_wet=True
+  └─ 3時間クールダウン確認 → 「30分以内に雨」または「急な雨」通知
 ```
 
 ---
@@ -156,14 +182,19 @@ onset_time 行列 (N点×7時刻)     │
                  ▼
           統合予報結果
           {
-            now_dry: bool,
-            approaching: bool,
-            arrival_min: int | None,
-            direction: str,
-            speed_kmh: float,
-            confidence: "high"|"medium"|"low",
+            now_dry: bool,          # AMeDAS AND Open-Meteo 両方が乾燥
+            soon_wet: bool,         # 30分以内に雨（AMeDAS OR Open-Meteo）
+            sudden: bool,
             openmeteo_confirms: bool,
-            wet_stations: [...],
+            amedas: {
+              approaching: bool,
+              arrival_min: int | None,
+              direction_str: str,
+              speed_kmh: float,
+              confidence: "high"|"medium"|"low",
+              wet_now: [...],       # 現在降水中の近隣局
+            },
+            openmeteo: { timeline: [...], ... },
           }
 ```
 
@@ -177,6 +208,8 @@ onset_time 行列 (N点×7時刻)     │
 | `_fetch_amedas_snapshots(lat, lon)` | 7スナップを並列取得・半径フィルタ |
 | `_estimate_rain_movement(snapshots, meta, target)` | 移動ベクトル推定コア |
 | `_fetch_amedas_openmeteo_rain_data(lat, lon)` | 両ソース統合、最終予報生成 |
+| `_check_rain_notification()` | 通知判定・送信。`now_dry=False` の予報外れ検知も担う |
+| `_rain_llm_comment(sudden, time_label, hour, unexpected)` | LLM による状況コメント生成 |
 
 `rain_source = "amedas+openmeteo"` として `_EDITABLE_SETTINGS` に追加。  
 `_check_rain_notification()` で既存の `nowcast` / `openmeteo` と同列に扱う。

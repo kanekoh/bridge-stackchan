@@ -99,18 +99,6 @@
         ⚡ EEW 警報<br><span class="text-xs opacity-75">code 556（予測震度つき）</span>
       </button>
     </div>
-    <p class="text-xs font-medium text-gray-600 mb-1">ログのみ（発話なし）</p>
-    <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
-      <button onclick="testP2p(555)" class="border border-gray-300 hover:bg-gray-50 text-gray-600 text-sm px-3 py-2 rounded">
-        📡 接続ピア数<br><span class="text-xs opacity-75">code 555</span>
-      </button>
-      <button onclick="testP2p(561)" class="border border-gray-300 hover:bg-gray-50 text-gray-600 text-sm px-3 py-2 rounded">
-        🙋 感知情報<br><span class="text-xs opacity-75">code 561</span>
-      </button>
-      <button onclick="testP2p(9611)" class="border border-gray-300 hover:bg-gray-50 text-gray-600 text-sm px-3 py-2 rounded">
-        📊 感知解析結果<br><span class="text-xs opacity-75">code 9611</span>
-      </button>
-    </div>
     <p id="p2pResult" class="text-xs mt-3 text-gray-500"></p>
   </div>
 
@@ -211,6 +199,7 @@
       const d = await apiFetch('/api/debug/weather/rain-check', { method: 'POST' });
       result.textContent = d.ok ? `✅ 実行完了（ソース: ${d.active_source}）` : '❌ 失敗';
       result.className = 'text-xs mt-3 ' + (d.ok ? 'text-green-600' : 'text-red-500');
+      if (d.ok) loadRainStatus();
     } catch(e) {
       result.textContent = '❌ ' + e.message;
       result.className = 'text-xs mt-3 text-red-500';
@@ -265,22 +254,47 @@
       const confColor = c => c === 'high' ? 'text-green-600' : c === 'medium' ? 'text-yellow-600' : 'text-gray-400';
       const confLabel = c => c === 'high' ? '確信度 高' : c === 'medium' ? '確信度 中' : '確信度 低';
 
+      // ── 通知システム状態 ──
+      const cooldownAt  = d.cooldown_notified_at;
+      const cooldownMin = d.cooldown_remaining_min;
+      const nextAction  = d.next_action || '—';
+
+      const cooldownHtml = cooldownAt
+        ? `クールダウン中（通知済: ${esc(cooldownAt.slice(11,16))} JST、あと ${cooldownMin ?? 0}分）`
+        : '通知可能（クールダウンなし）';
+      const cooldownCls = cooldownAt && (cooldownMin ?? 0) > 0 ? 'text-gray-400' : 'text-green-600';
+
+      const stateHtml = `
+        <div class="bg-gray-50 rounded p-3 mb-4 text-xs space-y-1">
+          <div class="font-semibold text-gray-600 mb-1">通知システム状態</div>
+          <div class="${cooldownCls}">⏱ ${esc(cooldownHtml)}</div>
+          <div class="text-gray-700">→ 次のアクション: <b>${esc(nextAction)}</b></div>
+        </div>`;
+
       // ── AMeDAS パネル ──
       const mv = ac.amedas || {};
-      let amedas_html = '';
+      let amedas_html = stateHtml;
       if (ac.error) {
-        amedas_html = `<span class="text-red-500">${esc(ac.error)}</span>`;
+        amedas_html += `<span class="text-red-500">${esc(ac.error)}</span>`;
       } else {
-        // 現在の判定バナー
-        const nowDry  = ac.now_dry;
-        const soonWet = ac.soon_wet;
-        const bannerCls = !nowDry ? 'bg-blue-50 text-blue-700 border-blue-200'
-                        : soonWet ? 'bg-orange-50 text-orange-700 border-orange-200'
-                        :           'bg-green-50 text-green-700 border-green-200';
-        const bannerTxt = !nowDry ? '🌧 現在降雨中（近隣観測点で検知）'
-                        : soonWet ? '⚠ もうすぐ雨（接近中）'
-                        :           '☀ 現在乾燥・30分以内の雨なし';
-        amedas_html += `<div class="border rounded px-3 py-2 mb-3 text-xs font-semibold ${bannerCls}">${bannerTxt}</div>`;
+        // 現在の判定バナー（now_dry の内訳つき）
+        const nowDry     = ac.now_dry;
+        const soonWet    = ac.soon_wet;
+        const amedDry    = ac.amedas_now_dry;
+        const omDry      = ac.om_now_dry;
+        const bannerCls  = !nowDry ? 'bg-blue-50 text-blue-700 border-blue-200'
+                         : soonWet ? 'bg-orange-50 text-orange-700 border-orange-200'
+                         :           'bg-green-50 text-green-700 border-green-200';
+        const bannerTxt  = !nowDry ? '🌧 現在降雨中（近隣観測点で検知）'
+                         : soonWet ? '⚠ もうすぐ雨（接近中）'
+                         :           '☀ 現在乾燥・30分以内の雨なし';
+        const dot = ok => ok ? '<span class="text-green-500">●乾</span>' : '<span class="text-blue-500">●雨</span>';
+        amedas_html += `
+          <div class="border rounded px-3 py-2 mb-1 text-xs font-semibold ${bannerCls}">${bannerTxt}</div>
+          <div class="text-xs text-gray-400 mb-3 pl-1">
+            AMeDAS(20km): ${dot(amedDry)} &nbsp;|&nbsp; Open-Meteo(現在): ${dot(omDry)}
+            &nbsp;→&nbsp; 総合: ${dot(nowDry)}
+          </div>`;
 
         // 移動ベクトル
         if (mv.method === 'regression') {

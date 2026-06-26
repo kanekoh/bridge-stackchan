@@ -1658,9 +1658,10 @@ async def _fetch_amedas_openmeteo_rain_data(lat: float, lon: float) -> dict:
 
     movement = _estimate_rain_movement(snapshots, station_meta, t_minutes, lat, lon)
 
-    # 現在乾燥かどうか: 半径 20km 以内に降水なし
+    # 現在乾燥かどうか: AMeDAS 20km 内 AND Open-Meteo 現在値 の両方が乾燥
     nearby_wet = [s for s in movement.get("wet_now", []) if s["dist_km"] <= 20]
-    now_dry = len(nearby_wet) == 0
+    amedas_now_dry = len(nearby_wet) == 0
+    now_dry = amedas_now_dry and om_data.get("now_dry", True)
 
     # 30 分以内に到達予測か（AMeDAS）
     amedas_soon_wet = movement.get("approaching", False) and (
@@ -1686,6 +1687,8 @@ async def _fetch_amedas_openmeteo_rain_data(lat: float, lon: float) -> dict:
         "amedas": movement,
         "openmeteo": om_data,
         "now_dry": now_dry,
+        "amedas_now_dry": amedas_now_dry,
+        "om_now_dry": om_data.get("now_dry", True),
         "soon_wet": soon_wet,
         "sudden": sudden,
         "openmeteo_confirms": openmeteo_confirms,
@@ -1700,12 +1703,12 @@ async def _check_rain_notification() -> None:
         return
     lat, lon = float(lat_str), float(lon_str)
 
-    source = _get_setting("rain_source", "nowcast")
+    source = _get_setting("rain_source", "amedas+openmeteo")
     try:
-        if source == "nowcast":
-            data = await _fetch_nowcast_rain_data(lat, lon)
-        elif source == "amedas+openmeteo":
+        if source == "amedas+openmeteo":
             data = await _fetch_amedas_openmeteo_rain_data(lat, lon)
+        elif source == "nowcast":
+            data = await _fetch_nowcast_rain_data(lat, lon)
         else:
             data = await _fetch_openmeteo_rain_data(lat, lon)
         now_dry  = data["now_dry"]
@@ -1715,24 +1718,6 @@ async def _check_rain_notification() -> None:
         logger.warning("rain check error (source=%s): %s", source, e)
         return
 
-    if not now_dry:
-        return
-
-    if not soon_wet:
-        if _get_setting("weather_rain_notified", ""):
-            _set_setting("weather_rain_notified", "")
-            logger.debug("rain cooldown reset: dry, no rain expected (source=%s)", source)
-        return
-
-    last_str = _get_setting("weather_rain_notified", "")
-    if last_str:
-        try:
-            elapsed = (datetime.now(_JST) - datetime.fromisoformat(last_str)).total_seconds()
-            if elapsed < 3 * 3600:
-                return
-        except ValueError:
-            pass
-
     now   = datetime.now(_JST)
     hour  = now.hour
     if 5 <= hour < 10:    time_label = "朝"
@@ -1740,6 +1725,32 @@ async def _check_rain_notification() -> None:
     elif 14 <= hour < 18: time_label = "夕方"
     elif 18 <= hour < 22: time_label = "夜"
     else:                 time_label = "深夜"
+
+    if not now_dry:
+        # 現在降雨中 — 事前通知なしで降り始めた場合のみ「気づいたら雨」通知
+        if not _get_setting("weather_rain_notified", ""):
+            _set_setting("weather_rain_notified", now.isoformat())
+            logger.info("rain notify (unexpected): source=%s time=%s", source, time_label)
+            await _p2p_speak("あれ、気づいたら雨が降り始めてる！", source="weather_rain", priority="normal")
+            asyncio.create_task(_rain_llm_comment(False, time_label, hour, unexpected=True))
+        return
+
+    if not soon_wet:
+        # 乾燥かつ雨の予報なし — AMeDAS が接近中のときはクールダウンを保持
+        amedas_approaching = data.get("amedas", {}).get("approaching", False)
+        if _get_setting("weather_rain_notified", "") and not amedas_approaching:
+            _set_setting("weather_rain_notified", "")
+            logger.debug("rain cooldown reset: dry, no rain expected (source=%s)", source)
+        return
+
+    last_str = _get_setting("weather_rain_notified", "")
+    if last_str:
+        try:
+            elapsed = (now - datetime.fromisoformat(last_str)).total_seconds()
+            if elapsed < 3 * 3600:
+                return
+        except ValueError:
+            pass
 
     fixed_text = (
         "急に雨が降り始めます！洗濯物や開けている窓に注意してください。" if sudden
@@ -1752,7 +1763,7 @@ async def _check_rain_notification() -> None:
     asyncio.create_task(_rain_llm_comment(sudden, time_label, hour))
 
 
-async def _rain_llm_comment(sudden: bool, time_label: str, hour: int) -> None:
+async def _rain_llm_comment(sudden: bool, time_label: str, hour: int, unexpected: bool = False) -> None:
     title = _get_setting("location_title", "")
 
     # 時間帯ごとの文脈ヒント
@@ -1767,8 +1778,15 @@ async def _rain_llm_comment(sudden: bool, time_label: str, hour: int) -> None:
     else:
         hint = "翌朝の傘や洗濯物の準備を意識して"
 
+    if unexpected:
+        kind = "予報になかった雨が気づいたら降り始めていた"
+    elif sudden:
+        kind = "急な雨"
+    else:
+        kind = "30分以内に雨が来る"
+
     prompt = (
-        f"{'急な雨' if sudden else '30分以内の雨'}の通知をしました"
+        f"{kind}という通知をしました"
         f"（{time_label}・場所: {title}）。"
         f"{hint}、家族への短い一言を1文で。通知文の繰り返し不要。"
     )
@@ -2785,6 +2803,10 @@ async def _p2pquake_ws_loop() -> None:
                             eid  = data.get("id", "")
                             code = data.get("code")
 
+                            # ネットワーク統計・感知情報はログ不要なのでスキップ
+                            if code in (555, 561, 9611):
+                                continue
+
                             # 受信直後にサマリを作ってログ
                             if code == 551:
                                 eq = data.get("earthquake", {})
@@ -3775,12 +3797,54 @@ async def api_debug_rain_status():
     def _safe(r):
         return r if not isinstance(r, Exception) else {"error": str(r)}
 
+    ac = _safe(results[2])
+
+    # クールダウン状態
+    cooldown_str = _get_setting("weather_rain_notified", "")
+    cooldown_remaining_min = None
+    if cooldown_str:
+        try:
+            elapsed = (datetime.now(_JST) - datetime.fromisoformat(cooldown_str)).total_seconds()
+            remaining = 3 * 3600 - elapsed
+            cooldown_remaining_min = max(0, round(remaining / 60))
+        except ValueError:
+            pass
+
+    # 現在の状態から次のアクションを予測
+    next_action = "不明"
+    if not isinstance(ac, dict) or ac.get("error"):
+        next_action = "データ取得エラー"
+    else:
+        now_dry  = ac.get("now_dry", True)
+        soon_wet = ac.get("soon_wet", False)
+        amedas_approaching = ac.get("amedas", {}).get("approaching", False)
+        if not now_dry:
+            if not cooldown_str:
+                next_action = "⚠ 予告なし雨を検知 → 「気づいたら雨」通知を送信"
+            else:
+                next_action = "🌧 降雨中・通知済み（クールダウン維持）"
+        elif not soon_wet:
+            if cooldown_str and amedas_approaching:
+                next_action = "AMeDAS 接近中のためクールダウン保持"
+            elif cooldown_str:
+                next_action = "乾燥・雨予報なし → クールダウンリセット"
+            else:
+                next_action = "☀ 乾燥・待機中"
+        else:
+            if cooldown_remaining_min and cooldown_remaining_min > 0:
+                next_action = f"クールダウン中（あと {cooldown_remaining_min} 分）"
+            else:
+                next_action = "✅ 雨接近 → 通知を送信"
+
     return {
         "ok": True,
-        "active_source": _get_setting("rain_source", "nowcast"),
+        "active_source": _get_setting("rain_source", "amedas+openmeteo"),
+        "cooldown_notified_at": cooldown_str or None,
+        "cooldown_remaining_min": cooldown_remaining_min,
+        "next_action": next_action,
         "openmeteo":        _safe(results[0]),
         "nowcast":          _safe(results[1]),
-        "amedas+openmeteo": _safe(results[2]),
+        "amedas+openmeteo": ac,
     }
 
 
