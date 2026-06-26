@@ -2532,6 +2532,15 @@ async def _fetch_and_save_timezone(lat: float, lon: float) -> None:
         logger.debug("timezone fetch skipped (Open-Meteo unavailable)")
 
 
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """2点間の距離を km で返す（Haversine 公式）。"""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return R * 2 * math.asin(math.sqrt(a))
+
+
 def _get_local_scale(data: dict) -> int | None:
     """設置場所の都道府県で観測された最大震度コードを返す。
     全国モードまたは設置場所未設定なら全国最大値を返す。
@@ -2697,22 +2706,49 @@ async def _handle_earthquake(data: dict) -> None:
     place = eq.get("hypocenter", {}).get("name") or "不明"
     mag   = eq.get("hypocenter", {}).get("magnitude") or -1
 
+    # 震源距離を計算
+    hypo_lat = eq.get("hypocenter", {}).get("latitude")
+    hypo_lon = eq.get("hypocenter", {}).get("longitude")
+    dist_km: float | None = None
+    try:
+        home_lat = float(_get_setting("location_lat", ""))
+        home_lon = float(_get_setting("location_lon", ""))
+        if hypo_lat and hypo_lon:
+            dist_km = _haversine_km(home_lat, home_lon, float(hypo_lat), float(hypo_lon))
+    except (ValueError, TypeError):
+        pass
+
     fixed_text = _build_earthquake_fixed_text(data, local_scale)
 
     _mark_eq_seen(dedup_id, place, local_scale, mag)
-    logger.info("earthquake notify: id=%s type=%s place=%s scale=%s", earthquake_id, issue_type, place, local_scale)
+    logger.info("earthquake notify: id=%s type=%s place=%s scale=%s dist_km=%s",
+                earthquake_id, issue_type, place, local_scale,
+                f"{dist_km:.0f}" if dist_km is not None else "unknown")
 
     # ① 固定テキストを即時発話
     await _p2p_speak(fixed_text, source="earthquake", priority="high")
 
     # ② LLM コメントを非同期で続けて発話
-    asyncio.create_task(_earthquake_llm_comment(place, _scale_to_str(local_scale), mag))
+    asyncio.create_task(_earthquake_llm_comment(place, _scale_to_str(local_scale), mag, dist_km))
 
 
-async def _earthquake_llm_comment(place: str, scale_str: str, mag: float) -> None:
+async def _earthquake_llm_comment(place: str, scale_str: str, mag: float, dist_km: float | None = None) -> None:
+    if dist_km is not None:
+        if dist_km < 50:
+            dist_context = f"震源はここからわずか約{dist_km:.0f}kmと非常に近い場所です。"
+        elif dist_km < 150:
+            dist_context = f"震源はここから約{dist_km:.0f}kmと比較的近い場所です。"
+        elif dist_km < 400:
+            dist_context = f"震源はここから約{dist_km:.0f}kmほど離れた場所です。"
+        else:
+            dist_context = f"震源はここから約{dist_km:.0f}kmと遠い場所です。"
+    else:
+        dist_context = ""
+
     prompt = (
-        f"先ほど地震速報をお知らせしました（{place} / {scale_str} / M{mag}）。"
-        "情報の繰り返しは不要です。家族への短い一言コメントを1〜2文で追加してください。"
+        f"先ほど地震速報をお知らせしました（{place} / {scale_str} / M{mag}）。{dist_context}"
+        "情報の繰り返しは不要です。距離感や規模に合わせた、家族への短い一言コメントを1〜2文で追加してください。"
+        "遠い地震なら安心させる言葉を、近い地震や大きな地震なら気をつけるよう促してください。"
     )
     try:
         comment = await chat_with_llm(prompt, session_key="family", use_functions=False)
