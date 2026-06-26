@@ -386,10 +386,25 @@
 
     if (!_rainMap) {
       _rainMap = L.map('rainMap').setView([tLat, tLon], 10);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/">CARTO</a>',
         maxZoom: 13,
       }).addTo(_rainMap);
+
+      // 凡例
+      const legend = L.control({ position: 'bottomright' });
+      legend.onAdd = () => {
+        const div = L.DomUtil.create('div');
+        div.style.cssText = 'background:rgba(255,255,255,0.92);padding:8px 10px;border-radius:6px;font-size:11px;line-height:1.7;box-shadow:0 1px 4px #0003;min-width:160px';
+        div.innerHTML = `
+          <div style="font-weight:600;margin-bottom:4px;color:#374151">凡例</div>
+          <div><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#2563eb;vertical-align:middle;margin-right:5px"></span>降水中（円の大きさ＝強度）</div>
+          <div><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#9ca3af;opacity:0.4;vertical-align:middle;margin-right:5px"></span>乾燥</div>
+          <div style="margin-top:2px"><span style="display:inline-block;width:28px;height:2px;background:#ea580c;vertical-align:middle;margin-right:5px"></span>雨の移動方向（接近中）</div>
+          <div><span style="display:inline-block;width:28px;height:2px;background:#94a3b8;vertical-align:middle;margin-right:5px"></span>雨の移動方向（非接近）</div>`;
+        return div;
+      };
+      legend.addTo(_rainMap);
     }
 
     _rainMapLayers.forEach(l => _rainMap.removeLayer(l));
@@ -398,67 +413,17 @@
     const ac = d['amedas+openmeteo'] || {};
     const mv = ac.amedas || {};
     const stations = mv.all_stations || [];
-    const coeffs = mv.regression_coeffs;   // [a, b, c] または null
-    const cosLat = Math.cos(tLat * Math.PI / 180);
 
-    // km オフセット → lat/lon 変換ユーティリティ
-    const _kmToLatLon = (dx, dy) => [tLat + dy / 111, tLon + dx / (111 * cosLat)];
-
-    // 等時線を描く: t = a*x + b*y + c の等値線
-    if (coeffs && mv.speed_kmh < 250) {
-      const [a, b, c] = coeffs;
-      // 描く時刻: t=-60, -30, 0（現在前線）, +30 分
-      const isoTimes = [
-        { t: -60, label: '60分前の前線', color: '#c4b5fd', dash: '4 6', w: 1 },
-        { t: -30, label: '30分前の前線', color: '#818cf8', dash: '6 4', w: 1.5 },
-        { t:   0, label: '現在の前線',   color: '#3b82f6', dash: null,  w: 2.5 },
-        { t:  30, label: '30分後の予測', color: '#f97316', dash: '8 4', w: 1.5 },
-      ];
-      const HALF = 150;  // 等時線の半長さ [km]
-      for (const iso of isoTimes) {
-        // a*x + b*y = iso.t - c の直線上の2点を求める
-        // 移動方向に垂直な方向（= 等時線の走る方向）で ±HALF km の点を計算
-        let p1, p2;
-        if (Math.abs(b) > Math.abs(a)) {
-          // y を x の関数で表す: y = (iso.t - c - a*x) / b
-          const y1 = (iso.t - c - a * (-HALF)) / b;
-          const y2 = (iso.t - c - a *   HALF)  / b;
-          p1 = _kmToLatLon(-HALF, y1);
-          p2 = _kmToLatLon(HALF,  y2);
-        } else {
-          const x1 = (iso.t - c - b * (-HALF)) / a;
-          const x2 = (iso.t - c - b *   HALF)  / a;
-          p1 = _kmToLatLon(x1, -HALF);
-          p2 = _kmToLatLon(x2,  HALF);
-        }
-        _addMapLayer(L.polyline([p1, p2], {
-          color: iso.color, weight: iso.w,
-          dashArray: iso.dash, opacity: 0.75,
-        }).bindPopup(iso.label));
-      }
-    }
-
-    // 観測点の円（onset時刻で色分け）
+    // 観測点の円（降水中=青、乾燥=グレー）
     for (const s of stations) {
       const p = s.prec_mm;
-      const onset = s.onset_min;  // -60〜0 分、null=降水なし
-      let color, fillColor;
-      if (onset !== null && onset !== undefined) {
-        // onset が新しいほど（0に近いほど）薄い青、古いほど（-60に近いほど）濃紺
-        const age = Math.abs(onset) / 60;  // 0=今 → 1=60分前
-        const r = Math.round(30 + age * 0);
-        const g = Math.round(100 + age * 20);
-        const bl= Math.round(255 - age * 100);
-        color = fillColor = `rgb(${r},${g},${bl})`;
-      } else {
-        color = fillColor = '#d1d5db';  // 乾燥 – グレー
-      }
-      const radius = p > 0 ? Math.max(3000, p * 3000) : 1800;
-      const onsetLabel = onset !== null && onset !== undefined
-        ? `降水開始: ${onset}分前` : '降水なし（60分以内）';
+      const wet = p > 0;
+      const color = wet ? '#2563eb' : '#9ca3af';
+      const radius = wet ? Math.max(4000, p * 4000) : 1500;
       _addMapLayer(L.circle([s.lat, s.lon], {
-        radius, color, fillColor, fillOpacity: 0.6, weight: 1,
-      }).bindPopup(`<b>${esc(s.name)}</b><br>${p > 0 ? p + ' mm/10min' : '乾燥'}<br>${onsetLabel}<br>距離 ${s.dist_km} km`));
+        radius, color, fillColor: color,
+        fillOpacity: wet ? 0.5 : 0.2, weight: wet ? 1.5 : 0.5,
+      }).bindPopup(`<b>${esc(s.name)}</b><br>${wet ? p + ' mm/10min' : '乾燥'}<br>距離 ${s.dist_km} km`));
     }
 
     // 設置場所マーカー
