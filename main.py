@@ -2663,15 +2663,23 @@ async def _p2p_speak(text: str, source: str, priority: str) -> None:
 
 
 async def _handle_earthquake(data: dict) -> None:
-    earthquake_id = data["id"]
+    earthquake_id = data.get("id") or data.get("_id") or ""
     issue_type = data.get("issue", {}).get("type")
 
-    if issue_type != "DetailScale":
-        logger.info("earthquake skip: id=%s reason=not_detail_scale type=%s", earthquake_id, issue_type)
+    # DetailScale（確定値）または ScalePrompt（速報）を対象にする
+    # Destination（震源のみ）は震度情報がないためスキップ
+    if issue_type not in ("DetailScale", "ScalePrompt"):
+        logger.info("earthquake skip: id=%s reason=unsupported_type type=%s", earthquake_id, issue_type)
         return
 
-    if _eq_already_seen(earthquake_id):
-        logger.info("earthquake skip: id=%s reason=already_seen", earthquake_id)
+    if not earthquake_id:
+        logger.warning("earthquake skip: reason=no_id type=%s", issue_type)
+        return
+
+    # DetailScale は ScalePrompt より優先。同一地震で ScalePrompt 通知済みでも DetailScale は再通知する
+    dedup_id = f"{earthquake_id}:{issue_type}"
+    if _eq_already_seen(dedup_id):
+        logger.info("earthquake skip: id=%s reason=already_seen type=%s", earthquake_id, issue_type)
         return
 
     local_scale = _get_local_scale(data)
@@ -2686,13 +2694,13 @@ async def _handle_earthquake(data: dict) -> None:
         return
 
     eq    = data["earthquake"]
-    place = eq["hypocenter"]["name"]
-    mag   = eq["hypocenter"]["magnitude"]
+    place = eq.get("hypocenter", {}).get("name") or "不明"
+    mag   = eq.get("hypocenter", {}).get("magnitude") or -1
 
     fixed_text = _build_earthquake_fixed_text(data, local_scale)
 
-    _mark_eq_seen(earthquake_id, place, local_scale, mag)
-    logger.info("earthquake notify: id=%s place=%s scale=%s", earthquake_id, place, local_scale)
+    _mark_eq_seen(dedup_id, place, local_scale, mag)
+    logger.info("earthquake notify: id=%s type=%s place=%s scale=%s", earthquake_id, issue_type, place, local_scale)
 
     # ① 固定テキストを即時発話
     await _p2p_speak(fixed_text, source="earthquake", priority="high")
@@ -2882,11 +2890,15 @@ async def _p2pquake_ws_loop() -> None:
                             else:
                                 summary = str(data)[:120]
 
-                            if eid and eid in seen_ids:
+                            # code 551 は issue.type ごとに別キーで管理
+                            # （ScalePrompt → DetailScale の順で別メッセージが来るため）
+                            issue_type_key = data.get("issue", {}).get("type", "") if code == 551 else ""
+                            dedup_key = f"{eid}:{issue_type_key}" if issue_type_key else eid
+                            if eid and dedup_key in seen_ids:
                                 _p2pquake_log_event(code, eid, summary, "skip:dup_memory")
                                 continue
                             if eid:
-                                seen_ids.add(eid)
+                                seen_ids.add(dedup_key)
                                 if len(seen_ids) > 500:
                                     seen_ids.pop()
 
