@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}メトリクス{% endblock %}
+{% block nav_metrics %}font-semibold text-blue-600{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-xl font-bold text-gray-800">スタックちゃん メトリクス</h1>
+    <p id="metaMeta" class="text-xs text-gray-400 mt-0.5">読み込み中...</p>
+  </div>
+  <div class="flex items-center gap-3">
+    <select id="hoursSelect" class="text-sm border rounded px-2 py-1 text-gray-600" onchange="load()">
+      <option value="1">直近 1 時間</option>
+      <option value="2" selected>直近 2 時間</option>
+      <option value="6">直近 6 時間</option>
+      <option value="24">直近 24 時間</option>
+    </select>
+    <button onclick="load()" class="text-sm text-gray-400 hover:text-gray-600">↻ 更新</button>
+  </div>
+</div>
+
+<div id="noData" class="hidden text-center py-16 text-gray-400">
+  <p class="text-4xl mb-3">📡</p>
+  <p>まだメトリクスデータがありません。</p>
+  <p class="text-xs mt-1">スタックちゃんからの MQTT metrics トピックを待っています。</p>
+</div>
+
+<div id="charts" class="space-y-6">
+  <!-- Heap -->
+  <div class="bg-white rounded-xl shadow-sm p-4">
+    <h2 class="text-sm font-semibold text-gray-700 mb-3">ヒープメモリ <span class="text-xs font-normal text-gray-400">（bytes）</span></h2>
+    <canvas id="chartHeap" height="120"></canvas>
+  </div>
+
+  <!-- PSRAM -->
+  <div class="bg-white rounded-xl shadow-sm p-4">
+    <h2 class="text-sm font-semibold text-gray-700 mb-3">PSRAM 空き <span class="text-xs font-normal text-gray-400">（bytes）</span></h2>
+    <canvas id="chartPsram" height="80"></canvas>
+  </div>
+
+  <!-- Stacks -->
+  <div class="bg-white rounded-xl shadow-sm p-4">
+    <h2 class="text-sm font-semibold text-gray-700 mb-3">タスクスタック残量 <span class="text-xs font-normal text-gray-400">（bytes）</span></h2>
+    <canvas id="chartStacks" height="120"></canvas>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let _charts = {};
+
+function _fmt(bytes) {
+  if (bytes == null) return '—';
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+  if (bytes >= 1024)    return (bytes / 1024).toFixed(1) + ' KB';
+  return bytes + ' B';
+}
+
+function _timeLabel(ts_ms) {
+  const d = new Date(ts_ms);
+  return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+}
+
+function _makeChart(id, datasets, opts = {}) {
+  if (_charts[id]) _charts[id].destroy();
+  const ctx = document.getElementById(id).getContext('2d');
+  _charts[id] = new Chart(ctx, {
+    type: 'line',
+    data: { labels: opts.labels || [], datasets },
+    options: {
+      animation: false,
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } },
+        tooltip: {
+          callbacks: {
+            label: ctx => `${ctx.dataset.label}: ${_fmt(ctx.raw)}`,
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { font: { size: 10 }, maxTicksLimit: 12 } },
+        y: {
+          ticks: { font: { size: 10 }, callback: v => _fmt(v) },
+          beginAtZero: false,
+        },
+      },
+    },
+  });
+}
+
+function _renderCharts(points) {
+  const labels        = points.map(p => _timeLabel(p.ts_ms));
+  const heapFree      = points.map(p => p.heap_free);
+  const heapMin       = points.map(p => p.heap_min);
+  const psramFree     = points.map(p => p.psram_free);
+  const stackSpeech   = points.map(p => p.stack_speech);
+  const stackPlayback = points.map(p => p.stack_playback);
+  const stackNetmon   = points.map(p => p.stack_netmon);
+  const stackMqtt     = points.map(p => p.stack_mqtttask);
+
+  _makeChart('chartHeap', [
+    { label: '空き (free)',   data: heapFree, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.3, pointRadius: 0 },
+    { label: '最小値 (min)',  data: heapMin,  borderColor: '#f97316', backgroundColor: 'transparent', borderDash: [4,3], tension: 0.3, pointRadius: 0 },
+  ], { labels });
+
+  _makeChart('chartPsram', [
+    { label: 'PSRAM 空き', data: psramFree, borderColor: '#8b5cf6', backgroundColor: 'rgba(139,92,246,0.1)', fill: true, tension: 0.3, pointRadius: 0 },
+  ], { labels });
+
+  _makeChart('chartStacks', [
+    { label: 'speech',   data: stackSpeech,   borderColor: '#10b981', tension: 0.3, pointRadius: 0 },
+    { label: 'playback', data: stackPlayback,  borderColor: '#f59e0b', tension: 0.3, pointRadius: 0 },
+    { label: 'netmon',   data: stackNetmon,    borderColor: '#6366f1', tension: 0.3, pointRadius: 0 },
+    { label: 'MQTTTask', data: stackMqtt,      borderColor: '#ef4444', tension: 0.3, pointRadius: 0 },
+  ], { labels });
+}
+
+async function load() {
+  const hours = document.getElementById('hoursSelect').value;
+  try {
+    const data = await apiFetch(`/api/device/metrics?hours=${hours}`);
+    const points = data.points || [];
+    document.getElementById('noData').classList.toggle('hidden', points.length > 0);
+    document.getElementById('charts').classList.toggle('hidden', points.length === 0);
+
+    if (points.length > 0) {
+      const latest = points[points.length - 1];
+      const ago = Math.round((Date.now() - latest.ts_ms) / 1000);
+      document.getElementById('metaMeta').textContent =
+        `${points.length} 件 · 最終受信 ${ago < 120 ? ago + '秒前' : Math.round(ago/60) + '分前'} · デバイス: ${data.device_id}`;
+      _renderCharts(points);
+    } else {
+      document.getElementById('metaMeta').textContent = 'データなし';
+    }
+  } catch (e) {
+    document.getElementById('metaMeta').textContent = 'エラー: ' + e.message;
+  }
+}
+
+load();
+// 60秒ごとに自動更新
+setInterval(load, 60000);
+</script>
+{% endblock %}

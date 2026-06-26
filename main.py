@@ -428,6 +428,25 @@ def _init_db() -> None:
         _db_conn.execute("ALTER TABLE web_checks ADD COLUMN mode TEXT NOT NULL DEFAULT 'check'")
     except sqlite3.OperationalError:
         pass  # already exists
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_metrics (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id       TEXT NOT NULL,
+            ts_ms           INTEGER NOT NULL,
+            heap_free       INTEGER,
+            heap_min        INTEGER,
+            psram_free      INTEGER,
+            stack_speech    INTEGER,
+            stack_playback  INTEGER,
+            stack_netmon    INTEGER,
+            stack_mqtttask  INTEGER,
+            received_at     TEXT NOT NULL
+        )
+    """)
+    _db_conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_device_metrics_device_ts"
+        " ON device_metrics(device_id, ts_ms)"
+    )
     _now_iso = datetime.now(_JST).isoformat()
     for _seed in [
         ("リニア体験乗車",
@@ -2339,8 +2358,9 @@ class _MqttConnection:
             if reason_code == 0:
                 client.subscribe("stackchan/ack", qos=MQTT_QOS)
                 client.subscribe(f"stackchan/{MQTT_DEVICE_ID}/log", qos=MQTT_QOS)
-                logger.info("MQTT (re)connected, subscribed to ack + %s/log qos=%d",
-                            MQTT_DEVICE_ID, MQTT_QOS)
+                client.subscribe(f"stackchan/{MQTT_DEVICE_ID}/metrics", qos=MQTT_QOS)
+                logger.info("MQTT (re)connected, subscribed to ack + %s/log + %s/metrics qos=%d",
+                            MQTT_DEVICE_ID, MQTT_DEVICE_ID, MQTT_QOS)
                 connected.set()
             else:
                 logger.error("MQTT connect failed: reason_code=%s", reason_code)
@@ -2371,12 +2391,49 @@ class _MqttConnection:
             except Exception as e:
                 logger.warning("device_log store error: %s", e)
 
+        def _store_device_metrics(device_id: str, raw: str) -> None:
+            try:
+                d = json.loads(raw)
+                heap   = d.get("heap", {})
+                psram  = d.get("psram", {})
+                stacks = d.get("stacks", {})
+                ts_ms  = d.get("ts") or int(datetime.now(_JST).timestamp() * 1000)
+                now    = datetime.now(_JST).isoformat()
+                with _db_lock:
+                    _db_conn.execute(
+                        "INSERT INTO device_metrics"
+                        " (device_id, ts_ms, heap_free, heap_min, psram_free,"
+                        "  stack_speech, stack_playback, stack_netmon, stack_mqtttask, received_at)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            device_id, ts_ms,
+                            heap.get("free"), heap.get("min"), psram.get("free"),
+                            stacks.get("speech"), stacks.get("playback"),
+                            stacks.get("netmon"), stacks.get("MQTTTask"),
+                            now,
+                        ),
+                    )
+                    # 過去 24 時間（1440 件）を超えたら古いものを削除
+                    _db_conn.execute(
+                        "DELETE FROM device_metrics WHERE id NOT IN"
+                        " (SELECT id FROM device_metrics WHERE device_id=? ORDER BY id DESC LIMIT 1440)",
+                        (device_id,),
+                    )
+                    _db_conn.commit()
+                logger.debug("device_metrics stored: device=%s heap_free=%s", device_id, heap.get("free"))
+            except Exception as e:
+                logger.warning("device_metrics store error: %s", e)
+
         def on_message(client, userdata, message):
             topic = message.topic
             # ── ログトピック ──────────────────────────────────
             parts = topic.split("/")
             if len(parts) == 3 and parts[0] == "stackchan" and parts[2] == "log":
                 _store_device_log(parts[1], message.payload.decode("utf-8", errors="replace"))
+                return
+            # ── メトリクストピック ────────────────────────────
+            if len(parts) == 3 and parts[0] == "stackchan" and parts[2] == "metrics":
+                _store_device_metrics(parts[1], message.payload.decode("utf-8", errors="replace"))
                 return
             # ── ACK トピック ──────────────────────────────────
             try:
@@ -3093,6 +3150,11 @@ async def ui_web_checks(request: Request):
     return _templates.TemplateResponse(request=request, name="web_checks.html", context=_ui_context(request))
 
 
+@app.get("/ui/metrics", response_class=HTMLResponse)
+async def ui_metrics(request: Request):
+    return _templates.TemplateResponse(request=request, name="metrics.html", context=_ui_context(request))
+
+
 @app.get("/api/device/log")
 def api_device_log(limit: int = Query(default=200, le=500)):
     """スタックちゃんから受信したログを返す。ts_ms を表示用文字列に変換して返す。"""
@@ -3118,6 +3180,36 @@ def api_device_log(limit: int = Query(default=200, le=500)):
             "received_at": received_at[:19].replace("T", " "),
         })
     return {"device_id": MQTT_DEVICE_ID, "timezone": _get_setting("location_timezone", "Asia/Tokyo"), "logs": entries}
+
+
+@app.get("/api/device/metrics")
+def api_device_metrics(hours: int = Query(default=2, le=24)):
+    """スタックちゃんから受信したメトリクス履歴を返す（最大 hours 時間分）。"""
+    limit = hours * 60  # 60秒ごとなので hours*60 件が上限
+    with _db_lock:
+        rows = _db_conn.execute(
+            "SELECT ts_ms, heap_free, heap_min, psram_free,"
+            "       stack_speech, stack_playback, stack_netmon, stack_mqtttask"
+            " FROM device_metrics WHERE device_id=?"
+            " ORDER BY ts_ms ASC LIMIT ?",
+            (MQTT_DEVICE_ID, limit),
+        ).fetchall()
+    return {
+        "device_id": MQTT_DEVICE_ID,
+        "points": [
+            {
+                "ts_ms":          r[0],
+                "heap_free":      r[1],
+                "heap_min":       r[2],
+                "psram_free":     r[3],
+                "stack_speech":   r[4],
+                "stack_playback": r[5],
+                "stack_netmon":   r[6],
+                "stack_mqtttask": r[7],
+            }
+            for r in rows
+        ],
+    }
 
 
 # ── REST API (notifications) ──────────────────────────────────────────────────
