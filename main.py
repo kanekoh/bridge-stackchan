@@ -1564,7 +1564,7 @@ def _estimate_rain_movement(
             })
     wet_now.sort(key=lambda s: s["dist_km"])
 
-    # 全観測点の現在降水量（地図表示用）
+    # 全観測点の現在降水量・onset時刻（地図表示用）
     all_stations = []
     for sid, meta in station_meta.items():
         prec = 0.0
@@ -1577,6 +1577,7 @@ def _estimate_rain_movement(
             "lon": meta["lon"],
             "dist_km": meta["dist_km"],
             "prec_mm": prec,
+            "onset_min": onset.get(sid),  # 降水開始時刻（分）、なければ None
         })
     all_stations.sort(key=lambda s: s["dist_km"])
 
@@ -1669,6 +1670,9 @@ def _estimate_rain_movement(
         "all_stations": all_stations,
         "confidence": confidence,
         "rmse_min": round(rmse, 1),
+        "regression_coeffs": [round(a, 6), round(b, 6), round(c, 2)],
+        "target_lat": target_lat,
+        "target_lon": target_lon,
     }
 
 
