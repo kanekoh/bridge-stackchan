@@ -58,7 +58,6 @@
     <div class="flex gap-2 flex-wrap">
       <button onclick="fetchWeather()" class="border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm px-4 py-2 rounded whitespace-nowrap">天気を取得</button>
       <button onclick="speakWeather()" class="bg-sky-500 hover:bg-sky-600 text-white text-sm px-4 py-2 rounded whitespace-nowrap">今の天気を通知</button>
-      <button onclick="checkRain()" class="bg-indigo-500 hover:bg-indigo-600 text-white text-sm px-4 py-2 rounded whitespace-nowrap">雨チェックを今すぐ実行</button>
     </div>
     <p id="weatherResult" class="text-xs mt-3 text-gray-500"></p>
   </div>
@@ -66,10 +65,14 @@
   <!-- 雨データ比較 -->
   <div class="bg-white rounded-lg border border-gray-200 p-5">
     <div class="flex items-center justify-between mb-1">
-      <h2 class="font-semibold text-gray-700">雨データ比較</h2>
+      <h2 class="font-semibold text-gray-700">雨データ比較（AMeDAS + Open-Meteo）</h2>
       <button onclick="loadRainStatus()" class="text-xs text-gray-400 hover:text-gray-600">↻ 更新</button>
     </div>
-    <p class="text-xs text-gray-400 mb-4">AMeDAS 多点観測・Open-Meteo の降水データを並べて確認できます</p>
+    <p class="text-xs text-gray-400 mb-3">AMeDAS 多点観測・Open-Meteo の降水データを並べて確認できます</p>
+    <div class="mb-4">
+      <button onclick="checkRain()" class="bg-indigo-500 hover:bg-indigo-600 text-white text-sm px-4 py-2 rounded whitespace-nowrap">雨チェックを今すぐ実行</button>
+      <p id="rainCheckResult" class="text-xs mt-2 text-gray-500"></p>
+    </div>
     <div id="rainStatus" class="text-xs text-gray-400">取得前</div>
   </div>
 
@@ -192,7 +195,7 @@
   }
 
   async function checkRain() {
-    const result = document.getElementById('weatherResult');
+    const result = document.getElementById('rainCheckResult');
     result.textContent = '雨チェック実行中...';
     result.className = 'text-xs mt-3 text-gray-400';
     try {
