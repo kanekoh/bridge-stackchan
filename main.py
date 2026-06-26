@@ -1630,9 +1630,8 @@ def _estimate_rain_movement(
         speed_kmh, direction_deg = 0.0, 0.0
     else:
         speed_kmh = (1.0 / grad_mag) * 60   # km/h
-        move_x = -a / grad_mag              # 東向き成分
-        move_y = -b / grad_mag              # 北向き成分
-        direction_deg = (math.degrees(math.atan2(move_x, move_y)) + 360) % 360
+        # 勾配 (a,b) = t が増える方向 = 雨が進んでいる方向（移動先）
+        direction_deg = (math.degrees(math.atan2(a, b)) + 360) % 360
 
     direction_str = dirs16[int((direction_deg + 11.25) % 360 / 22.5)]
 
