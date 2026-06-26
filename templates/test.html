@@ -395,13 +395,29 @@
       const legend = L.control({ position: 'bottomright' });
       legend.onAdd = () => {
         const div = L.DomUtil.create('div');
-        div.style.cssText = 'background:rgba(255,255,255,0.92);padding:8px 10px;border-radius:6px;font-size:11px;line-height:1.7;box-shadow:0 1px 4px #0003;min-width:160px';
-        div.innerHTML = `
-          <div style="font-weight:600;margin-bottom:4px;color:#374151">凡例</div>
+        div.style.cssText = 'background:rgba(255,255,255,0.92);border-radius:6px;font-size:11px;line-height:1.7;box-shadow:0 1px 4px #0003;min-width:160px;overflow:hidden';
+        const body = `
           <div><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#2563eb;vertical-align:middle;margin-right:5px"></span>降水中（円の大きさ＝強度）</div>
           <div><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#9ca3af;opacity:0.4;vertical-align:middle;margin-right:5px"></span>乾燥</div>
-          <div style="margin-top:2px"><span style="display:inline-block;width:28px;height:2px;background:#ea580c;vertical-align:middle;margin-right:5px"></span>雨の移動方向（接近中）</div>
-          <div><span style="display:inline-block;width:28px;height:2px;background:#94a3b8;vertical-align:middle;margin-right:5px"></span>雨の移動方向（非接近）</div>`;
+          <div style="margin-top:4px;color:#6b7280;font-size:10px;font-weight:600">── 雨前線（回帰推定）</div>
+          <div><span style="display:inline-block;width:28px;height:2.5px;background:#3b82f6;vertical-align:middle;margin-right:5px"></span>現在の前線位置</div>
+          <div><span style="display:inline-block;width:28px;border-top:1.5px dashed #818cf8;vertical-align:middle;margin-right:5px"></span>30・60分前の前線</div>
+          <div><span style="display:inline-block;width:28px;border-top:1.5px dashed #f97316;vertical-align:middle;margin-right:5px"></span>30分後の予測前線</div>
+          <div style="margin-top:4px"><span style="display:inline-block;width:28px;height:2px;background:#ea580c;vertical-align:middle;margin-right:5px"></span>移動方向（接近中）</div>
+          <div><span style="display:inline-block;width:28px;height:2px;background:#94a3b8;vertical-align:middle;margin-right:5px"></span>移動方向（非接近）</div>`;
+        div.innerHTML = `
+          <div id="_legendHeader" style="padding:5px 10px;cursor:pointer;font-weight:600;color:#374151;display:flex;justify-content:space-between;align-items:center;user-select:none">
+            <span>凡例</span><span id="_legendChevron">▲</span>
+          </div>
+          <div id="_legendBody" style="padding:0 10px 8px">${body}</div>`;
+        L.DomEvent.disableClickPropagation(div);
+        div.querySelector('#_legendHeader').addEventListener('click', () => {
+          const b = div.querySelector('#_legendBody');
+          const c = div.querySelector('#_legendChevron');
+          const hidden = b.style.display === 'none';
+          b.style.display = hidden ? '' : 'none';
+          c.textContent   = hidden ? '▲' : '▼';
+        });
         return div;
       };
       legend.addTo(_rainMap);
@@ -413,6 +429,38 @@
     const ac = d['amedas+openmeteo'] || {};
     const mv = ac.amedas || {};
     const stations = mv.all_stations || [];
+    const coeffs = mv.regression_coeffs;
+    const cosLat = Math.cos(tLat * Math.PI / 180);
+    const _kmToLatLon = (dx, dy) => [tLat + dy / 111, tLon + dx / (111 * cosLat)];
+
+    // 等時線: t = a*x + b*y + c の等値線（雨前線の位置）
+    if (coeffs && mv.speed_kmh < 250) {
+      const [a, b, c] = coeffs;
+      const isoTimes = [
+        { t: -60, label: '60分前の前線', color: '#c4b5fd', dash: '4 6', w: 1 },
+        { t: -30, label: '30分前の前線', color: '#818cf8', dash: '6 4', w: 1.5 },
+        { t:   0, label: '現在の雨前線', color: '#3b82f6', dash: null,  w: 2.5 },
+        { t:  30, label: '30分後の予測', color: '#f97316', dash: '8 4', w: 1.5 },
+      ];
+      const HALF = 150;
+      for (const iso of isoTimes) {
+        let p1, p2;
+        if (Math.abs(b) > Math.abs(a)) {
+          const y1 = (iso.t - c - a * (-HALF)) / b;
+          const y2 = (iso.t - c - a *   HALF)  / b;
+          p1 = _kmToLatLon(-HALF, y1);
+          p2 = _kmToLatLon( HALF, y2);
+        } else {
+          const x1 = (iso.t - c - b * (-HALF)) / a;
+          const x2 = (iso.t - c - b *   HALF)  / a;
+          p1 = _kmToLatLon(x1, -HALF);
+          p2 = _kmToLatLon(x2,  HALF);
+        }
+        _addMapLayer(L.polyline([p1, p2], {
+          color: iso.color, weight: iso.w, dashArray: iso.dash, opacity: 0.8,
+        }).bindPopup(iso.label));
+      }
+    }
 
     // 観測点の円（降水中=青、乾燥=グレー）
     for (const s of stations) {
