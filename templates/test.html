@@ -388,7 +388,7 @@
     if (!tLat || !tLon) return;
 
     if (!_rainMap) {
-      _rainMap = L.map('rainMap').setView([tLat, tLon], 10);
+      _rainMap = L.map('rainMap').setView([tLat, tLon], 8);
       L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
         attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/">CARTO</a>',
         maxZoom: 13,
