@@ -3190,8 +3190,9 @@ def api_device_metrics(hours: int = Query(default=2, le=24)):
         rows = _db_conn.execute(
             "SELECT ts_ms, heap_free, heap_min, psram_free,"
             "       stack_speech, stack_playback, stack_netmon, stack_mqtttask"
-            " FROM device_metrics WHERE device_id=?"
-            " ORDER BY ts_ms ASC LIMIT ?",
+            " FROM (SELECT * FROM device_metrics WHERE device_id=?"
+            "       ORDER BY ts_ms DESC LIMIT ?)"
+            " ORDER BY ts_ms ASC",
             (MQTT_DEVICE_ID, limit),
         ).fetchall()
     return {
