@@ -1847,6 +1847,64 @@ async def _rain_llm_comment(sudden: bool, time_label: str, hour: int, unexpected
         logger.exception("rain LLM comment failed")
 
 
+async def _fetch_sky_condition(lat: float, lon: float, at_utc: datetime | None = None) -> dict:
+    """Open-Meteo から雲量・降水量を取得して空の見え方を返す。
+    at_utc=None なら現在値、指定すればその時刻の時間予報値を返す。
+    """
+    params: dict = {
+        "latitude": lat, "longitude": lon,
+        "timezone": "Asia/Tokyo",
+        "current": "cloud_cover,precipitation,weather_code",
+    }
+    if at_utc is not None:
+        params["hourly"] = "cloud_cover,precipitation,weather_code"
+        params["forecast_days"] = 2
+
+    try:
+        resp = await _http_client.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning("_fetch_sky_condition failed: %s", e)
+        return {"cloud_cover": 0, "precipitation": 0.0, "summary": "天気不明", "is_visible": True}
+
+    if at_utc is not None:
+        times = data.get("hourly", {}).get("time", [])
+        target_str = at_utc.astimezone(_JST).strftime("%Y-%m-%dT%H:00")
+        if target_str in times:
+            idx = times.index(target_str)
+        else:
+            # 最近傍時刻
+            target_ts = at_utc.timestamp()
+            idx = min(
+                range(len(times)),
+                key=lambda i: abs(datetime.fromisoformat(times[i]).replace(tzinfo=_JST).timestamp() - target_ts),
+                default=0,
+            )
+        cloud_cover  = data["hourly"]["cloud_cover"][idx]
+        precipitation = data["hourly"]["precipitation"][idx]
+    else:
+        cur = data.get("current", {})
+        cloud_cover  = cur.get("cloud_cover", 0)
+        precipitation = cur.get("precipitation", 0.0)
+
+    if precipitation > 0:
+        summary    = f"雨（{precipitation}mm）"
+        is_visible = False
+    elif cloud_cover >= 80:
+        summary    = f"曇り（雲量{cloud_cover}%）"
+        is_visible = False
+    elif cloud_cover >= 50:
+        summary    = f"薄曇り（雲量{cloud_cover}%）"
+        is_visible = True
+    else:
+        summary    = f"晴れ（雲量{cloud_cover}%）"
+        is_visible = True
+
+    return {"cloud_cover": cloud_cover, "precipitation": precipitation,
+            "summary": summary, "is_visible": is_visible}
+
+
 async def _fetch_iss_tle() -> tuple[str, str] | None:
     """CelesTrak から ISS TLE を取得。当日キャッシュあれば再利用。"""
     today = datetime.now(_JST).strftime("%Y-%m-%d")
@@ -1993,14 +2051,24 @@ async def _iss_notify_loop() -> None:
                             f"（今日の日没は{sunset_jst.strftime('%H時%M分')}ごろです）"
                             if sunset_jst else ""
                         )
+                        sky = await _fetch_sky_condition(
+                            float(lat), float(lon),
+                            at_utc=best["rise_jst"].astimezone(timezone.utc),
+                        )
+                        if not sky["is_visible"]:
+                            sky_hint = f"ただし今夜の観測時間帯の天気は{sky['summary']}の予報なので、見えないかもしれません。"
+                        elif sky["cloud_cover"] >= 50:
+                            sky_hint = f"今夜の天気は{sky['summary']}の予報なので、雲の切れ間から見えるかも。"
+                        else:
+                            sky_hint = f"今夜の天気は{sky['summary']}の予報で、よく見えそうです。"
                         prompt = (
                             f"今夜{best['rise_jst'].strftime('%H時%M分')}ごろに"
                             f"ISSが{best['direction']}の空から見えます。"
                             f"最高点は{best['max_jst'].strftime('%H時%M分')}ごろで"
                             f"かなり高いところまで上がります（最大{best['max_el_deg']:.0f}度）。"
-                            f"{sunset_hint}"
+                            f"{sunset_hint}{sky_hint}"
                             "家族に「今夜ISSが見えるよ」と朝のうちに予告してください。"
-                            "日没時刻も自然に添えてください。「仰角」は使わず、わかりやすく。1〜2文で。"
+                            "天気のことも自然に触れてください。日没時刻も自然に添えてください。「仰角」は使わず、わかりやすく。1〜2文で。"
                         )
                         try:
                             await _iss_speak(prompt, source="iss_morning_preview")
@@ -2035,12 +2103,20 @@ async def _iss_notify_loop() -> None:
                     _iss_notified_passes.discard(min(_iss_notified_passes))
 
                 minutes_until = max(1, round(secs_until / 60))
+                sky = await _fetch_sky_condition(float(lat), float(lon))
+                if not sky["is_visible"]:
+                    sky_hint = f"残念ながら今は{sky['summary']}なので見えないかもしれませんが、"
+                elif sky["cloud_cover"] >= 50:
+                    sky_hint = f"今は{sky['summary']}なので雲の切れ間を狙って、"
+                else:
+                    sky_hint = ""
                 prompt = (
                     f"ISSが約{minutes_until}分後に{p['direction']}の空から見えはじめます。"
                     f"{p['max_jst'].strftime('%H時%M分')}ごろが一番高くなります"
                     f"（空の高さ{p['max_el_deg']:.0f}度相当）。"
-                    "家族に「もうすぐISSが来るよ、空を見てみて！」と短く伝えてください。"
-                    "「仰角」は使わず、わかりやすく。1〜2文で。"
+                    f"{sky_hint}"
+                    "家族に「もうすぐISSが来るよ！」と短く伝えてください。"
+                    "今の天気も自然に一言添えてください。「仰角」は使わず、わかりやすく。1〜2文で。"
                 )
                 try:
                     await _iss_speak(prompt, source="iss_notify")
