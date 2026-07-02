@@ -4241,48 +4241,8 @@ async def speak(req: SpeakRequest):
     return resp
 
 
-async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
-    """Transcribe audio bytes using OpenAI Whisper API."""
-    buf = io.BytesIO(audio_bytes)
-    buf.name = filename or "audio.wav"
-    result = await _openai_client.audio.transcriptions.create(
-        model=STT_MODEL,
-        file=buf,
-        language="ja",
-    )
-    return result.text
-
-
-async def identify_speaker(audio_bytes: bytes) -> str | None:
-    """Identify speaker via speaker-id service. Returns display name or None.
-
-    Non-fatal: returns None on any error or when SPEAKER_ID_URL is not configured.
-    """
-    if not SPEAKER_ID_URL:
-        return None
-    try:
-        headers = {}
-        if SPEAKER_ID_API_KEY:
-            headers["Authorization"] = f"Bearer {SPEAKER_ID_API_KEY}"
-        resp = await _http_client.post(
-            f"{SPEAKER_ID_URL}/identify",
-            files={"audio": ("audio.wav", audio_bytes, "audio/wav")},
-            headers=headers,
-        )
-        if not resp.is_success:
-            logger.warning("Speaker ID HTTP %d: body=%s", resp.status_code, resp.text[:200])
-        resp.raise_for_status()
-        data = resp.json()
-        score = float(data.get("score", 0))
-        if score >= SPEAKER_ID_THRESHOLD:
-            name = data.get("kana") or data.get("name")
-            logger.info("Speaker identified: name=%s score=%.3f", name, score)
-            return name
-        logger.info("Speaker below threshold: score=%.3f threshold=%.3f", score, SPEAKER_ID_THRESHOLD)
-        return None
-    except Exception as e:
-        logger.warning("Speaker identification failed (non-fatal): %s", e)
-        return None
+import bridge.integrations.stt as _stt_mod
+from bridge.integrations.stt import transcribe_audio, identify_speaker
 
 
 def _build_datetime_context() -> str:
