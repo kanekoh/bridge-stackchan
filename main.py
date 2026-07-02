@@ -140,15 +140,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Bridge API", version="0.1.0", lifespan=lifespan)
-_templates = Jinja2Templates(directory="templates")
 
-
-def _ui_context(request: Request, **extra) -> dict:
-    """全テンプレートに渡す共通コンテキスト。"""
-    return {
-        "speaker_id_browser_url": _get_setting("speaker_id_browser_url", SPEAKER_ID_BROWSER_URL),
-        **extra,
-    }
+from bridge.api.ui import router as _ui_router
+app.include_router(_ui_router)
 
 
 class SpeakRequest(BaseModel):
@@ -168,53 +162,6 @@ def _tcp_check(host: str, port: int, timeout: float = 3.0) -> str:
             return "ok"
     except Exception as e:
         return f"{type(e).__name__}: {e}"
-
-
-# ── Web UI ───────────────────────────────────────────────────────────────────
-
-@app.get("/ui", response_class=HTMLResponse)
-async def ui_index():
-    return RedirectResponse(url="/ui/members")
-
-
-@app.get("/ui/members", response_class=HTMLResponse)
-async def ui_members(request: Request):
-    return _templates.TemplateResponse(request=request, name="members.html", context=_ui_context(request))
-
-
-@app.get("/ui/messages", response_class=HTMLResponse)
-async def ui_messages(request: Request):
-    return _templates.TemplateResponse(request=request, name="messages.html", context=_ui_context(request))
-
-
-@app.get("/ui/test", response_class=HTMLResponse)
-async def ui_test(request: Request):
-    return _templates.TemplateResponse(request=request, name="test.html", context=_ui_context(request))
-
-
-@app.get("/ui/settings", response_class=HTMLResponse)
-async def ui_settings(request: Request):
-    return _templates.TemplateResponse(request=request, name="settings.html", context=_ui_context(request))
-
-
-@app.get("/ui/notifications", response_class=HTMLResponse)
-async def ui_notifications(request: Request):
-    return _templates.TemplateResponse(request=request, name="notifications.html", context=_ui_context(request))
-
-
-@app.get("/ui/logs", response_class=HTMLResponse)
-async def ui_logs(request: Request):
-    return _templates.TemplateResponse(request=request, name="logs.html", context=_ui_context(request))
-
-
-@app.get("/ui/web-checks", response_class=HTMLResponse)
-async def ui_web_checks(request: Request):
-    return _templates.TemplateResponse(request=request, name="web_checks.html", context=_ui_context(request))
-
-
-@app.get("/ui/metrics", response_class=HTMLResponse)
-async def ui_metrics(request: Request):
-    return _templates.TemplateResponse(request=request, name="metrics.html", context=_ui_context(request))
 
 
 @app.get("/api/device/log")
