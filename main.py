@@ -144,16 +144,18 @@ app = FastAPI(title="Bridge API", version="0.1.0", lifespan=lifespan)
 from bridge.api.ui import router as _ui_router
 app.include_router(_ui_router)
 
+from bridge.api.speak import router as _speak_router
+app.include_router(_speak_router)
+
+import bridge.core.audio as _audio_mod
+from bridge.core.audio import get_audio_url_web, resolve_audio_url
+
 
 class SpeakRequest(BaseModel):
     text: str
     source: str = "unknown"
     priority: str = "normal"
     request_id: str | None = None
-
-
-import bridge.core.audio as _audio_mod
-from bridge.core.audio import get_audio_url_web, resolve_audio_url
 
 
 def _tcp_check(host: str, port: int, timeout: float = 3.0) -> str:
@@ -669,33 +671,6 @@ async def api_location_scan():
     aps = _scan_local_wifi()
     logger.info("local wifi scan: %d APs found", len(aps))
     return await _geolocate_and_save(aps, consider_ip=True)
-
-
-# ── REST API (UI test) ────────────────────────────────────────────────────────
-
-class UiSpeakRequest(BaseModel):
-    text: str
-    mode: str = "say"  # "say" | "speak"
-
-
-@app.post("/api/ui/speak")
-async def api_ui_speak(req: UiSpeakRequest):
-    if not req.text.strip():
-        raise HTTPException(status_code=400, detail="text は必須です")
-    if req.mode == "speak":
-        speak_instruction = (
-            "以下はスタックちゃんがその場にいる人に向けて話す内容の原文です。"
-            "この内容をスタックちゃんらしい口調に変換してください。"
-        )
-        reply = await chat_with_llm(req.text, system_prompt_append=speak_instruction, use_functions=False)
-        expression, text_to_say = _parse_expression(reply)
-    else:
-        expression, text_to_say = "neutral", req.text
-    speaker_id, stackchan_expr = _resolve_expression(expression)
-    audio_url, streaming_url = await resolve_audio_url(text_to_say, speaker_id)
-    req_id = str(uuid.uuid4())
-    publish_speak(audio_url, streaming_url, text_to_say, "ui", "normal", req_id, stackchan_expr)
-    return {"requestId": req_id, "text": text_to_say, "expression": stackchan_expr}
 
 
 @app.get("/healthz")
@@ -1365,6 +1340,19 @@ async def run_web_check_now(wc_id: int):
     return {"name": name, **result}
 
 
+import bridge.integrations.stt as _stt_mod
+from bridge.integrations.stt import transcribe_audio, identify_speaker
+
+from bridge.integrations.slack import (
+    _MENTION_RE, _DURATION_RE,
+    _slack_handle_mention, _slack_handle_dm,
+    _deliver_pending_messages_after, _notify_message_delivered,
+    _record_slack_user_from_body,
+    _slack_handle_say, _slack_handle_register, _slack_handle_tell,
+    _slack_handle_speak, _parse_duration, _slack_handle_timer, _setup_slack,
+)
+
+
 @app.post("/speak")
 async def speak(req: SpeakRequest):
     request_id = req.request_id or str(uuid.uuid4())
@@ -1386,19 +1374,6 @@ async def speak(req: SpeakRequest):
     if audio_streaming_url:
         resp["audioStreamingUrl"] = audio_streaming_url
     return resp
-
-
-import bridge.integrations.stt as _stt_mod
-from bridge.integrations.stt import transcribe_audio, identify_speaker
-
-from bridge.integrations.slack import (
-    _MENTION_RE, _DURATION_RE,
-    _slack_handle_mention, _slack_handle_dm,
-    _deliver_pending_messages_after, _notify_message_delivered,
-    _record_slack_user_from_body,
-    _slack_handle_say, _slack_handle_register, _slack_handle_tell,
-    _slack_handle_speak, _parse_duration, _slack_handle_timer, _setup_slack,
-)
 
 
 @app.post("/ingest-audio")
