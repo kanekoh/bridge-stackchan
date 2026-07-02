@@ -42,9 +42,12 @@ from bridge.llm.tools import (
     _tool_get_weather, _tool_get_upcoming_items, _tool_get_recent_alerts,
     _execute_tool, _handle_function_calls,
 )
-# タイマー管理: timer_id → asyncio.Task / _TimerInfo
-_active_timers: dict[str, asyncio.Task] = {}
-_active_timer_infos: dict[str, "_TimerInfo"] = {}  # list_timers で参照
+
+from bridge.features.timers import (
+    _TimerInfo, _active_timers, _active_timer_infos,
+    _fire_timer, _run_timer, _register_timer,
+)
+
 # Slack アプリ参照（_setup_slack で設定、タイマー発火時の通知に使用）
 _slack_app = None  # type: ignore
 
@@ -64,114 +67,6 @@ _P2PQUAKE_EVENT_BUFFER = 50
 # ISS 通過通知
 _iss_tle_cache: dict = {}          # {"date": "YYYY-MM-DD", "line1": ..., "line2": ...}
 _iss_notified_passes: set[str] = set()  # 通知済みパスのキー（"YYYYMMDDHHMM"）
-
-# ── Timer ─────────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class _TimerInfo:
-    timer_id: str
-    label: str
-    fire_at: datetime
-    session_key: str
-    slack_channel: str | None  # 設定元が Slack の場合に発火後通知するチャンネル
-    snooze_seconds: int | None  # スヌーズ秒数（None = スヌーズなし）
-
-
-async def _fire_timer(info: _TimerInfo) -> None:
-    """タイマー発火処理: LLMで声かけ文を生成 → VOICEVOX → MQTT、Slack 経由なら Slack にも通知。"""
-    prompt = f"タイマー「{info.label}」の時間になりました。短く明るく声かけしてください。"
-    timer_instruction = (
-        "これはタイマーの発火通知です。"
-        "スタックちゃんとして、その場にいる家族に向けて声かけしてください。"
-        "依頼者への返答にはしないでください。"
-    )
-    try:
-        message = await chat_with_llm(
-            prompt,
-            system_prompt_append=timer_instruction,
-            session_key=info.session_key,
-            use_functions=False,  # タイマー発火中は新たなタイマーを受け付けない
-        )
-    except Exception as e:
-        logger.error("Timer LLM error: timer_id=%s error=%s", info.timer_id, e)
-        message = f"{info.label}の時間だよ！"
-
-    # MQTT で発話（常に実行）
-    expression, clean_message = _parse_expression(message)
-    speaker_id, stackchan_expr = _resolve_expression(expression)
-    try:
-        audio_url, streaming_url = await resolve_audio_url(clean_message, speaker_id)
-        req_id = str(uuid.uuid4())
-        publish_speak(audio_url, streaming_url, clean_message, "timer", "normal", req_id, stackchan_expr)
-        logger.info("Timer fired: timer_id=%s label=%s expression=%s message=%s", info.timer_id, info.label, expression, clean_message[:60])
-    except Exception as e:
-        logger.error("Timer speak error: timer_id=%s error=%s", info.timer_id, e)
-        return
-
-    # Slack 経由で設定された場合は Slack にも完了通知
-    if info.slack_channel and _slack_app:
-        try:
-            await _slack_app.client.chat_postMessage(
-                channel=info.slack_channel,
-                text=f"⏰ タイマー「{info.label}」が発火しました：「{clean_message}」",
-            )
-            logger.info("Timer Slack notified: channel=%s", info.slack_channel)
-        except Exception as e:
-            logger.warning("Timer Slack notify error: %s", e)
-
-    # スヌーズが設定されている場合は次のタイマーを登録（一回のみ）
-    if info.snooze_seconds:
-        snooze_id = _register_timer(
-            label=f"{info.label}（スヌーズ）",
-            seconds=info.snooze_seconds,
-            session_key=info.session_key,
-            slack_channel=info.slack_channel,
-            snooze_seconds=None,
-        )
-        logger.info("Timer snooze registered: original=%s snooze=%s", info.timer_id, snooze_id)
-
-
-async def _run_timer(info: _TimerInfo) -> None:
-    """asyncio.Task として動作するタイマー。delay 後に _fire_timer を呼ぶ。"""
-    delay = (info.fire_at - datetime.now(_JST)).total_seconds()
-    if delay > 0:
-        await asyncio.sleep(delay)
-    _active_timers.pop(info.timer_id, None)
-    _active_timer_infos.pop(info.timer_id, None)
-    try:
-        await _fire_timer(info)
-    except Exception as e:
-        logger.error("Timer _run_timer error: timer_id=%s error=%s", info.timer_id, e)
-
-
-def _register_timer(
-    label: str,
-    seconds: int,
-    session_key: str = "",
-    slack_channel: str | None = None,
-    snooze_seconds: int | None = None,
-) -> str:
-    """タイマーを登録して asyncio.Task を起動し、timer_id を返す。"""
-    timer_id = str(uuid.uuid4())
-    fire_at = datetime.now(_JST) + timedelta(seconds=seconds)
-    info = _TimerInfo(
-        timer_id=timer_id,
-        label=label,
-        fire_at=fire_at,
-        session_key=session_key,
-        slack_channel=slack_channel,
-        snooze_seconds=snooze_seconds,
-    )
-    task = asyncio.create_task(_run_timer(info))
-    _active_timers[timer_id] = task
-    _active_timer_infos[timer_id] = info
-    logger.info(
-        "Timer registered: timer_id=%s label=%s fire_at=%s slack_channel=%s snooze=%s",
-        timer_id, label, fire_at.isoformat(), slack_channel, snooze_seconds,
-    )
-    return timer_id
-
 
 async def _fire_calendar_notification(item: dict) -> None:
     person = item["person_name"]
