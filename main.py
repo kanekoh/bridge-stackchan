@@ -2155,6 +2155,7 @@ async def lifespan(app: FastAPI):
     _main_loop = asyncio.get_running_loop()
     _init_db()
     _http_client = httpx.AsyncClient(timeout=60)
+    _audio_mod._http_client = _http_client  # share client with audio module
     logger.info("httpx.AsyncClient initialized")
 
     slack_handler = _setup_slack()
@@ -2918,30 +2919,8 @@ class SpeakRequest(BaseModel):
     request_id: str | None = None
 
 
-async def get_audio_url_web(text: str, speaker_id: int | None = None) -> tuple[str, str | None]:
-    """Get MP3 URLs from VOICEVOX Web高速版 (api.tts.quest) without downloading.
-    Returns (mp3DownloadUrl, mp3StreamingUrl).
-    """
-    resp = await _http_client.get(
-        f"{VOICEVOX_URL}/synthesis",
-        params={"speaker": speaker_id if speaker_id is not None else VOICEVOX_SPEAKER, "text": text, "key": VOICEVOX_API_KEY},
-    )
-    resp.raise_for_status()
-    data = resp.json()
-
-    if not data.get("success"):
-        raise RuntimeError(f"VOICEVOX Web API error: {data}")
-
-    mp3_url = data.get("mp3DownloadUrl")
-    if not mp3_url:
-        raise RuntimeError(f"No mp3DownloadUrl in response: {data}")
-
-    return mp3_url, data.get("mp3StreamingUrl")
-
-
-async def resolve_audio_url(text: str, speaker_id: int | None = None) -> tuple[str, str | None]:
-    """Return (audioUrl, audioStreamingUrl) for the given text."""
-    return await get_audio_url_web(text, speaker_id)
+import bridge.core.audio as _audio_mod
+from bridge.core.audio import get_audio_url_web, resolve_audio_url
 
 
 def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, source: str, priority: str, request_id: str, expression: str = "neutral") -> None:
