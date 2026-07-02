@@ -1,245 +1,17 @@
-import asyncio
-import io
-import math
-import os
-import re
-import socket
-import sqlite3
-import uuid
-import json
+from bridge.config import *  # noqa: F401,F403
+
 import logging
-import threading
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from html.parser import HTMLParser
-from typing import Protocol
-from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-import aiohttp
-import ephem
-from PIL import Image
-import httpx
-import openai
-import paho.mqtt.client as mqtt
-import yaml
-from fastapi import FastAPI, Form, HTTPException, Query, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
-from dotenv import load_dotenv
-
-load_dotenv()
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-VOICEVOX_URL = os.getenv("VOICEVOX_URL", "http://localhost:50021")
-VOICEVOX_SPEAKER = int(os.getenv("VOICEVOX_SPEAKER", "1"))
-VOICEVOX_API_KEY = os.getenv("VOICEVOX_API_KEY", "")
-
-MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
-MQTT_TLS = os.getenv("MQTT_TLS", "false").lower() == "true"
-MQTT_DEVICE_ID = os.getenv("MQTT_DEVICE_ID", "default")
-MQTT_QOS = int(os.getenv("MQTT_QOS", "1"))
-MQTT_ACK_TIMEOUT = float(os.getenv("MQTT_ACK_TIMEOUT", "15.0"))
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENCLAW_BASE_URL = os.getenv("OPENCLAW_BASE_URL", "http://localhost:18789/v1")
-OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "openclaw")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
-OPENCLAW_SESSION_KEY = os.getenv("OPENCLAW_SESSION_KEY", "")
-_raw = os.getenv("OPENCLAW_MAX_OUTPUT_TOKENS", "")
-OPENCLAW_MAX_OUTPUT_TOKENS: int | None = int(_raw) if _raw.strip() else None
-
-SPEAKER_ID_URL = os.getenv("SPEAKER_ID_URL", "")
-SPEAKER_ID_API_KEY = os.getenv("SPEAKER_ID_API_KEY", "")
-SPEAKER_ID_THRESHOLD = float(os.getenv("SPEAKER_ID_THRESHOLD", "0.75"))
-SPEAKER_ID_BROWSER_URL = os.getenv("SPEAKER_ID_BROWSER_URL", "")  # ブラウザからアクセスする URL（例: http://raspberrypi:8082）
-STT_MODEL = os.getenv("STT_MODEL", "whisper-1")
-
-# LLM バックエンド切り替え
-LLM_BACKEND = os.getenv("LLM_BACKEND", "openclaw")  # "openclaw" or "openai"
-OPENAI_RESPONSES_BASE_URL = os.getenv("OPENAI_RESPONSES_BASE_URL", "https://api.openai.com/v1")
-OPENAI_RESPONSES_MODEL = os.getenv("OPENAI_RESPONSES_MODEL", "gpt-4o-mini")
-_raw_or = os.getenv("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS", "")
-OPENAI_RESPONSES_MAX_OUTPUT_TOKENS: int | None = int(_raw_or) if _raw_or.strip() else None
-OPENAI_RESPONSES_WEB_SEARCH = os.getenv("OPENAI_RESPONSES_WEB_SEARCH", "false").lower() == "true"
-OPENAI_RESPONSES_WEB_SEARCH_TOOL = os.getenv("OPENAI_RESPONSES_WEB_SEARCH_TOOL", "web_search_preview")
-# 実験: True にすると Pass 1 では request_web_search のみ提示し、LLM が必要と判断したときだけ
-# Pass 2 で web_search_preview を有効化する。雑談ターンの平均レイテンシを短縮できる。
-OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND = os.getenv("OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND", "false").lower() == "true"
-# 切り分け用フラグ (デフォルト false = 通常動作)
-DISABLE_SESSION_HISTORY = os.getenv("DISABLE_SESSION_HISTORY", "false").lower() == "true"
-DISABLE_TOOLS = os.getenv("DISABLE_TOOLS", "false").lower() == "true"
-# 会話サマリ: 合計文字数がこの閾値を超えたら会話を要約してリセットする
-SESSION_SUMMARY_THRESHOLD = int(os.getenv("SESSION_SUMMARY_THRESHOLD", "3000"))
-SESSION_SUMMARY_MAX_TOKENS = int(os.getenv("SESSION_SUMMARY_MAX_TOKENS", "500"))
-
-DB_PATH = os.getenv("DB_PATH", "data/bridge.db")
-
-# Google Calendar / Tasks
-CALENDAR_ENABLED = os.getenv("CALENDAR_ENABLED", "false").lower() == "true"
-
-# Google Geolocation API（Stack-chan からの位置更新）
-GOOGLE_GEOLOCATION_API_KEY = os.getenv("GOOGLE_GEOLOCATION_API_KEY", "")
-
-# 天気通知
-WEATHER_NOTIFY_RAIN     = os.getenv("WEATHER_NOTIFY_RAIN", "false")
-WEATHER_CHECK_INTERVAL  = int(os.getenv("WEATHER_CHECK_INTERVAL", "900"))   # 15分
-WEATHER_RAIN_THRESHOLD  = float(os.getenv("WEATHER_RAIN_THRESHOLD", "0.3")) # mm/15min で雨とみなす
-WEATHER_RAIN_SUDDEN_MUL = 5.0  # 閾値の何倍以上で「急な雨」とみなすか
-
-# ─── JMA ナウキャスト設定 ───────────────────────────────────────────────────
-_NOWCAST_ZOOM = 9
-_NOWCAST_COLOR_MAP: list[tuple[tuple[int, int, int], float]] = [
-    ((242, 242, 255), 0.3),   # 微雨
-    ((160, 210, 255), 0.7),   # 小雨
-    ((  0, 150, 255), 3.0),   # 雨
-    ((  0,  65, 255), 7.0),   # 強雨
-    ((250, 245,   0), 15.0),  # 激しい雨
-    ((255, 153,   0), 25.0),  # 非常に激しい雨
-    ((255,  40,   0), 40.0),  # 猛烈な雨
-    ((180,   0, 104), 65.0),  # 猛烈な雨+
-]
-
-# P2P地震情報 WebSocket
-P2PQUAKE_ENABLED = os.getenv("P2PQUAKE_ENABLED", "false").lower() == "true"
-P2PQUAKE_WS_URL = os.getenv("P2PQUAKE_WS_URL", "wss://api.p2pquake.net/v2/ws")
-P2PQUAKE_MIN_SCALE = int(os.getenv("P2PQUAKE_MIN_SCALE", "30"))  # 震度3以上で通知
-P2PQUAKE_TSUNAMI_TARGET_AREAS: set[str] = set(
-    os.getenv("P2PQUAKE_TSUNAMI_TARGET_AREAS", "相模湾・三浦半島,神奈川県,伊豆諸島").split(",")
+from bridge.core.expression import (
+    _load_expression_map, _expression_map, _parse_expression,
+    _resolve_expression, _STACKCHAN_SYSTEM_PROMPT,
 )
-# ISS 通過通知
-ISS_NOTIFY_ENABLED  = os.getenv("ISS_NOTIFY_ENABLED", "false").lower() == "true"
-ISS_MIN_ELEVATION   = float(os.getenv("ISS_MIN_ELEVATION", "30"))   # 最大仰角が何度以上のパスを通知するか
-ISS_NOTIFY_AHEAD    = int(os.getenv("ISS_NOTIFY_AHEAD", "5"))       # 何分前に通知するか
-ISS_TLE_URL         = "https://celestrak.org/NORAD/elements/gp.php?NAME=ISS%20(ZARYA)&FORMAT=TLE"
-
-GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "secrets/credentials.json")
-GOOGLE_TOKEN_DIR = os.getenv("GOOGLE_TOKEN_DIR", "secrets")
-CALENDAR_SYNC_INTERVAL_MINUTES = int(os.getenv("CALENDAR_SYNC_INTERVAL_MINUTES", "30"))
-CALENDAR_DEFAULT_NOTIFY_MINUTES = int(os.getenv("CALENDAR_DEFAULT_NOTIFY_MINUTES", "15"))
-CALENDAR_SYNC_DAYS_AHEAD = int(os.getenv("CALENDAR_SYNC_DAYS_AHEAD", "7"))
-CALENDAR_NOTIFY_CHECK_INTERVAL = int(os.getenv("CALENDAR_NOTIFY_CHECK_INTERVAL", "60"))
-CALENDAR_NOTIFY_GRACE_MINUTES = int(os.getenv("CALENDAR_NOTIFY_GRACE_MINUTES", "60"))
-
-EXPRESSION_MAP_FILE = os.getenv("EXPRESSION_MAP_FILE", "config/expression_map.yaml")
-
-# Slack (Socket Mode — 両方設定されている場合のみ有効)
-SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
-SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN", "")
-
-_JST = timezone(timedelta(hours=9))
-
-_KNOWN_EXPRESSIONS = {"neutral", "happy", "sad", "sleepy", "angry", "doubt"}
-
-def _load_expression_map(path: str) -> dict:
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        return data.get("expressions", {})
-    except FileNotFoundError:
-        logging.getLogger(__name__).warning("expression_map not found: %s — using defaults", path)
-        return {}
-
-_expression_map: dict = _load_expression_map(EXPRESSION_MAP_FILE)
-
-
-def _parse_expression(reply: str, default: str = "neutral") -> tuple[str, str]:
-    """Split LLM reply into (expression, clean_text).
-
-    The LLM is instructed to put one of the known expression labels on the first
-    line and the actual message on subsequent lines.  If the first line is not a
-    known label, or is "neutral" (treated as "no specific emotion"), we fall back
-    to `default` (unknown labels are normalised to "neutral").
-    """
-    lines = reply.split("\n", 1)
-    first = lines[0].strip().lower()
-    safe_default = default if default in _KNOWN_EXPRESSIONS else "neutral"
-    if first in _KNOWN_EXPRESSIONS:
-        text = lines[1].strip() if len(lines) > 1 else ""
-        expr = first if first != "neutral" else safe_default
-        return expr, text
-    return safe_default, reply.strip()
-
-
-def _resolve_expression(expression: str) -> tuple[int, str]:
-    """Return (voicevox_speaker_id, stackchan_expression) from expression_map."""
-    entry = _expression_map.get(expression, {})
-    speaker = entry.get("voicevox_speaker", VOICEVOX_SPEAKER)
-    stackchan_expr = entry.get("stackchan_expression", expression)
-    return int(speaker), stackchan_expr
-
-
-_STACKCHAN_SYSTEM_PROMPT = """\
-あなたはStack-chan（スタックちゃん）という超かわいいアシスタントロボットです。
-
-性格と話し方:
-- 日本語で話す。英語で話しかけられても、かわいいカタカナ英語まじりの日本語で返す
-- 返答は短く、シンプルで、かわいく、話し言葉に適した表現を使う
-- 口調はあたたかく、明るく、やさしく、サポーティブ
-- ビジネス的な堅い表現は避ける
-- 長くて細かい説明は避ける（明示的に求められた場合を除く）
-- 技術的な説明も正確で実用的にまとめる
-- ウェブ検索した内容は要点を2〜3文で話し言葉にまとめる
-- URL や出典、「〜によると」などの引用表現は読み上げない
-
-利用者について:
-- 家族みんなが使うシステムです
-- 特定の一人に対応しすぎないようにする
-- 誰にでも分かりやすく、親しみやすい表現を心がける
-
-返答フォーマット:
-- 必ず最初の1行に感情ラベルだけを出力し、2行目以降に本文を書く
-- 感情ラベルは次の6種類からひとつ選ぶ: neutral / happy / sad / sleepy / angry / doubt
-- 例（1行目が感情ラベル、2行目が本文）:
-  happy
-  スイミング、明日の16時からだよ！たのしみだね。\
-"""
 
 _openai_client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
 _http_client: httpx.AsyncClient = None  # type: ignore  # initialized in lifespan
 
-_OPENAI_ERROR_REPLIES: dict[str, str] = {
-    "insufficient_quota": "ごめんね〜、いまわたしのおさいふがからっぽで…あとでまた話しかけてね！",
-    "rate_limit_exceeded": "いまちょっとこんでるみたい！少し待ってからまた話しかけてね〜",
-}
-
-
-def _classify_api_error(e: Exception) -> str | None:
-    """Known OpenAI API error → Stack-chan message. Unknown error → None."""
-    if isinstance(e, openai.RateLimitError):
-        err_str = str(e)
-        if "insufficient_quota" in err_str:
-            return _OPENAI_ERROR_REPLIES["insufficient_quota"]
-        return _OPENAI_ERROR_REPLIES["rate_limit_exceeded"]
-    if isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError)):
-        return "ごめんね、いまうまく動けなくて…ちょっと待ってね！"
-    if isinstance(e, openai.APIConnectionError):
-        return "ネットワークにつながれないみたい…また後で話しかけてね！"
-    return None
-
-
-async def _deliver_error_reply(
-    error_reply: str,
-    source: str,
-    priority: str,
-    req_id: str,
-    mode: str,
-) -> dict:
-    """Speak an error message via MQTT (async) or return audioUrl (sync)."""
-    audio_url, streaming_url = await resolve_audio_url(error_reply)
-    if mode != "sync":
-        publish_speak(audio_url, streaming_url, error_reply, source, priority, req_id)
-        return {"requestId": req_id}
-    resp: dict = {"requestId": req_id, "reply": error_reply, "audioUrl": audio_url}
-    if streaming_url:
-        resp["audioStreamingUrl"] = streaming_url
-    return resp
+from bridge.core.errors import _OPENAI_ERROR_REPLIES, _classify_api_error, _deliver_error_reply
 
 # MQTT ACK 待機: requestId → asyncio.Event のマップ
 _pending_acks: dict[str, asyncio.Event] = {}
@@ -2348,6 +2120,7 @@ async def lifespan(app: FastAPI):
     _main_loop = asyncio.get_running_loop()
     _init_db()
     _http_client = httpx.AsyncClient(timeout=60)
+    _audio_mod._http_client = _http_client  # share client with audio module
     logger.info("httpx.AsyncClient initialized")
 
     slack_handler = _setup_slack()
@@ -3111,30 +2884,8 @@ class SpeakRequest(BaseModel):
     request_id: str | None = None
 
 
-async def get_audio_url_web(text: str, speaker_id: int | None = None) -> tuple[str, str | None]:
-    """Get MP3 URLs from VOICEVOX Web高速版 (api.tts.quest) without downloading.
-    Returns (mp3DownloadUrl, mp3StreamingUrl).
-    """
-    resp = await _http_client.get(
-        f"{VOICEVOX_URL}/synthesis",
-        params={"speaker": speaker_id if speaker_id is not None else VOICEVOX_SPEAKER, "text": text, "key": VOICEVOX_API_KEY},
-    )
-    resp.raise_for_status()
-    data = resp.json()
-
-    if not data.get("success"):
-        raise RuntimeError(f"VOICEVOX Web API error: {data}")
-
-    mp3_url = data.get("mp3DownloadUrl")
-    if not mp3_url:
-        raise RuntimeError(f"No mp3DownloadUrl in response: {data}")
-
-    return mp3_url, data.get("mp3StreamingUrl")
-
-
-async def resolve_audio_url(text: str, speaker_id: int | None = None) -> tuple[str, str | None]:
-    """Return (audioUrl, audioStreamingUrl) for the given text."""
-    return await get_audio_url_web(text, speaker_id)
+import bridge.core.audio as _audio_mod
+from bridge.core.audio import get_audio_url_web, resolve_audio_url
 
 
 def publish_speak(audio_url: str, audio_streaming_url: str | None, text: str, source: str, priority: str, request_id: str, expression: str = "neutral") -> None:
@@ -4455,48 +4206,8 @@ async def speak(req: SpeakRequest):
     return resp
 
 
-async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
-    """Transcribe audio bytes using OpenAI Whisper API."""
-    buf = io.BytesIO(audio_bytes)
-    buf.name = filename or "audio.wav"
-    result = await _openai_client.audio.transcriptions.create(
-        model=STT_MODEL,
-        file=buf,
-        language="ja",
-    )
-    return result.text
-
-
-async def identify_speaker(audio_bytes: bytes) -> str | None:
-    """Identify speaker via speaker-id service. Returns display name or None.
-
-    Non-fatal: returns None on any error or when SPEAKER_ID_URL is not configured.
-    """
-    if not SPEAKER_ID_URL:
-        return None
-    try:
-        headers = {}
-        if SPEAKER_ID_API_KEY:
-            headers["Authorization"] = f"Bearer {SPEAKER_ID_API_KEY}"
-        resp = await _http_client.post(
-            f"{SPEAKER_ID_URL}/identify",
-            files={"audio": ("audio.wav", audio_bytes, "audio/wav")},
-            headers=headers,
-        )
-        if not resp.is_success:
-            logger.warning("Speaker ID HTTP %d: body=%s", resp.status_code, resp.text[:200])
-        resp.raise_for_status()
-        data = resp.json()
-        score = float(data.get("score", 0))
-        if score >= SPEAKER_ID_THRESHOLD:
-            name = data.get("kana") or data.get("name")
-            logger.info("Speaker identified: name=%s score=%.3f", name, score)
-            return name
-        logger.info("Speaker below threshold: score=%.3f threshold=%.3f", score, SPEAKER_ID_THRESHOLD)
-        return None
-    except Exception as e:
-        logger.warning("Speaker identification failed (non-fatal): %s", e)
-        return None
+import bridge.integrations.stt as _stt_mod
+from bridge.integrations.stt import transcribe_audio, identify_speaker
 
 
 def _build_datetime_context() -> str:
