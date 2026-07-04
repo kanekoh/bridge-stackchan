@@ -52,8 +52,8 @@ async def _fire_calendar_notification(item: dict) -> None:
 
 async def _check_calendar_notifications() -> None:
     _main = sys.modules["main"]
-    _db_lock = _main._db_lock
-    _db_conn = _main._db_conn
+    _db_lock = sys.modules["bridge.core.db"]._db_lock
+    _db_conn = sys.modules["bridge.core.db"]._db_conn
 
     now = datetime.now(_JST)
     grace_cutoff = (now - timedelta(minutes=CALENDAR_NOTIFY_GRACE_MINUTES)).isoformat()

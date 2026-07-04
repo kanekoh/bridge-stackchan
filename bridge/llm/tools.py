@@ -280,8 +280,8 @@ async def _tool_get_weather(args: dict) -> dict:
 
 def _tool_get_upcoming_items(args: dict) -> dict:
     _main = sys.modules["main"]
-    _db_lock = _main._db_lock
-    _db_conn = _main._db_conn
+    _db_lock = sys.modules["bridge.core.db"]._db_lock
+    _db_conn = sys.modules["bridge.core.db"]._db_conn
 
     days = min(max(int(args.get("days", 3)), 1), 14)
     person = args.get("person")
@@ -322,8 +322,8 @@ def _tool_get_upcoming_items(args: dict) -> dict:
 
 def _tool_get_recent_alerts(args: dict) -> dict:
     _main = sys.modules["main"]
-    _db_lock = _main._db_lock
-    _db_conn = _main._db_conn
+    _db_lock = sys.modules["bridge.core.db"]._db_lock
+    _db_conn = sys.modules["bridge.core.db"]._db_conn
     _scale_to_str = _main._scale_to_str
     _TSUNAMI_GRADE_LABEL = _main._TSUNAMI_GRADE_LABEL
 
