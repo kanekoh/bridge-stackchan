@@ -1,12 +1,12 @@
 import asyncio
 import json
 import logging
-import sys
 import threading
 from datetime import datetime
 
 import paho.mqtt.client as mqtt
 
+import bridge.core.db as _db_mod
 from bridge.config import (
     MQTT_BROKER, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD,
     MQTT_TLS, MQTT_DEVICE_ID, MQTT_QOS, MQTT_ACK_TIMEOUT,
@@ -74,12 +74,8 @@ class _MqttConnection:
                 ts_ms = data.get("ts")
                 msg   = data.get("msg", "")
                 now   = datetime.now(_JST).isoformat()
-                # Lazy lookup to avoid circular import with db module
-                main_mod = sys.modules.get("main")
-                if main_mod is None:
-                    return
-                _db_lock = getattr(main_mod, "_db_lock", None)
-                _db_conn = getattr(main_mod, "_db_conn", None)
+                _db_lock = _db_mod._db_lock
+                _db_conn = _db_mod._db_conn
                 if _db_lock is None or _db_conn is None:
                     return
                 with _db_lock:
@@ -106,12 +102,8 @@ class _MqttConnection:
                 stacks = d.get("stacks", {})
                 ts_ms  = d.get("ts") or int(datetime.now(_JST).timestamp() * 1000)
                 now    = datetime.now(_JST).isoformat()
-                # Lazy lookup to avoid circular import with db module
-                main_mod = sys.modules.get("main")
-                if main_mod is None:
-                    return
-                _db_lock = getattr(main_mod, "_db_lock", None)
-                _db_conn = getattr(main_mod, "_db_conn", None)
+                _db_lock = _db_mod._db_lock
+                _db_conn = _db_mod._db_conn
                 if _db_lock is None or _db_conn is None:
                     return
                 with _db_lock:
