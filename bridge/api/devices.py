@@ -1,14 +1,29 @@
 """Device log, metrics, family members, and slack-seen-users endpoints."""
+import re
 import sqlite3
 from datetime import datetime
 
 from fastapi import APIRouter, Form, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from bridge.config import MQTT_DEVICE_ID, _JST
 import bridge.core.db as _db_mod
 from bridge.core.db import _db_lock, _get_setting, _get_display_tz, _get_all_family_members
+from bridge.devices.mqtt import get_device_state, publish_device_set
 
 router = APIRouter()
+
+_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+class DeviceSettingsUpdate(BaseModel):
+    brightness: int | None = Field(default=None, ge=0, le=100)
+    volume: int | None = Field(default=None, ge=0, le=100)
+    speakerId: int | None = None
+    greeting: str | None = None
+    sleepStart: str | None = None
+    sleepEnd: str | None = None
+    restart: bool | None = None
 
 
 @router.get("/api/device/log")
@@ -36,6 +51,43 @@ def api_device_log(limit: int = Query(default=200, le=500)):
             "received_at": received_at[:19].replace("T", " "),
         })
     return {"device_id": MQTT_DEVICE_ID, "timezone": _get_setting("location_timezone", "Asia/Tokyo"), "logs": entries}
+
+
+@router.get("/api/device/state")
+def api_device_state():
+    """デバイスから直近30秒間隔で受信した device/state を返す。"""
+    state = get_device_state(MQTT_DEVICE_ID)
+    if state is None:
+        return {"available": False, "device_id": MQTT_DEVICE_ID}
+    return {"available": True, "device_id": MQTT_DEVICE_ID, **state}
+
+
+@router.post("/api/device/settings")
+def api_device_settings(req: DeviceSettingsUpdate):
+    """stackchan/{device}/device/set へ設定変更を publish する。未指定フィールドは送らない。"""
+    for field_name in ("sleepStart", "sleepEnd"):
+        value = getattr(req, field_name)
+        if value is not None and not _TIME_RE.match(value):
+            raise HTTPException(status_code=422, detail=f"{field_name} は HH:MM 形式で指定してください")
+
+    greeting = req.greeting if req.greeting else None  # 空文字は「変更なし」
+    restart = True if req.restart else None  # False/未指定は送らない
+
+    sent = {
+        "brightness": req.brightness,
+        "volume": req.volume,
+        "speakerId": req.speakerId,
+        "greeting": greeting,
+        "sleepStart": req.sleepStart,
+        "sleepEnd": req.sleepEnd,
+        "restart": restart,
+    }
+    sent = {k: v for k, v in sent.items() if v is not None}
+    if not sent:
+        raise HTTPException(status_code=422, detail="送信する設定がありません")
+
+    publish_device_set(MQTT_DEVICE_ID, **sent)
+    return {"ok": True, "sent": sent}
 
 
 @router.get("/api/device/metrics")

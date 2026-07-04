@@ -20,7 +20,17 @@ def _ui_context(request: Request, **extra) -> dict:
 
 @router.get("/ui", response_class=HTMLResponse)
 async def ui_index():
-    return RedirectResponse(url="/ui/members")
+    return RedirectResponse(url="/ui/dashboard")
+
+
+@router.get("/ui/dashboard", response_class=HTMLResponse)
+async def ui_dashboard(request: Request):
+    return _templates.TemplateResponse(request=request, name="dashboard.html", context=_ui_context(request))
+
+
+@router.get("/ui/device", response_class=HTMLResponse)
+async def ui_device(request: Request):
+    return _templates.TemplateResponse(request=request, name="device.html", context=_ui_context(request))
 
 
 @router.get("/ui/members", response_class=HTMLResponse)

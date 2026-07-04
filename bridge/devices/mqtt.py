@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 # MQTT ACK 待機: requestId → asyncio.Event のマップ
 _pending_acks: dict[str, asyncio.Event] = {}
 
+# デバイスから受信した最新の device/state（device_id → {..., "received_at": iso}）
+_device_state: dict[str, dict] = {}
+
 # MQTT スレッドから asyncio へ通知するためのイベントループ参照（lifespan で設定）
 _main_loop: asyncio.AbstractEventLoop | None = None
 
@@ -54,8 +57,9 @@ class _MqttConnection:
                 client.subscribe("stackchan/ack", qos=MQTT_QOS)
                 client.subscribe(f"stackchan/{MQTT_DEVICE_ID}/log", qos=MQTT_QOS)
                 client.subscribe(f"stackchan/{MQTT_DEVICE_ID}/metrics", qos=MQTT_QOS)
-                logger.info("MQTT (re)connected, subscribed to ack + %s/log + %s/metrics qos=%d",
-                            MQTT_DEVICE_ID, MQTT_DEVICE_ID, MQTT_QOS)
+                client.subscribe(f"stackchan/{MQTT_DEVICE_ID}/device/state", qos=MQTT_QOS)
+                logger.info("MQTT (re)connected, subscribed to ack + %s/log + %s/metrics + %s/device/state qos=%d",
+                            MQTT_DEVICE_ID, MQTT_DEVICE_ID, MQTT_DEVICE_ID, MQTT_QOS)
                 connected.set()
             else:
                 logger.error("MQTT connect failed: reason_code=%s", reason_code)
@@ -135,6 +139,15 @@ class _MqttConnection:
             except Exception as e:
                 logger.warning("device_metrics store error: %s", e)
 
+        def _store_device_state(device_id: str, raw: str) -> None:
+            try:
+                data = json.loads(raw)
+                data["received_at"] = datetime.now(_JST).isoformat()
+                _device_state[device_id] = data
+                logger.debug("device_state stored: device=%s data=%s", device_id, data)
+            except Exception as e:
+                logger.warning("device_state store error: %s", e)
+
         def on_message(client, userdata, message):
             topic = message.topic
             # ── ログトピック ──────────────────────────────────
@@ -145,6 +158,10 @@ class _MqttConnection:
             # ── メトリクストピック ────────────────────────────
             if len(parts) == 3 and parts[0] == "stackchan" and parts[2] == "metrics":
                 _store_device_metrics(parts[1], message.payload.decode("utf-8", errors="replace"))
+                return
+            # ── デバイス状態トピック ──────────────────────────
+            if len(parts) == 4 and parts[0] == "stackchan" and parts[2] == "device" and parts[3] == "state":
+                _store_device_state(parts[1], message.payload.decode("utf-8", errors="replace"))
                 return
             # ── ACK トピック ──────────────────────────────────
             try:
@@ -237,6 +254,18 @@ def publish_speak(
         msg["audioStreamingUrl"] = audio_streaming_url
     payload = json.dumps(msg, ensure_ascii=False)
     _mqtt_conn.publish(topic, payload)
+
+
+def get_device_state(device_id: str) -> dict | None:
+    """直近30秒間隔で受信した device/state（未受信なら None）。"""
+    return _device_state.get(device_id)
+
+
+def publish_device_set(device_id: str, **fields) -> None:
+    """stackchan/{device_id}/device/set へ設定変更を publish する。None のフィールドは送らない。"""
+    payload = {k: v for k, v in fields.items() if v is not None}
+    topic = f"stackchan/{device_id}/device/set"
+    _mqtt_conn.publish(topic, json.dumps(payload, ensure_ascii=False))
 
 
 async def wait_for_ack(request_id: str, timeout: float = MQTT_ACK_TIMEOUT) -> bool:

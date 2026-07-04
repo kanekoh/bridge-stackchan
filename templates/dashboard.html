@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block title %}ダッシュボード{% endblock %}
+{% block nav_dashboard %}font-semibold text-blue-600{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-xl font-bold text-gray-800">ダッシュボード</h1>
+  <button onclick="loadAll()" class="text-sm text-gray-400 hover:text-gray-600">↻ 更新</button>
+</div>
+
+<div class="space-y-6">
+  <section>
+    <h2 class="text-xs font-semibold text-gray-400 mb-2 tracking-wide">外部接続</h2>
+    <div id="connectivityCards" class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+      <p class="text-sm text-gray-400 col-span-full">読み込み中...</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="text-xs font-semibold text-gray-400 mb-2 tracking-wide">防災・環境</h2>
+    <div id="disasterCards" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <p class="text-sm text-gray-400 col-span-full">読み込み中...</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="text-xs font-semibold text-gray-400 mb-2 tracking-wide">家族・生活</h2>
+    <div id="familyCards" class="grid grid-cols-3 gap-3">
+      <p class="text-sm text-gray-400 col-span-full">読み込み中...</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="text-xs font-semibold text-gray-400 mb-2 tracking-wide">デバイス</h2>
+    <div id="deviceCards" class="grid grid-cols-2 gap-3">
+      <p class="text-sm text-gray-400 col-span-full">読み込み中...</p>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function tile(label, valueHtml, subHtml, href) {
+  const inner = `
+    <p class="text-xs text-gray-400">${esc(label)}</p>
+    <p class="text-lg font-semibold text-gray-800 mt-0.5">${valueHtml}</p>
+    ${subHtml ? `<p class="text-xs text-gray-500 mt-1">${subHtml}</p>` : ''}`;
+  const cls = "bg-white rounded-xl shadow-sm p-4 block" + (href ? " hover:shadow-md transition-shadow" : "");
+  return href ? `<a href="${href}" class="${cls}">${inner}</a>` : `<div class="${cls}">${inner}</div>`;
+}
+
+// good / warning / serious(=amber-orange) / critical はアイコン+ラベル併記が必須（色だけに意味を持たせない）
+function badge(status, label) {
+  const styles = {
+    good:     'bg-green-50 text-green-700',
+    warning:  'bg-amber-50 text-amber-700',
+    critical: 'bg-red-50 text-red-700',
+    neutral:  'bg-gray-100 text-gray-500',
+  };
+  const icons = { good: '●', warning: '▲', critical: '✕', neutral: '—' };
+  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${styles[status]}">${icons[status]} ${esc(label)}</span>`;
+}
+
+function agoLabel(isoOrStr) {
+  if (!isoOrStr) return null;
+  const t = new Date(isoOrStr.replace(' ', 'T'));
+  if (isNaN(t.getTime())) return null;
+  const sec = Math.max(0, Math.round((Date.now() - t.getTime()) / 1000));
+  if (sec < 90) return `${sec}秒前`;
+  if (sec < 3600) return `${Math.round(sec / 60)}分前`;
+  if (sec < 86400) return `${Math.round(sec / 3600)}時間前`;
+  return `${Math.round(sec / 86400)}日前`;
+}
+
+// ── 外部接続 ──────────────────────────────────────────
+async function loadConnectivity() {
+  const el = document.getElementById('connectivityCards');
+  const cards = [];
+  try {
+    const d = await apiFetch('/debug/connectivity');
+    for (const [target, status] of Object.entries(d.tcp || {})) {
+      const ok = status === 'ok';
+      cards.push(tile(target, badge(ok ? 'good' : 'critical', ok ? '疎通OK' : '疎通NG'), ok ? '' : esc(status)));
+    }
+  } catch (e) {
+    cards.push(tile('外部接続', badge('critical', '取得失敗'), esc(e.message)));
+  }
+  try {
+    const d = await apiFetch('/api/debug/p2pquake/status');
+    const connected = d.ws && d.ws.connected;
+    cards.push(tile('地震情報WS', badge(connected ? 'good' : 'warning', connected ? '接続中' : '切断中'),
+      d.ws && d.ws.last_event_at ? `最終受信: ${agoLabel(d.ws.last_event_at) || d.ws.last_event_at}` : '受信履歴なし'));
+  } catch (e) {
+    cards.push(tile('地震情報WS', badge('critical', '取得失敗'), esc(e.message)));
+  }
+  el.innerHTML = cards.join('');
+}
+
+// ── 防災・環境 ────────────────────────────────────────
+async function loadDisaster() {
+  const el = document.getElementById('disasterCards');
+  const cards = [];
+
+  let coverage = null;
+  try {
+    coverage = await apiFetch('/api/debug/coverage');
+  } catch (e) {
+    el.innerHTML = tile('防災・環境', badge('critical', '取得失敗'), esc(e.message));
+    return;
+  }
+
+  const loc = coverage.location;
+  cards.push(tile('現在地（設置場所）',
+    loc.configured ? esc(loc.title || loc.pref) : badge('neutral', '未設定'),
+    loc.configured ? '' : `<a href="/ui/settings" class="text-blue-500 hover:underline">設定画面で登録</a>`));
+
+  if (coverage.weather.enabled) {
+    try {
+      const w = await apiFetch('/api/debug/weather');
+      cards.push(tile('天気', `${esc(w.weather.description)} ${w.weather.temperature}°C`,
+        `体感 ${w.weather.apparent_temp}°C・降水 ${w.weather.precipitation}mm`));
+    } catch (e) {
+      cards.push(tile('天気', badge('warning', '取得失敗'), esc(e.message)));
+    }
+  } else {
+    cards.push(tile('天気', badge('neutral', '未設定'), '位置情報を登録すると表示されます'));
+  }
+
+  try {
+    const q = await apiFetch('/api/debug/p2pquake/status');
+    const events = q.recent_events || [];
+    const latest = events[0];
+    cards.push(tile('直近の地震情報', latest ? esc(latest.summary || `code=${latest.code}`) : badge('neutral', '受信なし'),
+      latest ? `${agoLabel(latest.time) || esc(latest.time)}・直近${events.length}件` : ''));
+  } catch (e) {
+    cards.push(tile('直近の地震情報', badge('critical', '取得失敗'), esc(e.message)));
+  }
+
+  const active = coverage.tsunami.active || [];
+  if (active.length) {
+    const gradeLabel = { Watch: '注意報', Warning: '警報', MajorWarning: '大警報' };
+    const gradeStatus = { Watch: 'warning', Warning: 'critical', MajorWarning: 'critical' };
+    const lines = active.map(a => `${esc(a.area)}: ${badge(gradeStatus[a.grade] || 'warning', gradeLabel[a.grade] || a.grade)}`).join('<br>');
+    cards.push(tile('津波警報', badge('critical', '発令中'), lines));
+  } else {
+    cards.push(tile('津波警報', badge('good', '発令なし'), coverage.tsunami.areas.length ? `監視対象: ${coverage.tsunami.areas.join('、')}` : '監視エリア未設定'));
+  }
+
+  el.innerHTML = cards.join('');
+}
+
+// ── 家族・生活 ────────────────────────────────────────
+async function loadFamily() {
+  const el = document.getElementById('familyCards');
+  const cards = [];
+  try {
+    const members = await apiFetch('/api/family-members');
+    cards.push(tile('登録家族人数', `${members.length}人`, '', '/ui/members'));
+  } catch (e) {
+    cards.push(tile('登録家族人数', badge('critical', '取得失敗'), esc(e.message)));
+  }
+  try {
+    const messages = await apiFetch('/api/messages?status=pending');
+    cards.push(tile('未読の伝言', `${messages.length}件`, '', '/ui/messages'));
+  } catch (e) {
+    cards.push(tile('未読の伝言', badge('critical', '取得失敗'), esc(e.message)));
+  }
+  try {
+    const notif = await apiFetch('/api/notifications');
+    const pending = (notif.items || []).filter(i => i.state !== 'notified').length;
+    cards.push(tile('保留中の通知', `${pending}件`, '', '/ui/notifications'));
+  } catch (e) {
+    cards.push(tile('保留中の通知', badge('critical', '取得失敗'), esc(e.message)));
+  }
+  el.innerHTML = cards.join('');
+}
+
+// ── デバイス ──────────────────────────────────────────
+async function loadDevice() {
+  const el = document.getElementById('deviceCards');
+  const cards = [];
+  try {
+    const d = await apiFetch('/api/device/log?limit=1');
+    const latest = (d.logs || [])[0];
+    cards.push(tile('最終応答', latest ? (agoLabel(latest.received_at) || latest.received_at) : badge('neutral', '未受信'),
+      latest ? esc(latest.received_at) : '', '/ui/logs'));
+  } catch (e) {
+    cards.push(tile('最終応答', badge('critical', '取得失敗'), esc(e.message)));
+  }
+  try {
+    const d = await apiFetch('/api/device/state');
+    if (d.available) {
+      const summary = `明るさ ${d.brightness ?? '—'}・音量 ${d.volume ?? '—'}`;
+      const sub = `話者ID ${d.speakerId ?? '—'}・スリープ ${d.sleepStart || '—'}〜${d.sleepEnd || '—'}・${agoLabel(d.received_at) || d.received_at || ''}`;
+      cards.push(tile('明るさ・音量', summary, sub, '/ui/device'));
+    } else {
+      cards.push(tile('明るさ・音量', badge('neutral', '未受信'), 'デバイスからの状態受信待ち', '/ui/device'));
+    }
+  } catch (e) {
+    cards.push(tile('明るさ・音量', badge('critical', '取得失敗'), esc(e.message)));
+  }
+  el.innerHTML = cards.join('');
+}
+
+function loadAll() {
+  loadConnectivity();
+  loadDisaster();
+  loadFamily();
+  loadDevice();
+}
+
+loadAll();
+setInterval(loadAll, 60000);
+</script>
+{% endblock %}

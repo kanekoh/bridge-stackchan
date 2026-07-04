@@ -199,6 +199,12 @@ def api_debug_coverage():
     tsunami_areas_str = _get_setting("p2pquake_tsunami_areas", ",".join(P2PQUAKE_TSUNAMI_TARGET_AREAS))
     tsunami_areas = [a.strip() for a in tsunami_areas_str.split(",") if a.strip()]
 
+    with _db_lock:
+        active_rows = _db_mod._db_conn.execute(  # type: ignore[union-attr]
+            "SELECT area, grade, updated_at FROM tsunami_state ORDER BY updated_at DESC"
+        ).fetchall()
+    tsunami_active = [{"area": r[0], "grade": r[1], "updated_at": r[2]} for r in active_rows]
+
     scale_labels = {10: "震度1", 20: "震度2", 30: "震度3", 40: "震度4", 50: "震度5弱"}
 
     return {
@@ -218,6 +224,7 @@ def api_debug_coverage():
         "tsunami": {
             "enabled": P2PQUAKE_ENABLED,
             "areas": tsunami_areas,
+            "active": tsunami_active,
         },
         "weather": {
             "enabled": bool(lat and lon),

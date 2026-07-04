@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}デバイス設定{% endblock %}
+{% block nav_device %}font-semibold text-blue-600{% endblock %}
+
+{% block content %}
+<h1 class="text-xl font-bold text-gray-800 mb-2">デバイス設定</h1>
+<p class="text-sm text-gray-500 mb-6">Stack-chan 本体の明るさ・音量・話者ID・挨拶・スリープ時間帯を変更します。反映はデバイス側でRAM即時・SD書き込みは非同期です。</p>
+
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">現在の状態</h2>
+<div id="stateCard" class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+  <p class="text-sm text-gray-400">読み込み中...</p>
+</div>
+
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">設定変更</h2>
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6 space-y-4">
+  <p class="text-xs text-gray-400">未入力の項目は変更されません。</p>
+
+  <div>
+    <label class="block text-xs text-gray-500 mb-1">画面の明るさ（0-100）</label>
+    <input id="input-brightness" type="number" min="0" max="100" placeholder="変更しない"
+      class="w-32 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+  </div>
+
+  <div>
+    <label class="block text-xs text-gray-500 mb-1">スピーカー音量（0-100）</label>
+    <input id="input-volume" type="number" min="0" max="100" placeholder="変更しない"
+      class="w-32 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+  </div>
+
+  <div>
+    <label class="block text-xs text-gray-500 mb-1">VOICEVOX 話者ID</label>
+    <input id="input-speakerId" type="number" placeholder="変更しない"
+      class="w-32 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+    <p class="text-xs text-gray-400 mt-1">参考: config/expression_map.yaml の登録値（neutral=3, happy=1, sad=76, sleepy=75, angry=7）</p>
+  </div>
+
+  <div>
+    <label class="block text-xs text-gray-500 mb-1">起床時の挨拶</label>
+    <input id="input-greeting" type="text" placeholder="変更しない"
+      class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+  </div>
+
+  <div class="flex gap-4">
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">スリープ開始</label>
+      <input id="input-sleepStart" type="time"
+        class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+    </div>
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">スリープ終了</label>
+      <input id="input-sleepEnd" type="time"
+        class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+    </div>
+  </div>
+
+  <div class="pt-2">
+    <button onclick="submitSettings()" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">送信</button>
+  </div>
+  <p id="settingsMsg" class="text-sm"></p>
+</div>
+
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">再起動</h2>
+<div class="bg-white rounded-lg border border-gray-200 p-5">
+  <button onclick="restartDevice()" class="bg-red-500 hover:bg-red-600 text-white text-sm px-4 py-2 rounded">
+    デバイスを再起動
+  </button>
+  <p id="restartMsg" class="text-sm mt-2"></p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function agoLabel(iso) {
+  if (!iso) return null;
+  const t = new Date(iso);
+  if (isNaN(t.getTime())) return null;
+  const sec = Math.max(0, Math.round((Date.now() - t.getTime()) / 1000));
+  if (sec < 90) return `${sec}秒前`;
+  if (sec < 3600) return `${Math.round(sec / 60)}分前`;
+  return `${Math.round(sec / 3600)}時間前`;
+}
+
+async function loadState() {
+  const el = document.getElementById('stateCard');
+  try {
+    const d = await apiFetch('/api/device/state');
+    if (!d.available) {
+      el.innerHTML = `<p class="text-sm text-gray-400">デバイスからの状態受信待ちです（30秒間隔で送信されます）。</p>`;
+      return;
+    }
+    const rows = [
+      ['画面の明るさ', d.brightness != null ? `${d.brightness}` : '—'],
+      ['スピーカー音量', d.volume != null ? `${d.volume}` : '—'],
+      ['VOICEVOX 話者ID', d.speakerId != null ? `${d.speakerId}` : '—'],
+      ['起床時の挨拶', d.greeting || '—'],
+      ['スリープ時間帯', (d.sleepStart || '—') + ' 〜 ' + (d.sleepEnd || '—')],
+    ];
+    el.innerHTML = `
+      <div class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+        ${rows.map(([label, value]) => `
+          <div class="text-gray-400">${esc(label)}</div>
+          <div class="text-gray-800 font-medium">${esc(value)}</div>
+        `).join('')}
+      </div>
+      <p class="text-xs text-gray-400 mt-3">受信: ${esc(agoLabel(d.received_at) || d.received_at || '不明')}</p>`;
+  } catch (e) {
+    el.innerHTML = `<p class="text-sm text-red-500">読み込み失敗: ${esc(e.message)}</p>`;
+  }
+}
+
+function readField(id) {
+  const v = document.getElementById(id).value;
+  return v === '' ? null : v;
+}
+
+async function submitSettings() {
+  const msg = document.getElementById('settingsMsg');
+  const payload = {};
+  const brightness = readField('input-brightness');
+  const volume = readField('input-volume');
+  const speakerId = readField('input-speakerId');
+  const greeting = readField('input-greeting');
+  const sleepStart = readField('input-sleepStart');
+  const sleepEnd = readField('input-sleepEnd');
+  if (brightness !== null) payload.brightness = Number(brightness);
+  if (volume !== null) payload.volume = Number(volume);
+  if (speakerId !== null) payload.speakerId = Number(speakerId);
+  if (greeting !== null) payload.greeting = greeting;
+  if (sleepStart !== null) payload.sleepStart = sleepStart;
+  if (sleepEnd !== null) payload.sleepEnd = sleepEnd;
+
+  if (Object.keys(payload).length === 0) {
+    msg.textContent = '変更する項目を入力してください';
+    msg.className = 'text-sm text-gray-400';
+    return;
+  }
+
+  try {
+    await apiFetch('/api/device/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    msg.textContent = '✅ 送信しました（反映まで最大30秒）';
+    msg.className = 'text-sm text-green-600';
+  } catch (e) {
+    msg.textContent = '❌ ' + e.message;
+    msg.className = 'text-sm text-red-500';
+  }
+}
+
+async function restartDevice() {
+  if (!confirm('デバイスを今すぐ再起動しますか？')) return;
+  const msg = document.getElementById('restartMsg');
+  try {
+    await apiFetch('/api/device/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ restart: true }),
+    });
+    msg.textContent = '✅ 再起動を送信しました';
+    msg.className = 'text-sm text-green-600';
+  } catch (e) {
+    msg.textContent = '❌ ' + e.message;
+    msg.className = 'text-sm text-red-500';
+  }
+}
+
+loadState();
+setInterval(loadState, 30000);
+</script>
+{% endblock %}
