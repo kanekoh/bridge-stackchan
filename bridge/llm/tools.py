@@ -418,7 +418,8 @@ async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
         _fetch_pending_messages = _main._fetch_pending_messages
         _mark_message_delivered = _main._mark_message_delivered
         _notify_message_delivered = _main._notify_message_delivered
-        messages = _fetch_pending_messages()
+        _filter_messages_for_speaker = _main._filter_messages_for_speaker
+        messages = _filter_messages_for_speaker(_fetch_pending_messages(), notify_context.get("speaker"))
         for msg in messages:
             _mark_message_delivered(msg["id"])
             asyncio.create_task(_notify_message_delivered(msg))

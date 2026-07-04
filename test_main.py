@@ -24,6 +24,7 @@ os.environ.setdefault("DB_PATH", "/tmp/test-bridge.db")
 import main  # noqa: E402  (needed for patch.object on module-level objects)
 from main import (  # noqa: E402
     _build_datetime_context,
+    _filter_messages_for_speaker,
     _handle_function_calls,
     _parse_duration,
     _register_timer,
@@ -1056,6 +1057,86 @@ class TestHandleFunctionCalls:
             await _handle_function_calls(output, {"session_key": "sk"})
         _, kwargs = mock_reg.call_args
         assert kwargs["slack_channel"] is None
+
+
+# ── unit: _filter_messages_for_speaker / get_pending_messages ────────────────
+
+class TestFilterMessagesForSpeaker:
+    def test_untargeted_message_passes_for_any_speaker(self):
+        messages = [{"id": 1, "sender": "パパ", "recipient": None, "content": "夕食は7時です"}]
+        assert _filter_messages_for_speaker(messages, "しおり") == messages
+        assert _filter_messages_for_speaker(messages, None) == messages
+
+    def test_targeted_message_passes_only_for_matching_speaker(self):
+        messages = [{"id": 2, "sender": "パパ", "recipient": "しおり", "content": "16時からだよ"}]
+        assert _filter_messages_for_speaker(messages, "しおり") == messages
+        assert _filter_messages_for_speaker(messages, "パパ") == []
+
+    def test_targeted_message_excluded_when_speaker_unknown(self):
+        """話者を特定できない場合、宛先付きの伝言を誤って届けない。"""
+        messages = [{"id": 3, "sender": "パパ", "recipient": "しおり", "content": "16時からだよ"}]
+        assert _filter_messages_for_speaker(messages, None) == []
+
+    def test_mixed_messages_filtered_independently(self):
+        messages = [
+            {"id": 1, "sender": "パパ", "recipient": None, "content": "全員向け"},
+            {"id": 2, "sender": "パパ", "recipient": "しおり", "content": "しおり向け"},
+            {"id": 3, "sender": "ママ", "recipient": "たろう", "content": "たろう向け"},
+        ]
+        result = _filter_messages_for_speaker(messages, "しおり")
+        assert [m["id"] for m in result] == [1, 2]
+
+
+class TestGetPendingMessagesTool:
+    async def test_delivers_only_messages_matching_speaker(self):
+        """get_pending_messages ツールは speaker と一致しない宛先付き伝言を除外し、
+        配信対象になった伝言だけ既読化する。"""
+        output = [{
+            "type": "function_call",
+            "id": "fc_msg",
+            "name": "get_pending_messages",
+            "arguments": "{}",
+        }]
+        all_messages = [
+            {"id": 1, "sender": "パパ", "sender_slack_id": None, "recipient": None, "content": "全員向け"},
+            {"id": 2, "sender": "パパ", "sender_slack_id": None, "recipient": "しおり", "content": "しおり向け"},
+            {"id": 3, "sender": "ママ", "sender_slack_id": None, "recipient": "たろう", "content": "たろう向け"},
+        ]
+        with (
+            patch("main._fetch_pending_messages", return_value=all_messages),
+            patch("main._mark_message_delivered") as mock_mark,
+            patch("main._notify_message_delivered", new=AsyncMock()),
+        ):
+            result = await _handle_function_calls(output, {"speaker": "しおり"})
+
+        out = json.loads(result[0]["output"])
+        assert out["count"] == 2
+        assert {m["content"] for m in out["messages"]} == {"全員向け", "しおり向け"}
+        delivered_ids = {c.args[0] for c in mock_mark.call_args_list}
+        assert delivered_ids == {1, 2}  # たろう向け(id=3) は既読化されない
+
+    async def test_unknown_speaker_only_gets_untargeted_messages(self):
+        output = [{
+            "type": "function_call",
+            "id": "fc_msg2",
+            "name": "get_pending_messages",
+            "arguments": "{}",
+        }]
+        all_messages = [
+            {"id": 1, "sender": "パパ", "sender_slack_id": None, "recipient": None, "content": "全員向け"},
+            {"id": 2, "sender": "パパ", "sender_slack_id": None, "recipient": "しおり", "content": "しおり向け"},
+        ]
+        with (
+            patch("main._fetch_pending_messages", return_value=all_messages),
+            patch("main._mark_message_delivered") as mock_mark,
+            patch("main._notify_message_delivered", new=AsyncMock()),
+        ):
+            result = await _handle_function_calls(output, {})  # speaker 不明
+
+        out = json.loads(result[0]["output"])
+        assert out["count"] == 1
+        assert out["messages"][0]["content"] == "全員向け"
+        mock_mark.assert_called_once_with(1)
 
 
 # ── unit: _slack_handle_timer ─────────────────────────────────────────────────

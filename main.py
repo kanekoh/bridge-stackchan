@@ -26,7 +26,7 @@ from bridge.core.db import (
     _summarize_and_reset_session,
     _get_all_family_members, _resolve_display_name,
     _record_slack_user, _save_message,
-    _fetch_pending_messages, _mark_message_delivered,
+    _fetch_pending_messages, _mark_message_delivered, _filter_messages_for_speaker,
 )
 
 from bridge.llm.persona import _build_datetime_context, _build_location_context
@@ -271,7 +271,7 @@ async def ingest_audio(
             speaker,
             system_prompt_append,
             effective_session_key,
-            notify_context={"session_key": effective_session_key, "slack_channel": None},
+            notify_context={"session_key": effective_session_key, "slack_channel": None, "speaker": speaker},
         )
     except Exception as e:
         logger.error("LLM error: %s", e)
@@ -300,7 +300,7 @@ async def ingest_audio(
             raise HTTPException(status_code=502, detail=f"MQTT error: {e}")
         return {"requestId": req_id, "expression": stackchan_expr}
 
-    asyncio.create_task(_deliver_pending_messages_after(clean_reply, source, priority, session_key=effective_session_key))
+    asyncio.create_task(_deliver_pending_messages_after(clean_reply, source, priority, session_key=effective_session_key, speaker=speaker))
 
     resp: dict = {
         "requestId": req_id,

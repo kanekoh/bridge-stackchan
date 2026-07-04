@@ -37,7 +37,7 @@ async def _slack_handle_mention(event: dict, say) -> None:
             text,
             speaker=sender_name or None,
             session_key=session_key,
-            notify_context={"session_key": session_key, "slack_channel": channel},
+            notify_context={"session_key": session_key, "slack_channel": channel, "speaker": sender_name or None},
         )
     except Exception as e:
         logger.error("Slack mention LLM error: %s", e)
@@ -71,7 +71,7 @@ async def _slack_handle_dm(event: dict, say) -> None:
             text,
             speaker=sender_name or None,
             session_key=session_key,
-            notify_context={"session_key": session_key, "slack_channel": channel},
+            notify_context={"session_key": session_key, "slack_channel": channel, "speaker": sender_name or None},
         )
     except Exception as e:
         logger.error("Slack DM LLM error: %s", e)
@@ -82,14 +82,18 @@ async def _slack_handle_dm(event: dict, say) -> None:
     await say(clean_reply)
 
 
-async def _deliver_pending_messages_after(main_reply: str, source: str, priority: str, session_key: str = "") -> None:
+async def _deliver_pending_messages_after(
+    main_reply: str, source: str, priority: str, session_key: str = "", speaker: str | None = None,
+) -> None:
     """メイン返答の再生推定時間後に未読伝言を MQTT で届ける。
     日本語の平均読み上げ速度 ~5.5文字/秒 + バッファ3秒で待機する。
+    宛先付きの伝言は、話者が宛先本人と一致する場合のみ届ける。
     """
     wait_sec = len(main_reply) / 5.5 + 3.0
     await asyncio.sleep(wait_sec)
 
-    messages = sys.modules["main"]._fetch_pending_messages()
+    _main = sys.modules["main"]
+    messages = _main._filter_messages_for_speaker(_main._fetch_pending_messages(), speaker)
     if not messages:
         return
 

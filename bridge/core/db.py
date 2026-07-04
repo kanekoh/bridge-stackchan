@@ -295,6 +295,20 @@ def _fetch_pending_messages() -> list[dict]:
     return [{"id": r[0], "sender": r[1], "sender_slack_id": r[2], "recipient": r[3], "content": r[4]} for r in rows]
 
 
+def _filter_messages_for_speaker(messages: list[dict], speaker: str | None) -> list[dict]:
+    """宛先未設定（全員向け）の伝言と、話者名が recipient と一致する伝言だけを残す。
+
+    話者が特定できていない場合（speaker=None）は、宛先付きの伝言を誤って
+    無関係な人に届けないよう除外する。
+    """
+    def _matches(msg: dict) -> bool:
+        recipient = (msg.get("recipient") or "").strip()
+        if not recipient:
+            return True
+        return bool(speaker) and recipient == speaker.strip()
+    return [m for m in messages if _matches(m)]
+
+
 def _mark_message_delivered(message_id: int) -> None:
     with _db_lock:
         _db_conn.execute(  # type: ignore[union-attr]
