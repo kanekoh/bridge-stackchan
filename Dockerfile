@@ -6,6 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py calendar_sync.py ./
+COPY bridge/ ./bridge/
 COPY config/ ./config/
 COPY templates/ ./templates/
 
