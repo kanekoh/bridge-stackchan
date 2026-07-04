@@ -500,7 +500,7 @@ async def _check_rain_notification() -> None:
         soon_wet = data["soon_wet"]
         sudden   = data["sudden"]
     except Exception as e:
-        logger.warning("rain check error (source=%s): %s", source, e)
+        logger.warning("rain check error (source=%s): %s: %s", source, type(e).__name__, e)
         return
 
     now   = datetime.now(_JST)
