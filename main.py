@@ -170,14 +170,6 @@ app.include_router(_debug_router)
 import bridge.core.audio as _audio_mod
 from bridge.core.audio import get_audio_url_web, resolve_audio_url
 
-
-class SpeakRequest(BaseModel):
-    text: str
-    source: str = "unknown"
-    priority: str = "normal"
-    request_id: str | None = None
-
-
 import bridge.integrations.stt as _stt_mod
 from bridge.integrations.stt import transcribe_audio, identify_speaker
 
@@ -189,6 +181,13 @@ from bridge.integrations.slack import (
     _slack_handle_say, _slack_handle_register, _slack_handle_tell,
     _slack_handle_speak, _parse_duration, _slack_handle_timer, _setup_slack,
 )
+
+
+class SpeakRequest(BaseModel):
+    text: str
+    source: str = "unknown"
+    priority: str = "normal"
+    request_id: str | None = None
 
 
 @app.post("/speak")
@@ -300,8 +299,6 @@ async def ingest_audio(
             raise HTTPException(status_code=502, detail=f"MQTT error: {e}")
         return {"requestId": req_id, "expression": stackchan_expr}
 
-    # sync: return full result in response body without MQTT
-    # 未読伝言があれば、メイン音声の再生推定時間後に MQTT で届ける
     asyncio.create_task(_deliver_pending_messages_after(clean_reply, source, priority, session_key=effective_session_key))
 
     resp: dict = {
