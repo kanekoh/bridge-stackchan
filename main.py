@@ -85,6 +85,7 @@ _slack_app = None  # type: ignore
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _http_client
+    import bridge.core.db as _db_mod
     import bridge.devices.mqtt as _mqtt_mod
     _mqtt_mod.set_main_loop(asyncio.get_running_loop())
     _init_db()
@@ -102,7 +103,7 @@ async def lifespan(app: FastAPI):
     if CALENDAR_ENABLED:
         from calendar_sync import start_sync_thread
         start_sync_thread(
-            _db_conn,
+            _db_mod._db_conn,
             _db_lock,
             GOOGLE_CREDENTIALS_FILE,
             GOOGLE_TOKEN_DIR,
@@ -136,8 +137,8 @@ async def lifespan(app: FastAPI):
         logger.info("Slack Socket Mode handler stopped")
     await _http_client.aclose()
     logger.info("httpx.AsyncClient closed")
-    if _db_conn:
-        _db_conn.close()
+    if _db_mod._db_conn:
+        _db_mod._db_conn.close()
         logger.info("SQLite connection closed")
 
 
