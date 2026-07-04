@@ -11,7 +11,8 @@ from bridge.config import (
     WEATHER_NOTIFY_RAIN, ISS_NOTIFY_ENABLED,
     GOOGLE_GEOLOCATION_API_KEY,
 )
-from bridge.core.db import _db_lock, _db_conn, _get_setting, _set_setting
+import bridge.core.db as _db_mod
+from bridge.core.db import _db_lock, _get_setting, _set_setting
 from bridge.features.quake import _extract_pref, _apply_tsunami_areas_from_pref, _fetch_and_save_timezone
 import bridge.core.http as _http_mod
 
@@ -135,8 +136,8 @@ def api_reset_setting(key: str):
     if key not in _EDITABLE_SETTINGS:
         raise HTTPException(status_code=404, detail=f"設定キー '{key}' は存在しません")
     with _db_lock:
-        _db_conn.execute("DELETE FROM app_settings WHERE key=?", (key,))  # type: ignore[union-attr]
-        _db_conn.commit()
+        _db_mod._db_conn.execute("DELETE FROM app_settings WHERE key=?", (key,))  # type: ignore[union-attr]
+        _db_mod._db_conn.commit()
 
 
 @router.post("/api/geocode")

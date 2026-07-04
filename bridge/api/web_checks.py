@@ -5,7 +5,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from bridge.config import _JST
-from bridge.core.db import _db_lock, _db_conn
+import bridge.core.db as _db_mod
+from bridge.core.db import _db_lock
 from bridge.features.weather.notify import _run_web_check
 
 router = APIRouter()
@@ -34,7 +35,7 @@ class WebCheckUpdate(BaseModel):
 @router.get("/api/web-checks")
 def list_web_checks():
     with _db_lock:
-        rows = _db_conn.execute(
+        rows = _db_mod._db_conn.execute(
             "SELECT id, name, url, check_prompt, enabled, notify_time, notify_expression, mode, "
             "last_checked_at, last_status, last_notified_date, created_at, updated_at "
             "FROM web_checks ORDER BY id"
@@ -58,14 +59,14 @@ def create_web_check(req: WebCheckCreate):
     now = datetime.now(_JST).isoformat()
     try:
         with _db_lock:
-            cursor = _db_conn.execute(
+            cursor = _db_mod._db_conn.execute(
                 "INSERT INTO web_checks "
                 "(name, url, check_prompt, mode, enabled, notify_time, notify_expression, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (req.name, req.url, req.check_prompt, req.mode, int(req.enabled),
                  req.notify_time, req.notify_expression, now, now),
             )
-            _db_conn.commit()
+            _db_mod._db_conn.commit()
             row_id = cursor.lastrowid
     except Exception as e:
         if "UNIQUE" in str(e):
@@ -98,10 +99,10 @@ def update_web_check(wc_id: int, req: WebCheckUpdate):
     fields.append("updated_at = ?"); vals.append(now)
     vals.append(wc_id)
     with _db_lock:
-        c = _db_conn.execute(
+        c = _db_mod._db_conn.execute(
             f"UPDATE web_checks SET {', '.join(fields)} WHERE id = ?", vals
         )
-        _db_conn.commit()
+        _db_mod._db_conn.commit()
     if c.rowcount == 0:
         raise HTTPException(status_code=404, detail=f"id={wc_id} は見つかりません")
     return {"updated": wc_id}
@@ -110,8 +111,8 @@ def update_web_check(wc_id: int, req: WebCheckUpdate):
 @router.delete("/api/web-checks/{wc_id}", status_code=204)
 def delete_web_check(wc_id: int):
     with _db_lock:
-        c = _db_conn.execute("DELETE FROM web_checks WHERE id = ?", (wc_id,))
-        _db_conn.commit()
+        c = _db_mod._db_conn.execute("DELETE FROM web_checks WHERE id = ?", (wc_id,))
+        _db_mod._db_conn.commit()
     if c.rowcount == 0:
         raise HTTPException(status_code=404, detail=f"id={wc_id} は見つかりません")
 
@@ -120,7 +121,7 @@ def delete_web_check(wc_id: int):
 async def run_web_check_now(wc_id: int):
     """手動で今すぐチェックを実行する（read モードは実際に読み上げも行う）。"""
     with _db_lock:
-        row = _db_conn.execute(
+        row = _db_mod._db_conn.execute(
             "SELECT id, name, url, check_prompt, mode, notify_expression FROM web_checks WHERE id = ?", (wc_id,)
         ).fetchone()
     if not row:

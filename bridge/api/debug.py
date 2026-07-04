@@ -15,7 +15,8 @@ from bridge.config import (
     P2PQUAKE_ENABLED, P2PQUAKE_MIN_SCALE, P2PQUAKE_TSUNAMI_TARGET_AREAS,
     ISS_MIN_ELEVATION,
 )
-from bridge.core.db import _db_lock, _db_conn, _get_setting, _set_setting
+import bridge.core.db as _db_mod
+from bridge.core.db import _db_lock, _get_setting, _set_setting
 from bridge.core.expression import _parse_expression, _resolve_expression
 from bridge.core.audio import resolve_audio_url
 from bridge.devices.mqtt import publish_speak
@@ -64,7 +65,7 @@ def healthz():
 def debug_sessions():
     """llm_sessions テーブルの全レコードを返す（デバッグ用）。"""
     with _db_lock:
-        rows = _db_conn.execute(  # type: ignore[union-attr]
+        rows = _db_mod._db_conn.execute(  # type: ignore[union-attr]
             "SELECT session_key, backend, response_id, metadata, updated_at FROM llm_sessions ORDER BY updated_at DESC"
         ).fetchall()
     sessions = [
@@ -166,11 +167,11 @@ async def debug_p2pquake(code: int = Query(551), force: bool = Query(False)):
     if force and event_id:
         # dedup エントリを一時削除して再処理できるようにする
         with _db_lock:
-            _db_conn.execute(  # type: ignore[union-attr]
+            _db_mod._db_conn.execute(  # type: ignore[union-attr]
                 "DELETE FROM earthquake_log WHERE earthquake_id = ? OR earthquake_id LIKE ?",
                 (event_id, event_id + ":%"),
             )
-            _db_conn.commit()  # type: ignore[union-attr]
+            _db_mod._db_conn.commit()  # type: ignore[union-attr]
 
     if code == 551:
         await _handle_earthquake(data)

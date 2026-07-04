@@ -6,7 +6,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from bridge.config import _JST
-from bridge.core.db import _db_lock, _db_conn
+import bridge.core.db as _db_mod
+from bridge.core.db import _db_lock
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -25,7 +26,7 @@ class CalendarSourceCreate(BaseModel):
 def debug_calendar_items():
     """items テーブルの全レコードを返す（デバッグ用）。"""
     with _db_lock:
-        rows = _db_conn.execute(  # type: ignore[union-attr]
+        rows = _db_mod._db_conn.execute(  # type: ignore[union-attr]
             """SELECT id, type, person_name, title, start_at, end_at, due_at,
                       notify_at, all_day, status, synced_at
                FROM items ORDER BY COALESCE(start_at, due_at) ASC"""
@@ -45,7 +46,7 @@ def debug_calendar_items():
 def list_calendar_sources():
     """登録済みカレンダー・タスクリスト一覧。"""
     with _db_lock:
-        rows = _db_conn.execute(  # type: ignore[union-attr]
+        rows = _db_mod._db_conn.execute(  # type: ignore[union-attr]
             "SELECT id, source_type, source_id, person_name, notify, token_key, enabled, created_at "
             "FROM calendar_sources ORDER BY id"
         ).fetchall()
@@ -70,7 +71,7 @@ def create_calendar_source(req: CalendarSourceCreate):
     now = datetime.now(_JST).isoformat()
     try:
         with _db_lock:
-            cursor = _db_conn.execute(  # type: ignore[union-attr]
+            cursor = _db_mod._db_conn.execute(  # type: ignore[union-attr]
                 """
                 INSERT INTO calendar_sources
                     (source_type, source_id, person_name, notify, token_key, enabled, created_at, updated_at)
@@ -78,7 +79,7 @@ def create_calendar_source(req: CalendarSourceCreate):
                 """,
                 (req.source_type, req.source_id, req.person_name, int(req.notify), req.token_key, int(req.enabled), now, now),
             )
-            _db_conn.commit()  # type: ignore[union-attr]
+            _db_mod._db_conn.commit()  # type: ignore[union-attr]
             row_id = cursor.lastrowid
     except Exception as e:
         if "UNIQUE" in str(e):
@@ -95,10 +96,10 @@ def create_calendar_source(req: CalendarSourceCreate):
 def delete_calendar_source(source_id: int):
     """カレンダーソースの登録を削除する。"""
     with _db_lock:
-        c = _db_conn.execute(  # type: ignore[union-attr]
+        c = _db_mod._db_conn.execute(  # type: ignore[union-attr]
             "DELETE FROM calendar_sources WHERE id = ?", (source_id,)
         )
-        _db_conn.commit()  # type: ignore[union-attr]
+        _db_mod._db_conn.commit()  # type: ignore[union-attr]
     if c.rowcount == 0:
         raise HTTPException(status_code=404, detail=f"id={source_id} は見つかりませんでした")
     logger.info("Calendar source deleted: id=%d", source_id)

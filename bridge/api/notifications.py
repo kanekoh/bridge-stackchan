@@ -4,7 +4,8 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 
 from bridge.config import _JST
-from bridge.core.db import _db_lock, _db_conn
+import bridge.core.db as _db_mod
+from bridge.core.db import _db_lock
 from bridge.features.calendar_notify import _fire_calendar_notification
 
 router = APIRouter()
@@ -14,7 +15,7 @@ router = APIRouter()
 def api_list_notifications():
     """カレンダー通知の一覧（通知済み状態つき）を返す。"""
     with _db_lock:
-        rows = _db_conn.execute(  # type: ignore[union-attr]
+        rows = _db_mod._db_conn.execute(  # type: ignore[union-attr]
             """
             SELECT i.id, i.type, i.person_name, i.title,
                    i.start_at, i.end_at, i.due_at, i.notify_at, i.all_day,
@@ -49,24 +50,24 @@ def api_list_notifications():
 async def api_notification_resend(event_id: str):
     """notification_log から削除して即時再通知する。"""
     with _db_lock:
-        row = _db_conn.execute(  # type: ignore[union-attr]
+        row = _db_mod._db_conn.execute(  # type: ignore[union-attr]
             "SELECT id, type, person_name, title FROM items WHERE id = ?", (event_id,)
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="イベントが見つかりません")
     item = {"id": row[0], "type": row[1], "person_name": row[2], "title": row[3]}
     with _db_lock:
-        _db_conn.execute(  # type: ignore[union-attr]
+        _db_mod._db_conn.execute(  # type: ignore[union-attr]
             "DELETE FROM notification_log WHERE event_id = ?", (event_id,)
         )
-        _db_conn.commit()  # type: ignore[union-attr]
+        _db_mod._db_conn.commit()  # type: ignore[union-attr]
     await _fire_calendar_notification(item)
     with _db_lock:
-        _db_conn.execute(  # type: ignore[union-attr]
+        _db_mod._db_conn.execute(  # type: ignore[union-attr]
             "INSERT OR IGNORE INTO notification_log (event_id, notified_at) VALUES (?, ?)",
             (event_id, datetime.now(_JST).isoformat()),
         )
-        _db_conn.commit()  # type: ignore[union-attr]
+        _db_mod._db_conn.commit()  # type: ignore[union-attr]
     return {"ok": True, "event_id": event_id}
 
 
@@ -74,10 +75,10 @@ async def api_notification_resend(event_id: str):
 def api_notification_clear(event_id: str):
     """通知済みフラグを削除する（次の通知ループで再送される）。"""
     with _db_lock:
-        _db_conn.execute(  # type: ignore[union-attr]
+        _db_mod._db_conn.execute(  # type: ignore[union-attr]
             "DELETE FROM notification_log WHERE event_id = ?", (event_id,)
         )
-        _db_conn.commit()  # type: ignore[union-attr]
+        _db_mod._db_conn.commit()  # type: ignore[union-attr]
     return {"ok": True, "event_id": event_id}
 
 
@@ -85,7 +86,7 @@ def api_notification_clear(event_id: str):
 def api_list_messages(status: str = "all"):
     where = "" if status == "all" else ("WHERE delivered_at IS NULL" if status == "pending" else "WHERE delivered_at IS NOT NULL")
     with _db_lock:
-        rows = _db_conn.execute(  # type: ignore[union-attr]
+        rows = _db_mod._db_conn.execute(  # type: ignore[union-attr]
             f"SELECT id, sender, sender_slack_id, recipient, content, created_at, delivered_at FROM messages {where} ORDER BY created_at DESC LIMIT 100"
         ).fetchall()
     return [{"id": r[0], "sender": r[1], "sender_slack_id": r[2], "recipient": r[3],
@@ -95,5 +96,5 @@ def api_list_messages(status: str = "all"):
 @router.delete("/api/messages/{message_id}", status_code=204)
 def api_delete_message(message_id: int):
     with _db_lock:
-        _db_conn.execute("DELETE FROM messages WHERE id=?", (message_id,))  # type: ignore[union-attr]
-        _db_conn.commit()
+        _db_mod._db_conn.execute("DELETE FROM messages WHERE id=?", (message_id,))  # type: ignore[union-attr]
+        _db_mod._db_conn.commit()

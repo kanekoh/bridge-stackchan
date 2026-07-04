@@ -204,14 +204,14 @@ async def _slack_handle_register(ack, body: dict, respond) -> None:
     user_id = body.get("user_id", "")
     now = datetime.now(_JST).isoformat()
     try:
-        with sys.modules["main"]._db_lock:
-            sys.modules["main"]._db_conn.execute(  # type: ignore[union-attr]
+        with sys.modules["bridge.core.db"]._db_lock:
+            sys.modules["bridge.core.db"]._db_conn.execute(  # type: ignore[union-attr]
                 """INSERT INTO family_members (name, slack_user_id, created_at, updated_at)
                    VALUES (?, ?, ?, ?)
                    ON CONFLICT(name) DO UPDATE SET slack_user_id=excluded.slack_user_id, updated_at=excluded.updated_at""",
                 (name, user_id, now, now),
             )
-            sys.modules["main"]._db_conn.commit()
+            sys.modules["bridge.core.db"]._db_conn.commit()
         logger.info("Slack /register: user_id=%s name=%s", user_id, name)
         await respond(f"✅ 「{name}」として登録したよ！")
     except Exception as e:

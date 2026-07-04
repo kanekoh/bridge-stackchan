@@ -933,12 +933,12 @@ async def _run_web_check(
         page_text = parser.get_text(6000)
     except Exception as e:
         logger.warning("Web check fetch failed: name=%s url=%s err=%s", name, expanded_url, e)
-        with sys.modules["main"]._db_lock:
-            sys.modules["main"]._db_conn.execute(
+        with sys.modules["bridge.core.db"]._db_lock:
+            sys.modules["bridge.core.db"]._db_conn.execute(
                 "UPDATE web_checks SET last_checked_at=?, last_status='error' WHERE id=?",
                 (now_jst.isoformat(), wc_id),
             )
-            sys.modules["main"]._db_conn.commit()
+            sys.modules["bridge.core.db"]._db_conn.commit()
         return {"status": "error", "message": str(e)}
 
     if mode == "read":
@@ -958,21 +958,21 @@ async def _run_web_check(
                           source="web_check", priority="normal",
                           request_id=str(uuid.uuid4()), expression=stackchan_expr)
             if today_str:
-                with sys.modules["main"]._db_lock:
-                    sys.modules["main"]._db_conn.execute(
+                with sys.modules["bridge.core.db"]._db_lock:
+                    sys.modules["bridge.core.db"]._db_conn.execute(
                         "UPDATE web_checks SET last_notified_date=?, last_checked_at=?, last_status='read' WHERE id=?",
                         (today_str, now_jst.isoformat(), wc_id),
                     )
-                    sys.modules["main"]._db_conn.commit()
+                    sys.modules["bridge.core.db"]._db_conn.commit()
             logger.info("Web check read done: name=%s", name)
         except Exception:
             logger.exception("Web check read failed: name=%s", name)
-            with sys.modules["main"]._db_lock:
-                sys.modules["main"]._db_conn.execute(
+            with sys.modules["bridge.core.db"]._db_lock:
+                sys.modules["bridge.core.db"]._db_conn.execute(
                     "UPDATE web_checks SET last_checked_at=?, last_status='error' WHERE id=?",
                     (now_jst.isoformat(), wc_id),
                 )
-                sys.modules["main"]._db_conn.commit()
+                sys.modules["bridge.core.db"]._db_conn.commit()
             return {"status": "error"}
         return {"status": "read", "text": clean_text}
 
@@ -993,12 +993,12 @@ async def _run_web_check(
 
     logger.info("Web check result: name=%s status=%s url=%s", name, status, expanded_url)
 
-    with sys.modules["main"]._db_lock:
-        sys.modules["main"]._db_conn.execute(
+    with sys.modules["bridge.core.db"]._db_lock:
+        sys.modules["bridge.core.db"]._db_conn.execute(
             "UPDATE web_checks SET last_checked_at=?, last_status=? WHERE id=?",
             (now_jst.isoformat(), status, wc_id),
         )
-        sys.modules["main"]._db_conn.commit()
+        sys.modules["bridge.core.db"]._db_conn.commit()
 
     if status == "open":
         try:
@@ -1009,12 +1009,12 @@ async def _run_web_check(
             )
             await _iss_speak(speak_prompt, source="web_check")
             if today_str:
-                with sys.modules["main"]._db_lock:
-                    sys.modules["main"]._db_conn.execute(
+                with sys.modules["bridge.core.db"]._db_lock:
+                    sys.modules["bridge.core.db"]._db_conn.execute(
                         "UPDATE web_checks SET last_notified_date=? WHERE id=?",
                         (today_str, wc_id),
                     )
-                    sys.modules["main"]._db_conn.commit()
+                    sys.modules["bridge.core.db"]._db_conn.commit()
             logger.info("Web check notification sent: name=%s", name)
         except Exception:
             logger.exception("Web check speak failed: name=%s", name)
@@ -1032,8 +1032,8 @@ async def _web_check_notify_loop() -> None:
             now_min = now_jst.hour * 60 + now_jst.minute
             today_str = now_jst.strftime("%Y-%m-%d")
 
-            with sys.modules["main"]._db_lock:
-                rows = sys.modules["main"]._db_conn.execute(
+            with sys.modules["bridge.core.db"]._db_lock:
+                rows = sys.modules["bridge.core.db"]._db_conn.execute(
                     "SELECT id, name, url, check_prompt, notify_time, last_notified_date, mode, notify_expression "
                     "FROM web_checks WHERE enabled = 1 AND url != ''"
                 ).fetchall()

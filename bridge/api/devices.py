@@ -5,7 +5,8 @@ from datetime import datetime
 from fastapi import APIRouter, Form, HTTPException, Query
 
 from bridge.config import MQTT_DEVICE_ID, _JST
-from bridge.core.db import _db_lock, _db_conn, _get_setting, _get_display_tz, _get_all_family_members
+import bridge.core.db as _db_mod
+from bridge.core.db import _db_lock, _get_setting, _get_display_tz, _get_all_family_members
 
 router = APIRouter()
 
@@ -15,7 +16,7 @@ def api_device_log(limit: int = Query(default=200, le=500)):
     """スタックちゃんから受信したログを返す。ts_ms を表示用文字列に変換して返す。"""
     tz = _get_display_tz()
     with _db_lock:
-        rows = _db_conn.execute(
+        rows = _db_mod._db_conn.execute(
             "SELECT device_id, level, ts_ms, msg, raw_json, received_at"
             " FROM device_log ORDER BY id DESC LIMIT ?",
             (limit,),
@@ -42,7 +43,7 @@ def api_device_metrics(hours: int = Query(default=2, le=24)):
     """スタックちゃんから受信したメトリクス履歴を返す（最大 hours 時間分）。"""
     limit = hours * 60  # 60秒ごとなので hours*60 件が上限
     with _db_lock:
-        rows = _db_conn.execute(
+        rows = _db_mod._db_conn.execute(
             "SELECT ts_ms, heap_free, heap_min, psram_free,"
             "       stack_speech, stack_playback, stack_netmon, stack_mqtttask"
             " FROM (SELECT * FROM device_metrics WHERE device_id=?"
@@ -78,11 +79,11 @@ def api_create_member(name: str = Form(...), slack_user_id: str = Form(""), mac_
     now = datetime.now(_JST).isoformat()
     try:
         with _db_lock:
-            cur = _db_conn.execute(  # type: ignore[union-attr]
+            cur = _db_mod._db_conn.execute(  # type: ignore[union-attr]
                 "INSERT INTO family_members (name, slack_user_id, mac_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                 (name.strip(), slack_user_id.strip() or None, mac_address.strip() or None, now, now),
             )
-            _db_conn.commit()
+            _db_mod._db_conn.commit()
         return {"id": cur.lastrowid, "name": name}
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=409, detail=f"名前 '{name}' はすでに登録されています")
@@ -92,11 +93,11 @@ def api_create_member(name: str = Form(...), slack_user_id: str = Form(""), mac_
 def api_update_member(member_id: int, name: str = Form(...), slack_user_id: str = Form(""), mac_address: str = Form("")):
     now = datetime.now(_JST).isoformat()
     with _db_lock:
-        cur = _db_conn.execute(  # type: ignore[union-attr]
+        cur = _db_mod._db_conn.execute(  # type: ignore[union-attr]
             "UPDATE family_members SET name=?, slack_user_id=?, mac_address=?, updated_at=? WHERE id=?",
             (name.strip(), slack_user_id.strip() or None, mac_address.strip() or None, now, member_id),
         )
-        _db_conn.commit()
+        _db_mod._db_conn.commit()
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="メンバーが見つかりません")
     return {"id": member_id, "name": name}
@@ -106,7 +107,7 @@ def api_update_member(member_id: int, name: str = Form(...), slack_user_id: str 
 def api_slack_seen_users():
     """family_members に未登録の Slack ユーザー一覧を返す。"""
     with _db_lock:
-        rows = _db_conn.execute(  # type: ignore[union-attr]
+        rows = _db_mod._db_conn.execute(  # type: ignore[union-attr]
             """SELECT s.slack_user_id, s.slack_name, s.last_seen_at
                FROM slack_seen_users s
                WHERE NOT EXISTS (
@@ -120,7 +121,7 @@ def api_slack_seen_users():
 @router.delete("/api/family-members/{member_id}", status_code=204)
 def api_delete_member(member_id: int):
     with _db_lock:
-        cur = _db_conn.execute("DELETE FROM family_members WHERE id=?", (member_id,))  # type: ignore[union-attr]
-        _db_conn.commit()
+        cur = _db_mod._db_conn.execute("DELETE FROM family_members WHERE id=?", (member_id,))  # type: ignore[union-attr]
+        _db_mod._db_conn.commit()
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="メンバーが見つかりません")

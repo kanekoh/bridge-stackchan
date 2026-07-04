@@ -169,44 +169,44 @@ def _scale_to_str(scale: int) -> str:
 
 
 def _eq_already_seen(earthquake_id: str) -> bool:
-    row = sys.modules["main"]._db_conn.execute(
+    row = sys.modules["bridge.core.db"]._db_conn.execute(
         "SELECT 1 FROM earthquake_log WHERE earthquake_id = ?", (earthquake_id,)
     ).fetchone()
     return row is not None
 
 
 def _mark_eq_seen(earthquake_id: str, place: str, scale: int, magnitude: float) -> None:
-    with sys.modules["main"]._db_lock:
-        sys.modules["main"]._db_conn.execute(
+    with sys.modules["bridge.core.db"]._db_lock:
+        sys.modules["bridge.core.db"]._db_conn.execute(
             "INSERT OR IGNORE INTO earthquake_log "
             "(earthquake_id, place, scale, magnitude, notified_at) "
             "VALUES (?, ?, ?, ?, datetime('now'))",
             (earthquake_id, place, scale, magnitude),
         )
-        sys.modules["main"]._db_conn.commit()
+        sys.modules["bridge.core.db"]._db_conn.commit()
 
 
 def _get_tsunami_grade(area: str) -> str | None:
-    row = sys.modules["main"]._db_conn.execute(
+    row = sys.modules["bridge.core.db"]._db_conn.execute(
         "SELECT grade FROM tsunami_state WHERE area = ?", (area,)
     ).fetchone()
     return row[0] if row else None
 
 
 def _save_tsunami_grade(area: str, grade: str) -> None:
-    with sys.modules["main"]._db_lock:
-        sys.modules["main"]._db_conn.execute(
+    with sys.modules["bridge.core.db"]._db_lock:
+        sys.modules["bridge.core.db"]._db_conn.execute(
             "INSERT INTO tsunami_state (area, grade, updated_at) VALUES (?, ?, datetime('now')) "
             "ON CONFLICT(area) DO UPDATE SET grade=excluded.grade, updated_at=excluded.updated_at",
             (area, grade),
         )
-        sys.modules["main"]._db_conn.commit()
+        sys.modules["bridge.core.db"]._db_conn.commit()
 
 
 def _clear_tsunami_state() -> None:
-    with sys.modules["main"]._db_lock:
-        sys.modules["main"]._db_conn.execute("DELETE FROM tsunami_state")
-        sys.modules["main"]._db_conn.commit()
+    with sys.modules["bridge.core.db"]._db_lock:
+        sys.modules["bridge.core.db"]._db_conn.execute("DELETE FROM tsunami_state")
+        sys.modules["bridge.core.db"]._db_conn.commit()
 
 
 def _build_earthquake_fixed_text(data: dict, local_scale: int) -> str:
