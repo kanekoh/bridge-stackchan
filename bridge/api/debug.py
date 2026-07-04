@@ -117,16 +117,23 @@ def debug_connectivity():
     }
 
     checks = []
-    for url_str in [OPENCLAW_BASE_URL, SPEAKER_ID_URL, VOICEVOX_URL]:
+    for label, url_str in [
+        ("OpenClaw Gateway (LLM)", OPENCLAW_BASE_URL),
+        ("Speaker ID", SPEAKER_ID_URL),
+        ("VOICEVOX", VOICEVOX_URL),
+    ]:
         if url_str:
             p = urlparse(url_str)
             default_port = 443 if p.scheme == "https" else 80
-            checks.append((p.hostname, p.port or default_port))
-    checks.append((MQTT_BROKER, MQTT_PORT))
+            checks.append((label, p.hostname, p.port or default_port))
+    checks.append(("MQTT Broker", MQTT_BROKER, MQTT_PORT))
 
-    for host, port in checks:
+    for label, host, port in checks:
         if host:
-            results["tcp"][f"{host}:{port}"] = _tcp_check(host, port)
+            results["tcp"][label] = {
+                "target": f"{host}:{port}",
+                "result": _tcp_check(host, port),
+            }
 
     return results
 

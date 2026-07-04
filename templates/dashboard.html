@@ -81,9 +81,9 @@ async function loadConnectivity() {
   const cards = [];
   try {
     const d = await apiFetch('/debug/connectivity');
-    for (const [target, status] of Object.entries(d.tcp || {})) {
-      const ok = status === 'ok';
-      cards.push(tile(target, badge(ok ? 'good' : 'critical', ok ? '疎通OK' : '疎通NG'), ok ? '' : esc(status)));
+    for (const [label, info] of Object.entries(d.tcp || {})) {
+      const ok = info.result === 'ok';
+      cards.push(tile(label, badge(ok ? 'good' : 'critical', ok ? '疎通OK' : '疎通NG'), ok ? esc(info.target) : `${esc(info.target)} — ${esc(info.result)}`));
     }
   } catch (e) {
     cards.push(tile('外部接続', badge('critical', '取得失敗'), esc(e.message)));

@@ -132,7 +132,7 @@ cp .env.example .env
 
 | 変数 | デフォルト | 説明 |
 |---|---|---|
-| `LLM_BACKEND` | `openclaw` | `"openclaw"` または `"openai"` |
+| `LLM_BACKEND` | `openai` | `"openclaw"` または `"openai"` |
 | `OPENCLAW_BASE_URL` | `http://localhost:18789/v1` | OpenClaw Gateway URL |
 | `OPENCLAW_MODEL` | `openclaw` | エージェント ID |
 | `OPENCLAW_GATEWAY_TOKEN` | *(空)* | Bearer トークン |

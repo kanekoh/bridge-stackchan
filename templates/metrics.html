@@ -63,7 +63,15 @@ function _fmt(bytes) {
 
 function _timeLabel(ts_ms) {
   const d = new Date(ts_ms);
-  return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+  const md = (d.getMonth() + 1) + '/' + d.getDate();
+  const hm = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+  return md + ' ' + hm;
+}
+
+function _fullTimestamp(ts_ms) {
+  const d = new Date(ts_ms);
+  const pad = n => n.toString().padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function _makeChart(id, datasets, opts = {}) {
@@ -95,6 +103,11 @@ function _makeChart(id, datasets, opts = {}) {
   });
 }
 
+// 最新点だけ丸印を出し、グラフ上で「どこが最新か」を分かりやすくする
+function _lastPointRadius(count) {
+  return Array.from({ length: count }, (_, i) => (i === count - 1 ? 4 : 0));
+}
+
 function _renderCharts(points) {
   const labels        = points.map(p => _timeLabel(p.ts_ms));
   const heapFree      = points.map(p => p.heap_free);
@@ -104,21 +117,22 @@ function _renderCharts(points) {
   const stackPlayback = points.map(p => p.stack_playback);
   const stackNetmon   = points.map(p => p.stack_netmon);
   const stackMqtt     = points.map(p => p.stack_mqtttask);
+  const pointRadius   = _lastPointRadius(points.length);
 
   _makeChart('chartHeap', [
-    { label: '空き (free)',   data: heapFree, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.3, pointRadius: 0 },
-    { label: '最小値 (min)',  data: heapMin,  borderColor: '#f97316', backgroundColor: 'transparent', borderDash: [4,3], tension: 0.3, pointRadius: 0 },
+    { label: '空き (free)',   data: heapFree, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.3, pointRadius, pointBackgroundColor: '#3b82f6' },
+    { label: '最小値 (min)',  data: heapMin,  borderColor: '#f97316', backgroundColor: 'transparent', borderDash: [4,3], tension: 0.3, pointRadius, pointBackgroundColor: '#f97316' },
   ], { labels });
 
   _makeChart('chartPsram', [
-    { label: 'PSRAM 空き', data: psramFree, borderColor: '#8b5cf6', backgroundColor: 'rgba(139,92,246,0.1)', fill: true, tension: 0.3, pointRadius: 0 },
+    { label: 'PSRAM 空き', data: psramFree, borderColor: '#8b5cf6', backgroundColor: 'rgba(139,92,246,0.1)', fill: true, tension: 0.3, pointRadius, pointBackgroundColor: '#8b5cf6' },
   ], { labels });
 
   _makeChart('chartStacks', [
-    { label: 'speech',   data: stackSpeech,   borderColor: '#10b981', tension: 0.3, pointRadius: 0 },
-    { label: 'playback', data: stackPlayback,  borderColor: '#f59e0b', tension: 0.3, pointRadius: 0 },
-    { label: 'netmon',   data: stackNetmon,    borderColor: '#6366f1', tension: 0.3, pointRadius: 0 },
-    { label: 'MQTTTask', data: stackMqtt,      borderColor: '#ef4444', tension: 0.3, pointRadius: 0 },
+    { label: 'speech',   data: stackSpeech,   borderColor: '#10b981', tension: 0.3, pointRadius, pointBackgroundColor: '#10b981' },
+    { label: 'playback', data: stackPlayback,  borderColor: '#f59e0b', tension: 0.3, pointRadius, pointBackgroundColor: '#f59e0b' },
+    { label: 'netmon',   data: stackNetmon,    borderColor: '#6366f1', tension: 0.3, pointRadius, pointBackgroundColor: '#6366f1' },
+    { label: 'MQTTTask', data: stackMqtt,      borderColor: '#ef4444', tension: 0.3, pointRadius, pointBackgroundColor: '#ef4444' },
   ], { labels });
 }
 
@@ -133,8 +147,9 @@ async function load() {
     if (points.length > 0) {
       const latest = points[points.length - 1];
       const ago = Math.round((Date.now() - latest.ts_ms) / 1000);
+      const agoLabel = ago < 120 ? ago + '秒前' : Math.round(ago/60) + '分前';
       document.getElementById('metaMeta').textContent =
-        `${points.length} 件 · 最終受信 ${ago < 120 ? ago + '秒前' : Math.round(ago/60) + '分前'} · デバイス: ${data.device_id}`;
+        `${points.length} 件 · 最終受信 ${_fullTimestamp(latest.ts_ms)}（${agoLabel}） · デバイス: ${data.device_id}`;
       _renderCharts(points);
     } else {
       document.getElementById('metaMeta').textContent = 'データなし';

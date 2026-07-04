@@ -61,7 +61,7 @@ SPEAKER_ID_BROWSER_URL = os.getenv("SPEAKER_ID_BROWSER_URL", "")  # ブラウザ
 STT_MODEL = os.getenv("STT_MODEL", "whisper-1")
 
 # LLM バックエンド切り替え
-LLM_BACKEND = os.getenv("LLM_BACKEND", "openclaw")  # "openclaw" or "openai"
+LLM_BACKEND = os.getenv("LLM_BACKEND", "openai")  # "openclaw" or "openai"
 OPENAI_RESPONSES_BASE_URL = os.getenv("OPENAI_RESPONSES_BASE_URL", "https://api.openai.com/v1")
 OPENAI_RESPONSES_MODEL = os.getenv("OPENAI_RESPONSES_MODEL", "gpt-4o-mini")
 _raw_or = os.getenv("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS", "")
