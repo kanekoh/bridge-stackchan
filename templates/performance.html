@@ -13,6 +13,10 @@
     <p id="metaMeta" class="text-xs text-gray-400 mt-0.5">読み込み中...</p>
   </div>
   <div class="flex items-center gap-3">
+    <select id="chartTypeSelect" class="text-sm border rounded px-2 py-1 text-gray-600" onchange="_renderChart(_lastPoints)">
+      <option value="bar">棒グラフ</option>
+      <option value="line">線グラフ</option>
+    </select>
     <select id="hoursSelect" class="text-sm border rounded px-2 py-1 text-gray-600" onchange="load()">
       <option value="1">直近 1 時間</option>
       <option value="6">直近 6 時間</option>
@@ -65,6 +69,14 @@
 function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 let _chart = null;
+let _lastPoints = [];
+
+const _STAGE_COLORS = {
+  STT:      { line: '#3b82f6', fill: 'rgba(59,130,246,0.25)' },
+  LLM:      { line: '#f59e0b', fill: 'rgba(245,158,11,0.25)' },
+  VOICEVOX: { line: '#8b5cf6', fill: 'rgba(139,92,246,0.25)' },
+  MQTT:     { line: '#10b981', fill: 'rgba(16,185,129,0.25)' },
+};
 
 function _timeLabel(ts_ms) {
   const d = new Date(ts_ms);
@@ -74,25 +86,31 @@ function _timeLabel(ts_ms) {
 }
 
 function _renderChart(points) {
-  const labels      = points.map(p => _timeLabel(p.ts_ms));
-  const stt         = points.map(p => p.stt_ms);
-  const llm         = points.map(p => p.llm_ms);
-  const voicevox    = points.map(p => p.voicevox_ms);
-  const mqtt        = points.map(p => p.mqtt_ms);
+  _lastPoints = points;
+  if (!points.length) return;
+  const chartType = document.getElementById('chartTypeSelect').value; // 'bar' | 'line'
+  const isLine = chartType === 'line';
+
+  const labels = points.map(p => _timeLabel(p.ts_ms));
+  const stageData = {
+    STT:      points.map(p => p.stt_ms),
+    LLM:      points.map(p => p.llm_ms),
+    VOICEVOX: points.map(p => p.voicevox_ms),
+    MQTT:     points.map(p => p.mqtt_ms),
+  };
+
+  const datasets = Object.entries(stageData).map(([label, data]) => {
+    const colors = _STAGE_COLORS[label];
+    return isLine
+      ? { label, data, borderColor: colors.line, backgroundColor: colors.fill, fill: true, tension: 0.3, pointRadius: 0 }
+      : { label, data, backgroundColor: colors.line };
+  });
 
   if (_chart) _chart.destroy();
   const ctx = document.getElementById('chartStages').getContext('2d');
   _chart = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [
-        { label: 'STT',      data: stt,      backgroundColor: '#3b82f6' },
-        { label: 'LLM',      data: llm,      backgroundColor: '#f59e0b' },
-        { label: 'VOICEVOX', data: voicevox, backgroundColor: '#8b5cf6' },
-        { label: 'MQTT',     data: mqtt,     backgroundColor: '#10b981' },
-      ],
-    },
+    type: isLine ? 'line' : 'bar',
+    data: { labels, datasets },
     options: {
       animation: false,
       responsive: true,
