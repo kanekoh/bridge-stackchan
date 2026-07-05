@@ -209,7 +209,9 @@ async function loadFamily() {
 
 // ── 会話メモリ（LLM） ──────────────────────────────────
 function _sessionLabel(key) {
-  if (key.startsWith('slack:channel:')) return 'Slackチャンネル';
+  if (key === '__web_check__') return 'Web受付確認';
+  if (key === 'family') return '天気・地震（旧・現在はdefaultに統合済み）';
+  if (key.startsWith('slack:channel:')) return 'Slackチャンネル（旧・現在はdefaultに統合済み）';
   if (key.startsWith('slack:dm:')) return 'SlackのDM';
   return `音声会話（${key}）`;
 }
