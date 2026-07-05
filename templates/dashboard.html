@@ -52,10 +52,10 @@ function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt
 
 function tile(label, valueHtml, subHtml, href) {
   const inner = `
-    <p class="text-xs text-gray-400">${esc(label)}</p>
-    <p class="text-lg font-semibold text-gray-800 mt-0.5">${valueHtml}</p>
-    ${subHtml ? `<p class="text-xs text-gray-500 mt-1">${subHtml}</p>` : ''}`;
-  const cls = "bg-white rounded-xl shadow-sm p-4 block" + (href ? " hover:shadow-md transition-shadow" : "");
+    <p class="text-xs text-gray-400 break-all">${esc(label)}</p>
+    <p class="text-lg font-semibold text-gray-800 mt-0.5 break-all">${valueHtml}</p>
+    ${subHtml ? `<p class="text-xs text-gray-500 mt-1 break-all">${subHtml}</p>` : ''}`;
+  const cls = "bg-white rounded-xl shadow-sm p-4 block min-w-0" + (href ? " hover:shadow-md transition-shadow" : "");
   return href ? `<a href="${href}" class="${cls}">${inner}</a>` : `<div class="${cls}">${inner}</div>`;
 }
 
