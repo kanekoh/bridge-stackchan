@@ -192,6 +192,31 @@ function _sessionLabel(key) {
   return `音声会話（${key}）`;
 }
 
+// 60文字を超える要約は <details> で全文をクリック展開できるようにする
+function _memoryCard(label, value, session) {
+  const summary = session.summary;
+  const agoText = agoLabel(session.updated_at) || esc(session.updated_at);
+  let summaryHtml;
+  if (!summary) {
+    summaryHtml = `<p class="text-gray-500">要約: まだ作成されていません（会話中）</p>`;
+  } else if (summary.length <= 60) {
+    summaryHtml = `<p class="text-gray-500">要約: ${esc(summary)}</p>`;
+  } else {
+    summaryHtml = `
+      <details>
+        <summary class="cursor-pointer text-gray-500 hover:text-gray-700">要約: ${esc(summary.slice(0, 60))}…（クリックで全文表示）</summary>
+        <p class="mt-1 text-gray-600 whitespace-pre-wrap">${esc(summary)}</p>
+      </details>`;
+  }
+  return `
+    <div class="bg-white rounded-xl shadow-sm p-4 min-w-0">
+      <p class="text-xs text-gray-400 break-all">${esc(label)}</p>
+      <p class="text-lg font-semibold text-gray-800 mt-0.5 break-all">${esc(value)}</p>
+      <div class="text-xs mt-1 break-all">${summaryHtml}</div>
+      <p class="text-xs text-gray-400 mt-1">${agoText}更新</p>
+    </div>`;
+}
+
 async function loadMemory() {
   const el = document.getElementById('memoryCards');
   try {
@@ -205,11 +230,7 @@ async function loadMemory() {
     const cards = sessions.map(s => {
       const total = (s.char_count_in || 0) + (s.char_count_out || 0);
       const value = `${total.toLocaleString()} / ${threshold.toLocaleString()} 文字`;
-      const summaryLine = s.summary
-        ? `要約: ${esc(s.summary.slice(0, 60))}${s.summary.length > 60 ? '…' : ''}`
-        : '要約: まだ作成されていません（会話中）';
-      const sub = `${summaryLine}<br>${agoLabel(s.updated_at) || esc(s.updated_at)}更新`;
-      return tile(_sessionLabel(s.session_key), value, sub);
+      return _memoryCard(_sessionLabel(s.session_key), value, s);
     });
     el.innerHTML = cards.join('');
   } catch (e) {

@@ -14,7 +14,7 @@ from bridge.config import (
     OPENCLAW_BASE_URL, OPENCLAW_MODEL, SPEAKER_ID_URL,
     MQTT_BROKER, MQTT_PORT, VOICEVOX_URL,
     P2PQUAKE_ENABLED, P2PQUAKE_MIN_SCALE, P2PQUAKE_TSUNAMI_TARGET_AREAS,
-    ISS_MIN_ELEVATION, SESSION_SUMMARY_THRESHOLD,
+    ISS_MIN_ELEVATION, SESSION_SUMMARY_THRESHOLD, LLM_BACKEND,
 )
 import bridge.core.db as _db_mod
 from bridge.core.db import _db_lock, _get_setting, _set_setting, _fetch_ingest_metrics
@@ -165,12 +165,16 @@ def debug_connectivity():
         "tcp": {},
     }
 
-    checks = []
-    for label, url_str in [
-        ("OpenClaw Gateway (LLM)", OPENCLAW_BASE_URL),
+    # OpenClaw は LLM_BACKEND=openclaw のときだけ使われるため、未選択時は疎通チェック対象から外す
+    _candidates = [
         ("Speaker ID", SPEAKER_ID_URL),
         ("VOICEVOX", VOICEVOX_URL),
-    ]:
+    ]
+    if LLM_BACKEND == "openclaw":
+        _candidates.insert(0, ("OpenClaw Gateway (LLM)", OPENCLAW_BASE_URL))
+
+    checks = []
+    for label, url_str in _candidates:
         if url_str:
             p = urlparse(url_str)
             default_port = 443 if p.scheme == "https" else 80
