@@ -9,7 +9,7 @@ from bridge.core.expression import _STACKCHAN_SYSTEM_PROMPT
 from bridge.core.db import (
     _SessionData, _get_session_data, _save_session, _summarize_and_reset_session,
 )
-from bridge.llm.persona import _build_datetime_context, _build_location_context
+from bridge.llm.persona import _build_datetime_context, _build_location_context, _build_birthday_context
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,9 @@ class OpenClawResponsesBackend:
         loc_ctx = _build_location_context()
         if loc_ctx:
             instructions_parts.append(loc_ctx)
+        birthday_ctx = _build_birthday_context()
+        if birthday_ctx:
+            instructions_parts.append(birthday_ctx)
         if system_prompt_append:
             instructions_parts.append(system_prompt_append)
         tools = list(_TIMER_TOOLS) if use_functions else []
@@ -185,6 +188,9 @@ class OpenAIResponsesBackend:
         loc_ctx = _build_location_context()
         if loc_ctx:
             instructions_parts.append(loc_ctx)
+        birthday_ctx = _build_birthday_context()
+        if birthday_ctx:
+            instructions_parts.append(birthday_ctx)
         if OPENAI_RESPONSES_WEB_SEARCH and OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
             instructions_parts.append(
                 "Web検索ガイドライン:\n"

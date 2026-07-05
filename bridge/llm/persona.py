@@ -26,3 +26,20 @@ def _build_location_context() -> str:
         "「どこにいる？」「ここはどこ？」などの質問にはこの場所名を答えること。"
         "天気・地域の話題・距離感もこの場所を基準にすること。"
     )
+
+
+def _build_birthday_context() -> str:
+    """今日がスタックちゃんの誕生日（設定が MM-DD 形式）と一致する日だけ文脈を返す。
+    誕生日ではない日は空文字にして、普段の会話で毎回意識させないようにする。
+    """
+    birthday = _get_setting("stackchan_birthday", "").strip()
+    if not birthday:
+        return ""
+    today_md = datetime.now(_JST).strftime("%m-%d")
+    if birthday != today_md:
+        return ""
+    return (
+        "【今日はあなたの誕生日です】今日はスタックちゃんの誕生日です。"
+        "話しかけられた流れの中で自然に触れてよいですが、無理に毎回言う必要はありません。"
+        "お祝いされたら素直に喜んでください。"
+    )

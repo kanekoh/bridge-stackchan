@@ -27,7 +27,8 @@ async def _slack_handle_mention(event: dict, say) -> None:
 
     channel = event["channel"]
     user = event.get("user", "")
-    session_key = f"slack:channel:{channel}"
+    # 音声会話・/speak と同じスレッドを共有し、記憶が繋がるようにする
+    session_key = MQTT_DEVICE_ID
     sys.modules["main"]._record_slack_user(user)
     sender_name = sys.modules["main"]._resolve_display_name(user, "")
     logger.info("Slack mention: channel=%s sender=%s text=%s", channel, sender_name or "(unknown)", text[:60])

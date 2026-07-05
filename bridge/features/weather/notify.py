@@ -21,6 +21,7 @@ from bridge.config import (
     WEATHER_RAIN_THRESHOLD, WEATHER_RAIN_SUDDEN_MUL,
     _NOWCAST_ZOOM, _NOWCAST_COLOR_MAP,
     ISS_NOTIFY_ENABLED, ISS_MIN_ELEVATION, ISS_NOTIFY_AHEAD, ISS_TLE_URL,
+    MQTT_DEVICE_ID,
 )
 
 logger = logging.getLogger(__name__)
@@ -576,7 +577,7 @@ async def _rain_llm_comment(sudden: bool, time_label: str, hour: int, unexpected
         f"{hint}、家族への短い一言を1文で。通知文の繰り返し不要。"
     )
     try:
-        comment = await sys.modules["main"].chat_with_llm(prompt, session_key="family", use_functions=False)
+        comment = await sys.modules["main"].chat_with_llm(prompt, session_key=MQTT_DEVICE_ID, use_functions=False)
         await sys.modules["main"]._p2p_speak(comment, source="weather_rain_comment", priority="normal")
     except Exception:
         logger.exception("rain LLM comment failed")
@@ -723,7 +724,7 @@ def _calc_iss_passes(lat: float, lon: float, tle1: str, tle2: str,
 
 async def _iss_speak(prompt: str, source: str) -> None:
     _main = sys.modules["main"]
-    text = await _main.chat_with_llm(prompt, session_key="family", use_functions=False)
+    text = await _main.chat_with_llm(prompt, session_key=MQTT_DEVICE_ID, use_functions=False)
     expr_label, clean_text = _main._parse_expression(text)
     speaker_id, stackchan_expr = _main._resolve_expression(expr_label or "happy")
     audio_url, stream_url = await _main.resolve_audio_url(clean_text, speaker_id)

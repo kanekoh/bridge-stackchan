@@ -23,6 +23,7 @@ os.environ.setdefault("DB_PATH", "/tmp/test-bridge.db")
 
 import main  # noqa: E402  (needed for patch.object on module-level objects)
 from main import (  # noqa: E402
+    _build_birthday_context,
     _build_datetime_context,
     _filter_messages_for_speaker,
     _handle_function_calls,
@@ -779,14 +780,17 @@ class TestChatWithLLM:
 # ── unit: Slack handlers ──────────────────────────────────────────────────────
 
 class TestSlackHandlers:
-    async def test_mention_calls_llm_with_channel_session(self):
+    async def test_mention_calls_llm_with_device_session(self):
+        """チャンネルメンションは音声会話・/speak と同じ session_key（MQTT_DEVICE_ID）を共有する。"""
         say = AsyncMock()
         event = {"text": "<@UBOT123> おはよう", "channel": "C001"}
         with patch("main.chat_with_llm", new_callable=AsyncMock, return_value="おはよう！") as mock_llm:
             await _slack_handle_mention(event, say)
         mock_llm.assert_called_once()
-        assert mock_llm.call_args.kwargs.get("session_key") == "slack:channel:C001" or \
-               mock_llm.call_args.args[3] == "slack:channel:C001"
+        session_key_arg = mock_llm.call_args.kwargs.get("session_key")
+        if session_key_arg is None and len(mock_llm.call_args.args) > 3:
+            session_key_arg = mock_llm.call_args.args[3]
+        assert session_key_arg == main.MQTT_DEVICE_ID
         say.assert_called_once_with("おはよう！")
 
     async def test_mention_does_not_publish_mqtt(self):
@@ -962,6 +966,30 @@ class TestBuildDatetimeContext:
     def test_contains_current_date_label(self):
         result = _build_datetime_context()
         assert "現在の日時" in result
+
+
+# ── unit: _build_birthday_context ──────────────────────────────────────────────
+
+class TestBuildBirthdayContext:
+    def test_empty_when_not_set(self):
+        with patch("bridge.llm.persona._get_setting", return_value=""):
+            assert _build_birthday_context() == ""
+
+    def test_empty_when_not_today(self):
+        with patch("bridge.llm.persona._get_setting", return_value="01-01"):
+            # テスト実行日が偶然 1/1 でない前提（CI は通年で動く想定）
+            from datetime import datetime
+            from bridge.config import _JST
+            if datetime.now(_JST).strftime("%m-%d") != "01-01":
+                assert _build_birthday_context() == ""
+
+    def test_non_empty_when_today_matches(self):
+        from datetime import datetime
+        from bridge.config import _JST
+        today_md = datetime.now(_JST).strftime("%m-%d")
+        with patch("bridge.llm.persona._get_setting", return_value=today_md):
+            result = _build_birthday_context()
+        assert "誕生日" in result
 
 
 # ── unit: _parse_duration ─────────────────────────────────────────────────────
@@ -1210,11 +1238,17 @@ class TestGetPendingMessagesTool:
 # ── unit: /api/device/settings (servoTest) ───────────────────────────────────
 
 class TestDeviceSettingsServoTest:
-    def test_servo_test_true_is_published(self, client):
+    def test_servo_test_x_is_published(self, client):
         with patch("bridge.api.devices.publish_device_set") as mock_pub:
-            resp = client.post("/api/device/settings", json={"servoTest": True})
+            resp = client.post("/api/device/settings", json={"servoTest": "x"})
         assert resp.status_code == 200
-        mock_pub.assert_called_once_with("default", servoTest=True)
+        mock_pub.assert_called_once_with("default", servoTest="x")
+
+    def test_servo_test_y_is_published(self, client):
+        with patch("bridge.api.devices.publish_device_set") as mock_pub:
+            resp = client.post("/api/device/settings", json={"servoTest": "y"})
+        assert resp.status_code == 200
+        mock_pub.assert_called_once_with("default", servoTest="y")
 
     def test_servo_test_false_is_published_not_dropped(self, client):
         """restart と違い、servoTest=False も明示的に送信される（テスト停止のため）。"""
@@ -1222,6 +1256,12 @@ class TestDeviceSettingsServoTest:
             resp = client.post("/api/device/settings", json={"servoTest": False})
         assert resp.status_code == 200
         mock_pub.assert_called_once_with("default", servoTest=False)
+
+    def test_servo_test_invalid_value_rejected(self, client):
+        with patch("bridge.api.devices.publish_device_set") as mock_pub:
+            resp = client.post("/api/device/settings", json={"servoTest": "z"})
+        assert resp.status_code == 422
+        mock_pub.assert_not_called()
 
     def test_servo_test_omitted_is_not_sent(self, client):
         with patch("bridge.api.devices.publish_device_set") as mock_pub:

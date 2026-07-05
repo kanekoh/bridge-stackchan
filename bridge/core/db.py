@@ -210,6 +210,29 @@ def _init_db() -> None:
     _db_conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_ingest_audio_metrics_ts ON ingest_audio_metrics(ts_ms)"
     )
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS location_history (
+            id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+            lat                    REAL NOT NULL,
+            lon                    REAL NOT NULL,
+            title                  TEXT,
+            pref                   TEXT,
+            source                 TEXT,
+            distance_from_home_km  REAL,
+            is_away                INTEGER,
+            created_at             TEXT NOT NULL
+        )
+    """)
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS trips (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            title           TEXT,
+            started_at      TEXT NOT NULL,
+            ended_at        TEXT,
+            max_distance_km REAL,
+            updated_at      TEXT NOT NULL
+        )
+    """)
     _now_iso = datetime.now(_JST).isoformat()
     for _seed in [
         ("リニア体験乗車",
@@ -521,6 +544,114 @@ def _fetch_ingest_metrics(hours: int) -> list[dict]:
             "transcript_chars": r[2], "reply_chars": r[3],
             "stt_ms": r[4], "llm_ms": r[5], "voicevox_ms": r[6],
             "mqtt_ms": r[7], "total_ms": r[8],
+        }
+        for r in rows
+    ]
+
+
+def _save_location_history(
+    *,
+    lat: float,
+    lon: float,
+    title: str,
+    pref: str,
+    source: str,
+    distance_from_home_km: float | None,
+    is_away: bool | None,
+) -> int:
+    now = datetime.now(_JST).isoformat()
+    with _db_lock:
+        cur = _db_conn.execute(  # type: ignore[union-attr]
+            "INSERT INTO location_history"
+            " (lat, lon, title, pref, source, distance_from_home_km, is_away, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (
+                lat, lon, title, pref, source,
+                distance_from_home_km,
+                None if is_away is None else int(is_away),
+                now,
+            ),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+        return cur.lastrowid  # type: ignore[return-value]
+
+
+def _fetch_location_history(limit: int = 200) -> list[dict]:
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT id, lat, lon, title, pref, source, distance_from_home_km, is_away, created_at"
+            " FROM location_history ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "id": r[0], "lat": r[1], "lon": r[2], "title": r[3], "pref": r[4],
+            "source": r[5], "distance_from_home_km": r[6],
+            "is_away": None if r[7] is None else bool(r[7]),
+            "created_at": r[8],
+        }
+        for r in rows
+    ]
+
+
+def _get_active_trip() -> dict | None:
+    """終了していない（ended_at IS NULL）旅行があれば返す。"""
+    with _db_lock:
+        row = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT id, title, started_at, ended_at, max_distance_km, updated_at"
+            " FROM trips WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1",
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0], "title": row[1], "started_at": row[2],
+        "ended_at": row[3], "max_distance_km": row[4], "updated_at": row[5],
+    }
+
+
+def _start_trip(title: str, max_distance_km: float) -> int:
+    now = datetime.now(_JST).isoformat()
+    with _db_lock:
+        cur = _db_conn.execute(  # type: ignore[union-attr]
+            "INSERT INTO trips (title, started_at, ended_at, max_distance_km, updated_at)"
+            " VALUES (?, ?, NULL, ?, ?)",
+            (title, now, max_distance_km, now),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+        return cur.lastrowid  # type: ignore[return-value]
+
+
+def _update_trip_progress(trip_id: int, max_distance_km: float) -> None:
+    now = datetime.now(_JST).isoformat()
+    with _db_lock:
+        _db_conn.execute(  # type: ignore[union-attr]
+            "UPDATE trips SET max_distance_km = MAX(max_distance_km, ?), updated_at = ? WHERE id = ?",
+            (max_distance_km, now, trip_id),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+
+
+def _end_trip(trip_id: int) -> None:
+    now = datetime.now(_JST).isoformat()
+    with _db_lock:
+        _db_conn.execute(  # type: ignore[union-attr]
+            "UPDATE trips SET ended_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, trip_id),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+
+
+def _fetch_trips(limit: int = 50) -> list[dict]:
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT id, title, started_at, ended_at, max_distance_km, updated_at"
+            " FROM trips ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "id": r[0], "title": r[1], "started_at": r[2],
+            "ended_at": r[3], "max_distance_km": r[4], "updated_at": r[5],
         }
         for r in rows
     ]

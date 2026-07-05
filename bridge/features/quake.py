@@ -16,7 +16,7 @@ import aiohttp
 from bridge.config import (
     _JST,
     P2PQUAKE_ENABLED, P2PQUAKE_WS_URL, P2PQUAKE_MIN_SCALE,
-    P2PQUAKE_TSUNAMI_TARGET_AREAS,
+    P2PQUAKE_TSUNAMI_TARGET_AREAS, MQTT_DEVICE_ID,
 )
 
 logger = logging.getLogger(__name__)
@@ -342,7 +342,7 @@ async def _earthquake_llm_comment(place: str, scale_str: str, mag: float, dist_k
         "遠い地震なら安心させる言葉を、近い地震や大きな地震なら気をつけるよう促してください。"
     )
     try:
-        comment = await sys.modules["main"].chat_with_llm(prompt, session_key="family", use_functions=False)
+        comment = await sys.modules["main"].chat_with_llm(prompt, session_key=MQTT_DEVICE_ID, use_functions=False)
         await _p2p_speak(comment, source="earthquake_comment", priority="normal")
     except Exception:
         logger.exception("earthquake LLM comment failed")
@@ -404,7 +404,7 @@ async def _tsunami_llm_comment(fixed_text: str, cancelled: bool) -> None:
             f"以下の津波警報をお知らせしました。緊急の一言コメントを1文で。情報の繰り返し不要。\n{fixed_text}"
         )
     try:
-        comment = await sys.modules["main"].chat_with_llm(prompt, session_key="family", use_functions=False)
+        comment = await sys.modules["main"].chat_with_llm(prompt, session_key=MQTT_DEVICE_ID, use_functions=False)
         await _p2p_speak(comment, source="tsunami_comment", priority="normal")
     except Exception:
         logger.exception("tsunami LLM comment failed")
@@ -429,7 +429,7 @@ async def _unknown_p2p_llm(data: dict) -> None:
         f"{json.dumps(data, ensure_ascii=False, indent=2)}"
     )
     try:
-        text = await sys.modules["main"].chat_with_llm(prompt, session_key="family", use_functions=False)
+        text = await sys.modules["main"].chat_with_llm(prompt, session_key=MQTT_DEVICE_ID, use_functions=False)
         await _p2p_speak(text, source="p2pquake_unknown", priority="normal")
     except Exception:
         logger.exception("unknown p2p LLM failed")

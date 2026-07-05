@@ -31,7 +31,7 @@ from bridge.core.db import (
     _save_ingest_metrics,
 )
 
-from bridge.llm.persona import _build_datetime_context, _build_location_context
+from bridge.llm.persona import _build_datetime_context, _build_location_context, _build_birthday_context
 
 from bridge.llm.backends import (
     LLMBackend, OpenClawResponsesBackend, OpenAIResponsesBackend,

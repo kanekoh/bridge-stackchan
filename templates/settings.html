@@ -42,6 +42,18 @@
   <p id="locationMsg" class="text-sm mt-2"></p>
 </div>
 
+<!-- 旅行検出（家の設定） -->
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">旅行検出（家の設定）</h2>
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+  <p class="text-xs text-gray-400">
+    「家」を基準に、大きく離れた場所を検知すると旅行として記録し、スタックちゃんが気づいて一言喋ります。
+    位置の履歴（設置場所の更新履歴）から選んでください。詳しい記録は <a href="/ui/travel" class="text-blue-500 hover:underline">旅の記録</a> ページへ。
+  </p>
+  <p class="text-sm mt-3">現在の「家」: <span id="homeCurrentLabel" class="font-medium text-gray-800">読み込み中...</span></p>
+  <div id="homeCandidates" class="mt-3 space-y-2"></div>
+  <p id="homeMsg" class="text-sm mt-2"></p>
+</div>
+
 <!-- その他の設定 -->
 <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">その他の設定</h2>
 <div id="settingsList" class="space-y-4"></div>
@@ -232,7 +244,58 @@
     } catch {}
   }
 
+  // ── 旅行検出（家の設定） ──────────────────────────
+  async function setHome(lat, lon, title) {
+    const msg = document.getElementById('homeMsg');
+    try {
+      await apiFetch('/api/location/set-home', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lat, lon, title }),
+      });
+      msg.textContent = `✅ 「${title}」を家に設定しました`;
+      msg.className = 'text-sm mt-2 text-green-600';
+      loadHomeSection();
+    } catch (e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.className = 'text-sm mt-2 text-red-500';
+    }
+  }
+
+  async function loadHomeSection() {
+    const label = document.getElementById('homeCurrentLabel');
+    const list  = document.getElementById('homeCandidates');
+    try {
+      const loc = await apiFetch('/api/location');
+      label.textContent = loc.home && loc.home.title ? loc.home.title : '未設定';
+
+      const { history } = await apiFetch('/api/location/history?limit=200');
+      // 同じ場所名の履歴をまとめて候補にする（新しい記録を代表値として使う）
+      const byTitle = new Map();
+      for (const h of history) {
+        if (!h.title || byTitle.has(h.title)) continue;
+        byTitle.set(h.title, h);
+      }
+      const candidates = [...byTitle.values()].slice(0, 8);
+      if (!candidates.length) {
+        list.innerHTML = '<p class="text-xs text-gray-400">まだ位置の履歴がありません。上の「設置場所」を一度更新すると候補に出ます。</p>';
+        return;
+      }
+      list.innerHTML = candidates.map(h => {
+        const isHome = loc.home && loc.home.title === h.title;
+        return `
+          <div class="flex items-center justify-between text-sm border border-gray-100 rounded px-3 py-2">
+            <span class="text-gray-700">${h.title}${isHome ? ' <span class="text-xs text-green-600">（現在の家）</span>' : ''}</span>
+            ${isHome ? '' : `<button onclick="setHome(${h.lat}, ${h.lon}, '${h.title.replace(/'/g, "\\'")}')" class="text-xs bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded whitespace-nowrap">家にする</button>`}
+          </div>`;
+      }).join('');
+    } catch (e) {
+      list.innerHTML = `<p class="text-xs text-red-500">読み込み失敗: ${e.message}</p>`;
+    }
+  }
+
   loadSettings();
   loadCurrentLocation();
+  loadHomeSection();
 </script>
 {% endblock %}

@@ -12,8 +12,12 @@ from bridge.config import (
     GOOGLE_GEOLOCATION_API_KEY,
 )
 import bridge.core.db as _db_mod
-from bridge.core.db import _db_lock, _get_setting, _set_setting
+from bridge.core.db import (
+    _db_lock, _get_setting, _set_setting,
+    _fetch_location_history, _fetch_trips,
+)
 from bridge.features.quake import _extract_pref, _apply_tsunami_areas_from_pref, _fetch_and_save_timezone
+from bridge.features.travel import _record_location_and_check_travel
 import bridge.core.http as _http_mod
 
 logger = logging.getLogger(__name__)
@@ -85,6 +89,14 @@ _EDITABLE_SETTINGS = {
             {"value": "amedas+openmeteo", "label": "AMeDAS + Open-Meteo（推奨・公式・10分更新）"},
             {"value": "openmeteo",        "label": "Open-Meteo のみ（15分更新）"},
         ],
+    },
+    "stackchan_birthday": {
+        "label": "スタックちゃんの誕生日",
+        "description": (
+            "MM-DD 形式で入力（例: 04-01）。この日だけシステムプロンプトに"
+            "「今日は誕生日」と伝わり、それ以外の日は普段どおり会話します。"
+        ),
+        "env_fallback": lambda: "",
     },
     "iss_notify_enabled": {
         "label": "ISS 通過通知",
@@ -166,19 +178,25 @@ async def api_geocode(address: str = Form(...)):
     _set_setting("location_title",   title)
     _apply_tsunami_areas_from_pref(pref)
     asyncio.create_task(_fetch_and_save_timezone(lat, lon))
+    asyncio.create_task(_record_location_and_check_travel(lat, lon, title, pref, "manual_geocode"))
 
     return {"lat": lat, "lon": lon, "pref": pref, "title": title}
 
 
 @router.get("/api/location")
 def api_get_location():
-    """現在の設置場所設定を返す。"""
+    """現在の設置場所設定と、旅行検出の基準になっている「家」の設定を返す。"""
     return {
         "address": _get_setting("location_address", ""),
         "lat":     _get_setting("location_lat", ""),
         "lon":     _get_setting("location_lon", ""),
         "pref":    _get_setting("location_pref", ""),
         "title":   _get_setting("location_title", ""),
+        "home": {
+            "lat":   _get_setting("location_home_lat", ""),
+            "lon":   _get_setting("location_home_lon", ""),
+            "title": _get_setting("location_home_title", ""),
+        },
     }
 
 
@@ -229,7 +247,7 @@ def _scan_local_wifi() -> list[dict]:
     return aps
 
 
-async def _geolocate_and_save(wifi_aps: list[dict], consider_ip: bool = True) -> dict:
+async def _geolocate_and_save(wifi_aps: list[dict], consider_ip: bool = True, source: str = "device_wifi") -> dict:
     """Google Geolocation API + Nominatim で位置を解決して app_settings に保存する。"""
     if not GOOGLE_GEOLOCATION_API_KEY:
         raise HTTPException(status_code=503, detail="GOOGLE_GEOLOCATION_API_KEY が設定されていません")
@@ -267,6 +285,7 @@ async def _geolocate_and_save(wifi_aps: list[dict], consider_ip: bool = True) ->
     _set_setting("location_title", title)
     _apply_tsunami_areas_from_pref(pref)
     asyncio.create_task(_fetch_and_save_timezone(lat, lon))
+    asyncio.create_task(_record_location_and_check_travel(lat, lon, title, pref, source))
 
     logger.info("location updated: lat=%.4f lon=%.4f pref=%s title=%s acc=%.0fm",
                 lat, lon, pref, title, accuracy)
@@ -296,6 +315,7 @@ async def api_location_from_coords(lat: float = Form(...), lon: float = Form(...
     _set_setting("location_title", title)
     _apply_tsunami_areas_from_pref(pref)
     asyncio.create_task(_fetch_and_save_timezone(lat, lon))
+    asyncio.create_task(_record_location_and_check_travel(lat, lon, title, pref, "browser"))
     logger.info("location set from browser coords: lat=%.4f lon=%.4f pref=%s", lat, lon, pref)
     return {"lat": lat, "lon": lon, "pref": pref, "title": title}
 
@@ -303,7 +323,7 @@ async def api_location_from_coords(lat: float = Form(...), lon: float = Form(...
 @router.post("/api/location/update")
 async def api_location_update(req: LocationUpdateRequest):
     """Stack-chan から Wi-Fi スキャン結果を受け取り位置を更新する。"""
-    return await _geolocate_and_save(req.wifiAccessPoints, req.considerIp)
+    return await _geolocate_and_save(req.wifiAccessPoints, req.considerIp, source="device_wifi")
 
 
 @router.post("/api/location/scan")
@@ -311,4 +331,32 @@ async def api_location_scan():
     """ラズパイ自身が Wi-Fi をスキャンして位置を更新する（WebUI テスト用）。"""
     aps = _scan_local_wifi()
     logger.info("local wifi scan: %d APs found", len(aps))
-    return await _geolocate_and_save(aps, consider_ip=True)
+    return await _geolocate_and_save(aps, consider_ip=True, source="pi_wifi_scan")
+
+
+@router.get("/api/location/history")
+def api_location_history(limit: int = 200):
+    """位置履歴を新しい順に返す（旅行検出のデバッグ・「家」選択用）。"""
+    return {"history": _fetch_location_history(limit)}
+
+
+class SetHomeRequest(BaseModel):
+    lat: float
+    lon: float
+    title: str = ""
+
+
+@router.post("/api/location/set-home")
+def api_location_set_home(req: SetHomeRequest):
+    """位置履歴の中から選んだ地点を「家」として設定する。旅行検出の基準点になる。"""
+    _set_setting("location_home_lat",   str(req.lat))
+    _set_setting("location_home_lon",   str(req.lon))
+    _set_setting("location_home_title", req.title)
+    logger.info("home location set: lat=%.4f lon=%.4f title=%s", req.lat, req.lon, req.title)
+    return {"lat": req.lat, "lon": req.lon, "title": req.title}
+
+
+@router.get("/api/travel/trips")
+def api_travel_trips(limit: int = 50):
+    """旅行（家から離れていた期間）の履歴を新しい順に返す。"""
+    return {"trips": _fetch_trips(limit)}

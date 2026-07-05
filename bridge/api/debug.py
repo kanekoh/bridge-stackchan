@@ -14,7 +14,7 @@ from bridge.config import (
     OPENCLAW_BASE_URL, OPENCLAW_MODEL, SPEAKER_ID_URL,
     MQTT_BROKER, MQTT_PORT, VOICEVOX_URL,
     P2PQUAKE_ENABLED, P2PQUAKE_MIN_SCALE, P2PQUAKE_TSUNAMI_TARGET_AREAS,
-    ISS_MIN_ELEVATION, SESSION_SUMMARY_THRESHOLD, LLM_BACKEND,
+    ISS_MIN_ELEVATION, SESSION_SUMMARY_THRESHOLD, LLM_BACKEND, MQTT_DEVICE_ID,
 )
 import bridge.core.db as _db_mod
 from bridge.core.db import _db_lock, _get_setting, _set_setting, _fetch_ingest_metrics
@@ -359,7 +359,7 @@ async def api_debug_weather_speak():
         f" / 風速: {cur.get('windspeed_10m')}km/h\n\n"
         "この天気情報をもとに、家族に向けて短く天気をお知らせしてください。"
     )
-    reply = await chat_with_llm(prompt, session_key="family", use_functions=False)
+    reply = await chat_with_llm(prompt, session_key=MQTT_DEVICE_ID, use_functions=False)
     _, clean = _parse_expression(reply)
     speaker_id, expr = _resolve_expression("neutral")
     audio_url, stream_url = await resolve_audio_url(clean, speaker_id)

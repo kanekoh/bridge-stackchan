@@ -124,6 +124,28 @@ async function loadDisaster() {
     loc.configured ? esc(loc.title || loc.pref) : badge('neutral', '未設定'),
     loc.configured ? '' : `<a href="/ui/settings" class="text-blue-500 hover:underline">設定画面で登録</a>`));
 
+  try {
+    const [locData, tripsData] = await Promise.all([
+      apiFetch('/api/location'),
+      apiFetch('/api/travel/trips?limit=1'),
+    ]);
+    const homeTitle = locData.home && locData.home.title;
+    const latest = (tripsData.trips || [])[0];
+    const ongoing = latest && !latest.ended_at;
+    if (!homeTitle) {
+      cards.push(tile('旅行状況', badge('neutral', '「家」未設定'),
+        `<a href="/ui/settings" class="text-blue-500 hover:underline">設定画面で登録</a>`, '/ui/travel'));
+    } else if (ongoing) {
+      cards.push(tile('旅行状況', badge('warning', '旅行中'),
+        `${esc(latest.title || '不明な場所')}・家から${latest.max_distance_km != null ? Math.round(latest.max_distance_km) + 'km' : ''}`,
+        '/ui/travel'));
+    } else {
+      cards.push(tile('旅行状況', badge('good', '家にいます'), esc(homeTitle), '/ui/travel'));
+    }
+  } catch (e) {
+    cards.push(tile('旅行状況', badge('critical', '取得失敗'), esc(e.message)));
+  }
+
   if (coverage.weather.enabled) {
     try {
       const w = await apiFetch('/api/debug/weather');

@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block title %}旅の記録{% endblock %}
+{% block nav_travel %}font-semibold text-blue-600{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>#map { height: 400px; }</style>
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-xl font-bold text-gray-800">旅の記録</h1>
+    <p class="text-xs text-gray-400 mt-0.5">スタックちゃんが「家」から離れた場所にいることに気づいた記録です。</p>
+  </div>
+  <button onclick="load()" class="text-sm text-gray-400 hover:text-gray-600">↻ 更新</button>
+</div>
+
+<div class="bg-white rounded-xl shadow-sm p-4 mb-6">
+  <h2 class="text-sm font-semibold text-gray-700 mb-2">行ったことがある場所</h2>
+  <div id="map" class="rounded-lg overflow-hidden border border-gray-100"></div>
+  <p id="mapMsg" class="text-xs text-gray-400 mt-2"></p>
+</div>
+
+<div class="bg-white rounded-xl shadow-sm p-4 mb-6">
+  <h2 class="text-sm font-semibold text-gray-700 mb-3">旅行履歴</h2>
+  <div id="tripsList" class="space-y-2">
+    <p class="text-sm text-gray-400">読み込み中...</p>
+  </div>
+</div>
+
+<div class="bg-white rounded-xl shadow-sm p-4 overflow-x-auto">
+  <h2 class="text-sm font-semibold text-gray-700 mb-1">位置の記録（いつ・どこにいたか）</h2>
+  <p class="text-xs text-gray-400 mb-3">設置場所が更新されるたびの記録です。「家」も含めた全履歴を新しい順に表示します。</p>
+  <table class="w-full text-xs whitespace-nowrap">
+    <thead>
+      <tr class="text-left text-gray-400 border-b border-gray-100">
+        <th class="py-2 pr-4">日時</th>
+        <th class="py-2 pr-4">場所</th>
+        <th class="py-2 pr-4">家からの距離</th>
+        <th class="py-2 pr-4">取得元</th>
+      </tr>
+    </thead>
+    <tbody id="historyBody">
+      <tr><td colspan="4" class="py-3 text-gray-400">読み込み中...</td></tr>
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function fmtDateTime(iso) {
+  if (!iso) return null;
+  return iso.slice(0, 16).replace('T', ' ');
+}
+
+function fmtDuration(startIso, endIso) {
+  const start = new Date(startIso);
+  const end = endIso ? new Date(endIso) : new Date();
+  const hours = (end - start) / 3600000;
+  if (hours < 1) return `${Math.round(hours * 60)}分`;
+  if (hours < 24) return `${hours.toFixed(1)}時間`;
+  return `${(hours / 24).toFixed(1)}日`;
+}
+
+function renderTrips(trips) {
+  const el = document.getElementById('tripsList');
+  if (!trips.length) {
+    el.innerHTML = '<p class="text-sm text-gray-400">まだ旅行の記録がありません。「家」を設定すると、離れた場所に気づいたときに記録が始まります（設定画面）。</p>';
+    return;
+  }
+  el.innerHTML = trips.map(t => `
+    <div class="flex items-center justify-between border border-gray-100 rounded-lg px-4 py-3">
+      <div>
+        <p class="text-sm font-medium text-gray-800">
+          ${esc(t.title || '不明な場所')}
+          ${t.ended_at ? '' : '<span class="ml-2 text-xs bg-blue-50 text-blue-600 rounded-full px-2 py-0.5">移動中</span>'}
+        </p>
+        <p class="text-xs text-gray-400 mt-0.5">
+          ${fmtDateTime(t.started_at)} 〜 ${t.ended_at ? fmtDateTime(t.ended_at) : '（現在）'}
+          ・${fmtDuration(t.started_at, t.ended_at)}
+        </p>
+      </div>
+      <div class="text-xs text-gray-500 whitespace-nowrap">
+        家から ${t.max_distance_km != null ? Math.round(t.max_distance_km) + 'km' : '—'}
+      </div>
+    </div>
+  `).join('');
+}
+
+let _map = null;
+
+function renderMap(history, home) {
+  const msg = document.getElementById('mapMsg');
+  // 同じ場所名をまとめて、訪問回数・最終訪問日を集計する
+  const byTitle = new Map();
+  for (const h of history) {
+    if (!h.title) continue;
+    if (!byTitle.has(h.title)) {
+      byTitle.set(h.title, { ...h, count: 0, lastSeen: h.created_at });
+    }
+    const entry = byTitle.get(h.title);
+    entry.count += 1;
+    if (h.created_at > entry.lastSeen) entry.lastSeen = h.created_at;
+  }
+  const places = [...byTitle.values()];
+  if (!places.length) {
+    msg.textContent = 'まだ位置の履歴がありません。';
+    return;
+  }
+
+  if (_map) _map.remove();
+  _map = L.map('map').setView([places[0].lat, places[0].lon], 6);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 18,
+  }).addTo(_map);
+
+  const homeIcon = L.divIcon({
+    html: '<div style="font-size:22px">🏠</div>', className: '', iconSize: [24, 24], iconAnchor: [12, 12],
+  });
+  const visitIcon = L.divIcon({
+    html: '<div style="font-size:20px">📍</div>', className: '', iconSize: [22, 22], iconAnchor: [11, 22],
+  });
+
+  const bounds = [];
+  for (const p of places) {
+    const isHome = home && home.title === p.title;
+    const marker = L.marker([p.lat, p.lon], { icon: isHome ? homeIcon : visitIcon }).addTo(_map);
+    marker.bindPopup(
+      `<b>${esc(p.title)}</b>${isHome ? '（家）' : ''}<br>` +
+      `訪問記録: ${p.count}回<br>最終: ${fmtDateTime(p.lastSeen)}`
+    );
+    bounds.push([p.lat, p.lon]);
+  }
+  if (bounds.length > 1) _map.fitBounds(bounds, { padding: [30, 30] });
+  msg.textContent = `${places.length} 箇所を記録しています。`;
+}
+
+const _SOURCE_LABEL = {
+  device_wifi:    'Stack-chan Wi-Fi',
+  pi_wifi_scan:   'ラズパイ Wi-Fi',
+  browser:        'ブラウザ位置情報',
+  manual_geocode: '住所入力',
+};
+
+function renderHistoryTable(history, home) {
+  const body = document.getElementById('historyBody');
+  if (!history.length) {
+    body.innerHTML = '<tr><td colspan="4" class="py-3 text-gray-400">まだ記録がありません。</td></tr>';
+    return;
+  }
+  body.innerHTML = history.map(h => {
+    const isHome = home && home.title === h.title;
+    return `
+      <tr class="border-b border-gray-50">
+        <td class="py-2 pr-4 text-gray-500">${fmtDateTime(h.created_at)}</td>
+        <td class="py-2 pr-4 text-gray-700">${esc(h.title || '不明')}${isHome ? ' <span class="text-xs text-green-600">（家）</span>' : ''}</td>
+        <td class="py-2 pr-4 text-gray-500">${h.distance_from_home_km != null ? Math.round(h.distance_from_home_km) + 'km' : '—'}</td>
+        <td class="py-2 pr-4 text-gray-400">${esc(_SOURCE_LABEL[h.source] || h.source || '—')}</td>
+      </tr>`;
+  }).join('');
+}
+
+async function load() {
+  try {
+    const [tripsData, historyData, locData] = await Promise.all([
+      apiFetch('/api/travel/trips?limit=50'),
+      apiFetch('/api/location/history?limit=500'),
+      apiFetch('/api/location'),
+    ]);
+    renderTrips(tripsData.trips || []);
+    renderMap(historyData.history || [], locData.home);
+    renderHistoryTable(historyData.history || [], locData.home);
+  } catch (e) {
+    document.getElementById('tripsList').innerHTML = `<p class="text-sm text-red-500">読み込み失敗: ${esc(e.message)}</p>`;
+  }
+}
+
+load();
+</script>
+{% endblock %}
