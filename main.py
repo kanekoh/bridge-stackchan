@@ -167,7 +167,7 @@ app.include_router(_calendar_router)
 from bridge.api.web_checks import router as _web_checks_router
 app.include_router(_web_checks_router)
 
-from bridge.api.debug import router as _debug_router
+from bridge.api.debug import router as _debug_router, _WMO_DESC
 app.include_router(_debug_router)
 
 import bridge.core.audio as _audio_mod
