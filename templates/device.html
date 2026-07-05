@@ -59,6 +59,20 @@
   <p id="settingsMsg" class="text-sm"></p>
 </div>
 
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">サーボテスト</h2>
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+  <p class="text-xs text-gray-400 mb-3">首振りサーボの動作確認モード。開始するとデバイス側でテスト動作を続け、停止するまで解除されません。</p>
+  <div class="flex gap-3">
+    <button onclick="setServoTest(true)" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">
+      テスト開始
+    </button>
+    <button onclick="setServoTest(false)" class="bg-gray-500 hover:bg-gray-600 text-white text-sm px-4 py-2 rounded">
+      テスト終了
+    </button>
+  </div>
+  <p id="servoTestMsg" class="text-sm mt-2"></p>
+</div>
+
 <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">再起動</h2>
 <div class="bg-white rounded-lg border border-gray-200 p-5">
   <button onclick="restartDevice()" class="bg-red-500 hover:bg-red-600 text-white text-sm px-4 py-2 rounded">
@@ -144,6 +158,22 @@ async function submitSettings() {
       body: JSON.stringify(payload),
     });
     msg.textContent = '✅ 送信しました（反映まで最大30秒）';
+    msg.className = 'text-sm text-green-600';
+  } catch (e) {
+    msg.textContent = '❌ ' + e.message;
+    msg.className = 'text-sm text-red-500';
+  }
+}
+
+async function setServoTest(start) {
+  const msg = document.getElementById('servoTestMsg');
+  try {
+    await apiFetch('/api/device/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ servoTest: start }),
+    });
+    msg.textContent = start ? '✅ サーボテストを開始しました' : '✅ サーボテストを終了しました';
     msg.className = 'text-sm text-green-600';
   } catch (e) {
     msg.textContent = '❌ ' + e.message;

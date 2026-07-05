@@ -191,6 +191,25 @@ def _init_db() -> None:
         "CREATE INDEX IF NOT EXISTS idx_device_metrics_device_ts"
         " ON device_metrics(device_id, ts_ms)"
     )
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS ingest_audio_metrics (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id        TEXT,
+            ts_ms             INTEGER NOT NULL,
+            mode              TEXT,
+            transcript_chars  INTEGER,
+            reply_chars       INTEGER,
+            stt_ms            INTEGER,
+            llm_ms            INTEGER,
+            voicevox_ms       INTEGER,
+            mqtt_ms           INTEGER,
+            total_ms          INTEGER,
+            created_at        TEXT NOT NULL
+        )
+    """)
+    _db_conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ingest_audio_metrics_ts ON ingest_audio_metrics(ts_ms)"
+    )
     _now_iso = datetime.now(_JST).isoformat()
     for _seed in [
         ("リニア体験乗車",
@@ -451,3 +470,57 @@ async def _summarize_and_reset_session(session_key: str, previous_response_id: s
         "Session summarized and reset: session_key=%s summary_len=%d",
         session_key, summary_len,
     )
+
+
+def _save_ingest_metrics(
+    *,
+    request_id: str,
+    mode: str,
+    transcript_chars: int,
+    reply_chars: int,
+    stt_ms: int,
+    llm_ms: int,
+    voicevox_ms: int,
+    mqtt_ms: int | None,
+    total_ms: int,
+) -> None:
+    """/ingest-audio の各ステージ所要時間を記録する（直近 5000 件を保持）。"""
+    now = datetime.now(_JST)
+    with _db_lock:
+        _db_conn.execute(  # type: ignore[union-attr]
+            "INSERT INTO ingest_audio_metrics"
+            " (request_id, ts_ms, mode, transcript_chars, reply_chars,"
+            "  stt_ms, llm_ms, voicevox_ms, mqtt_ms, total_ms, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                request_id, int(now.timestamp() * 1000), mode,
+                transcript_chars, reply_chars,
+                stt_ms, llm_ms, voicevox_ms, mqtt_ms, total_ms,
+                now.isoformat(),
+            ),
+        )
+        _db_conn.execute(
+            "DELETE FROM ingest_audio_metrics WHERE id NOT IN"
+            " (SELECT id FROM ingest_audio_metrics ORDER BY id DESC LIMIT 5000)"
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+
+
+def _fetch_ingest_metrics(hours: int) -> list[dict]:
+    cutoff_ms = int((datetime.now(_JST) - timedelta(hours=hours)).timestamp() * 1000)
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT ts_ms, mode, transcript_chars, reply_chars,"
+            "       stt_ms, llm_ms, voicevox_ms, mqtt_ms, total_ms"
+            " FROM ingest_audio_metrics WHERE ts_ms >= ? ORDER BY ts_ms ASC",
+            (cutoff_ms,),
+        ).fetchall()
+    return [
+        {
+            "ts_ms": r[0], "mode": r[1],
+            "transcript_chars": r[2], "reply_chars": r[3],
+            "stt_ms": r[4], "llm_ms": r[5], "voicevox_ms": r[6],
+            "mqtt_ms": r[7], "total_ms": r[8],
+        }
+        for r in rows
+    ]

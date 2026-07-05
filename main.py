@@ -1,6 +1,7 @@
 from bridge.config import *  # noqa: F401,F403
 
 import logging
+import time
 logger = logging.getLogger(__name__)
 
 from bridge.core.expression import (
@@ -27,6 +28,7 @@ from bridge.core.db import (
     _get_all_family_members, _resolve_display_name,
     _record_slack_user, _save_message,
     _fetch_pending_messages, _mark_message_delivered, _filter_messages_for_speaker,
+    _save_ingest_metrics,
 )
 
 from bridge.llm.persona import _build_datetime_context, _build_location_context
@@ -249,6 +251,8 @@ async def ingest_audio(
         filename, len(audio_bytes), req_id, mode, effective_session_key,
     )
 
+    _t0 = time.monotonic()
+
     try:
         transcript, speaker = await asyncio.gather(
             transcribe_audio(audio_bytes, filename),
@@ -263,6 +267,7 @@ async def ingest_audio(
             except Exception as speak_e:
                 logger.error("STT error fallback speak failed: %s", speak_e)
         raise HTTPException(status_code=502, detail=f"STT error: {e}")
+    _t_stt = time.monotonic()
     logger.info("Transcript: request_id=%s text=%s speaker=%s", req_id, transcript[:80], speaker)
 
     try:
@@ -282,6 +287,7 @@ async def ingest_audio(
             except Exception as speak_e:
                 logger.error("LLM error fallback speak failed: %s", speak_e)
         raise HTTPException(status_code=502, detail=f"LLM error: {e}")
+    _t_llm = time.monotonic()
     expression, clean_reply = _parse_expression(reply, default=expression)
     speaker_id, stackchan_expr = _resolve_expression(expression)
     logger.info("LLM reply: backend=%s request_id=%s expression=%s text=%s", LLM_BACKEND, req_id, expression, clean_reply[:80])
@@ -291,6 +297,23 @@ async def ingest_audio(
     except Exception as e:
         logger.error("VOICEVOX error: %s", e)
         raise HTTPException(status_code=502, detail=f"VOICEVOX error: {e}")
+    _t_voicevox = time.monotonic()
+
+    def _record_ingest_metrics(mqtt_ms: int | None) -> None:
+        try:
+            _save_ingest_metrics(
+                request_id=req_id,
+                mode=mode,
+                transcript_chars=len(transcript),
+                reply_chars=len(clean_reply),
+                stt_ms=round((_t_stt - _t0) * 1000),
+                llm_ms=round((_t_llm - _t_stt) * 1000),
+                voicevox_ms=round((_t_voicevox - _t_llm) * 1000),
+                mqtt_ms=mqtt_ms,
+                total_ms=round((time.monotonic() - _t0) * 1000),
+            )
+        except Exception as e:
+            logger.warning("ingest_audio metrics save error: %s", e)
 
     if mode == "async":
         try:
@@ -298,9 +321,11 @@ async def ingest_audio(
         except Exception as e:
             logger.error("MQTT error: %s", e)
             raise HTTPException(status_code=502, detail=f"MQTT error: {e}")
+        _record_ingest_metrics(mqtt_ms=round((time.monotonic() - _t_voicevox) * 1000))
         return {"requestId": req_id, "expression": stackchan_expr}
 
     asyncio.create_task(_deliver_pending_messages_after(clean_reply, source, priority, session_key=effective_session_key, speaker=speaker))
+    _record_ingest_metrics(mqtt_ms=None)
 
     resp: dict = {
         "requestId": req_id,

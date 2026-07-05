@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block title %}パフォーマンス{% endblock %}
+{% block nav_performance %}font-semibold text-blue-600{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-xl font-bold text-gray-800">会話パフォーマンス</h1>
+    <p id="metaMeta" class="text-xs text-gray-400 mt-0.5">読み込み中...</p>
+  </div>
+  <div class="flex items-center gap-3">
+    <select id="hoursSelect" class="text-sm border rounded px-2 py-1 text-gray-600" onchange="load()">
+      <option value="1">直近 1 時間</option>
+      <option value="6">直近 6 時間</option>
+      <option value="24" selected>直近 24 時間</option>
+      <option value="72">直近 72 時間</option>
+    </select>
+    <button onclick="load()" class="text-sm text-gray-400 hover:text-gray-600">↻ 更新</button>
+  </div>
+</div>
+
+<div id="noData" class="hidden text-center py-16 text-gray-400">
+  <p class="text-4xl mb-3">⏱️</p>
+  <p>まだ ingest-audio のパフォーマンスデータがありません。</p>
+  <p class="text-xs mt-1">スタックちゃんから /ingest-audio を受信すると記録されます。</p>
+</div>
+
+<div id="content" class="space-y-6">
+  <div class="bg-white rounded-xl shadow-sm p-4">
+    <h2 class="text-sm font-semibold text-gray-700 mb-1">ステージ別 所要時間の内訳（積み上げ）</h2>
+    <p class="text-xs text-gray-400 mb-3">STT（音声認識・話者識別）→ LLM（会話生成）→ VOICEVOX（音声合成）→ MQTT（送信）の順に積み上げ表示</p>
+    <canvas id="chartStages" height="110"></canvas>
+  </div>
+
+  <div class="bg-white rounded-xl shadow-sm p-4 overflow-x-auto">
+    <h2 class="text-sm font-semibold text-gray-700 mb-1">文字数カテゴリ別 統計</h2>
+    <p class="text-xs text-gray-400 mb-3">
+      入力（音声認識結果）+ 出力（LLM返答）の合計文字数でカテゴリ分け。
+      各セルは「平均（中央値 / 最小〜最大）」ミリ秒。実トークン数ではなく文字数を代理指標として使用。
+    </p>
+    <table class="w-full text-xs whitespace-nowrap">
+      <thead>
+        <tr class="text-left text-gray-400 border-b border-gray-100">
+          <th class="py-2 pr-4">カテゴリ</th>
+          <th class="py-2 pr-4">件数</th>
+          <th class="py-2 pr-4">STT</th>
+          <th class="py-2 pr-4">LLM</th>
+          <th class="py-2 pr-4">VOICEVOX</th>
+          <th class="py-2 pr-4">MQTT</th>
+          <th class="py-2 pr-4">合計</th>
+        </tr>
+      </thead>
+      <tbody id="statsBody"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+let _chart = null;
+
+function _timeLabel(ts_ms) {
+  const d = new Date(ts_ms);
+  const md = (d.getMonth() + 1) + '/' + d.getDate();
+  const hm = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+  return md + ' ' + hm;
+}
+
+function _renderChart(points) {
+  const labels      = points.map(p => _timeLabel(p.ts_ms));
+  const stt         = points.map(p => p.stt_ms);
+  const llm         = points.map(p => p.llm_ms);
+  const voicevox    = points.map(p => p.voicevox_ms);
+  const mqtt        = points.map(p => p.mqtt_ms);
+
+  if (_chart) _chart.destroy();
+  const ctx = document.getElementById('chartStages').getContext('2d');
+  _chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'STT',      data: stt,      backgroundColor: '#3b82f6' },
+        { label: 'LLM',      data: llm,      backgroundColor: '#f59e0b' },
+        { label: 'VOICEVOX', data: voicevox, backgroundColor: '#8b5cf6' },
+        { label: 'MQTT',     data: mqtt,     backgroundColor: '#10b981' },
+      ],
+    },
+    options: {
+      animation: false,
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } },
+        tooltip: {
+          callbacks: {
+            label: ctx => `${ctx.dataset.label}: ${ctx.raw == null ? '—' : ctx.raw + 'ms'}`,
+          },
+        },
+      },
+      scales: {
+        x: { stacked: true, ticks: { font: { size: 10 }, maxTicksLimit: 12 } },
+        y: { stacked: true, ticks: { font: { size: 10 }, callback: v => v + 'ms' } },
+      },
+    },
+  });
+}
+
+function _statCell(s) {
+  if (!s) return '<span class="text-gray-300">—</span>';
+  return `平均 ${s.mean}ms<br><span class="text-gray-400">中央値 ${s.median} / ${s.min}〜${s.max}</span>`;
+}
+
+function _renderStats(buckets) {
+  const body = document.getElementById('statsBody');
+  body.innerHTML = buckets.map(b => `
+    <tr class="border-b border-gray-50">
+      <td class="py-2 pr-4 font-medium text-gray-700">${esc(b.label)}</td>
+      <td class="py-2 pr-4 text-gray-500">${b.count}件</td>
+      <td class="py-2 pr-4">${_statCell(b.stages.stt_ms)}</td>
+      <td class="py-2 pr-4">${_statCell(b.stages.llm_ms)}</td>
+      <td class="py-2 pr-4">${_statCell(b.stages.voicevox_ms)}</td>
+      <td class="py-2 pr-4">${_statCell(b.stages.mqtt_ms)}</td>
+      <td class="py-2 pr-4">${_statCell(b.stages.total_ms)}</td>
+    </tr>
+  `).join('');
+}
+
+async function load() {
+  const hours = document.getElementById('hoursSelect').value;
+  try {
+    const [metricsData, statsData] = await Promise.all([
+      apiFetch(`/api/debug/ingest-metrics?hours=${hours}`),
+      apiFetch(`/api/debug/ingest-metrics/stats?hours=${hours}`),
+    ]);
+    const points = metricsData.points || [];
+    document.getElementById('noData').classList.toggle('hidden', points.length > 0);
+    document.getElementById('content').classList.toggle('hidden', points.length === 0);
+
+    if (points.length > 0) {
+      const latest = points[points.length - 1];
+      const ago = Math.round((Date.now() - latest.ts_ms) / 1000);
+      const agoLabel = ago < 120 ? ago + '秒前' : Math.round(ago/60) + '分前';
+      document.getElementById('metaMeta').textContent = `${points.length} 件・最終受信 ${agoLabel}`;
+      _renderChart(points);
+    } else {
+      document.getElementById('metaMeta').textContent = 'データなし';
+    }
+    _renderStats(statsData.buckets || []);
+  } catch (e) {
+    document.getElementById('metaMeta').textContent = 'エラー: ' + e.message;
+  }
+}
+
+load();
+setInterval(load, 60000);
+</script>
+{% endblock %}

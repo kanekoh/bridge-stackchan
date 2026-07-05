@@ -71,3 +71,8 @@ async def ui_web_checks(request: Request):
 @router.get("/ui/metrics", response_class=HTMLResponse)
 async def ui_metrics(request: Request):
     return _templates.TemplateResponse(request=request, name="metrics.html", context=_ui_context(request))
+
+
+@router.get("/ui/performance", response_class=HTMLResponse)
+async def ui_performance(request: Request):
+    return _templates.TemplateResponse(request=request, name="performance.html", context=_ui_context(request))

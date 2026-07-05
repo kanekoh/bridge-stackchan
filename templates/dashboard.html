@@ -31,6 +31,13 @@
   </section>
 
   <section>
+    <h2 class="text-xs font-semibold text-gray-400 mb-2 tracking-wide">会話メモリ（LLM）</h2>
+    <div id="memoryCards" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <p class="text-sm text-gray-400 col-span-full">読み込み中...</p>
+    </div>
+  </section>
+
+  <section>
     <h2 class="text-xs font-semibold text-gray-400 mb-2 tracking-wide">デバイス</h2>
     <div id="deviceCards" class="grid grid-cols-2 gap-3">
       <p class="text-sm text-gray-400 col-span-full">読み込み中...</p>
@@ -178,6 +185,38 @@ async function loadFamily() {
   el.innerHTML = cards.join('');
 }
 
+// ── 会話メモリ（LLM） ──────────────────────────────────
+function _sessionLabel(key) {
+  if (key.startsWith('slack:channel:')) return 'Slackチャンネル';
+  if (key.startsWith('slack:dm:')) return 'SlackのDM';
+  return `音声会話（${key}）`;
+}
+
+async function loadMemory() {
+  const el = document.getElementById('memoryCards');
+  try {
+    const d = await apiFetch('/debug/sessions');
+    const sessions = d.sessions || [];
+    if (!sessions.length) {
+      el.innerHTML = tile('会話メモリ', badge('neutral', '履歴なし'), 'まだ会話がありません');
+      return;
+    }
+    const threshold = d.summary_threshold || 3000;
+    const cards = sessions.map(s => {
+      const total = (s.char_count_in || 0) + (s.char_count_out || 0);
+      const value = `${total.toLocaleString()} / ${threshold.toLocaleString()} 文字`;
+      const summaryLine = s.summary
+        ? `要約: ${esc(s.summary.slice(0, 60))}${s.summary.length > 60 ? '…' : ''}`
+        : '要約: まだ作成されていません（会話中）';
+      const sub = `${summaryLine}<br>${agoLabel(s.updated_at) || esc(s.updated_at)}更新`;
+      return tile(_sessionLabel(s.session_key), value, sub);
+    });
+    el.innerHTML = cards.join('');
+  } catch (e) {
+    el.innerHTML = tile('会話メモリ', badge('critical', '取得失敗'), esc(e.message));
+  }
+}
+
 // ── デバイス ──────────────────────────────────────────
 async function loadDevice() {
   const el = document.getElementById('deviceCards');
@@ -209,6 +248,7 @@ function loadAll() {
   loadConnectivity();
   loadDisaster();
   loadFamily();
+  loadMemory();
   loadDevice();
 }
 

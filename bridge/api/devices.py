@@ -24,6 +24,7 @@ class DeviceSettingsUpdate(BaseModel):
     sleepStart: str | None = None
     sleepEnd: str | None = None
     restart: bool | None = None
+    servoTest: bool | None = None
 
 
 @router.get("/api/device/log")
@@ -81,6 +82,7 @@ def api_device_settings(req: DeviceSettingsUpdate):
         "sleepStart": req.sleepStart,
         "sleepEnd": req.sleepEnd,
         "restart": restart,
+        "servoTest": req.servoTest,  # True/False どちらも明示的に送る（restart と違い停止も必要なため）
     }
     sent = {k: v for k, v in sent.items() if v is not None}
     if not sent:

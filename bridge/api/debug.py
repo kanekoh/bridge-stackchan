@@ -2,6 +2,7 @@
 import asyncio
 import json
 import socket
+import statistics
 import uuid
 from datetime import datetime, timezone
 
@@ -13,10 +14,10 @@ from bridge.config import (
     OPENCLAW_BASE_URL, OPENCLAW_MODEL, SPEAKER_ID_URL,
     MQTT_BROKER, MQTT_PORT, VOICEVOX_URL,
     P2PQUAKE_ENABLED, P2PQUAKE_MIN_SCALE, P2PQUAKE_TSUNAMI_TARGET_AREAS,
-    ISS_MIN_ELEVATION,
+    ISS_MIN_ELEVATION, SESSION_SUMMARY_THRESHOLD,
 )
 import bridge.core.db as _db_mod
-from bridge.core.db import _db_lock, _get_setting, _set_setting
+from bridge.core.db import _db_lock, _get_setting, _set_setting, _fetch_ingest_metrics
 from bridge.core.expression import _parse_expression, _resolve_expression
 from bridge.core.audio import resolve_audio_url
 from bridge.devices.mqtt import publish_speak
@@ -66,7 +67,9 @@ def debug_sessions():
     """llm_sessions テーブルの全レコードを返す（デバッグ用）。"""
     with _db_lock:
         rows = _db_mod._db_conn.execute(  # type: ignore[union-attr]
-            "SELECT session_key, backend, response_id, metadata, updated_at FROM llm_sessions ORDER BY updated_at DESC"
+            "SELECT session_key, backend, response_id, metadata, updated_at,"
+            "       char_count_in, char_count_out, summary"
+            " FROM llm_sessions ORDER BY updated_at DESC"
         ).fetchall()
     sessions = [
         {
@@ -75,10 +78,56 @@ def debug_sessions():
             "response_id": r[2],
             "metadata": json.loads(r[3]) if r[3] else {},
             "updated_at": r[4],
+            "char_count_in": r[5] or 0,
+            "char_count_out": r[6] or 0,
+            "summary": r[7],
         }
         for r in rows
     ]
-    return {"sessions": sessions}
+    return {"sessions": sessions, "summary_threshold": SESSION_SUMMARY_THRESHOLD}
+
+
+# 文字数（transcript + reply）によるカテゴリ分け。実トークン数ではなく文字数を代理指標として使う。
+_INGEST_CHAR_BUCKETS = [
+    ("short（〜60字）", 0, 60),
+    ("medium（60〜200字）", 60, 200),
+    ("long（200字〜）", 200, None),
+]
+_INGEST_STAGES = ["stt_ms", "llm_ms", "voicevox_ms", "mqtt_ms", "total_ms"]
+
+
+@router.get("/api/debug/ingest-metrics")
+def api_debug_ingest_metrics(hours: int = Query(default=2, le=168)):
+    """/ingest-audio の各ステージ所要時間を時系列で返す（積み上げグラフ用）。"""
+    return {"hours": hours, "points": _fetch_ingest_metrics(hours)}
+
+
+@router.get("/api/debug/ingest-metrics/stats")
+def api_debug_ingest_metrics_stats(hours: int = Query(default=24, le=168)):
+    """文字数カテゴリごとに、各ステージの最小・最大・平均・中央値を返す。"""
+    points = _fetch_ingest_metrics(hours)
+
+    def _total_chars(p: dict) -> int:
+        return (p.get("transcript_chars") or 0) + (p.get("reply_chars") or 0)
+
+    buckets = []
+    for label, lo, hi in _INGEST_CHAR_BUCKETS:
+        bucket_points = [
+            p for p in points
+            if _total_chars(p) >= lo and (hi is None or _total_chars(p) < hi)
+        ]
+        stage_stats = {}
+        for stage in _INGEST_STAGES:
+            values = [p[stage] for p in bucket_points if p.get(stage) is not None]
+            stage_stats[stage] = {
+                "min": min(values),
+                "max": max(values),
+                "mean": round(statistics.mean(values), 1),
+                "median": round(statistics.median(values), 1),
+            } if values else None
+        buckets.append({"label": label, "count": len(bucket_points), "stages": stage_stats})
+
+    return {"hours": hours, "total_count": len(points), "buckets": buckets}
 
 
 @router.get("/debug/timers")

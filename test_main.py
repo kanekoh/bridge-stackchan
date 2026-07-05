@@ -354,6 +354,74 @@ class TestIngestAudio:
 
         assert resp.status_code == 200
 
+    def test_async_mode_records_ingest_metrics_with_mqtt_ms(self, client):
+        """mode=async: 各ステージ所要時間が記録され、mqtt_ms も設定される。"""
+        wav = _make_wav()
+        with (
+            patch("main.OPENAI_API_KEY", "sk-test"),
+            patch("main.transcribe_audio", return_value="おはよう"),
+            patch("main.identify_speaker", return_value=None),
+            patch("main.chat_with_llm", return_value="おはよう！"),
+            patch("main.resolve_audio_url", return_value=("http://example.com/audio.mp3", None)),
+            patch("main.publish_speak"),
+            patch("main._save_ingest_metrics") as mock_save,
+        ):
+            resp = client.post(
+                "/ingest-audio",
+                files={"file": ("test.wav", wav, "audio/wav")},
+                data={"mode": "async"},
+            )
+
+        assert resp.status_code == 200
+        mock_save.assert_called_once()
+        kwargs = mock_save.call_args.kwargs
+        assert kwargs["mode"] == "async"
+        assert kwargs["transcript_chars"] == len("おはよう")
+        assert kwargs["reply_chars"] == len("おはよう！")
+        assert kwargs["mqtt_ms"] is not None
+        assert kwargs["total_ms"] >= 0
+
+    def test_sync_mode_records_ingest_metrics_without_mqtt_ms(self, client):
+        """mode=sync: MQTT は発行されないため mqtt_ms は None。"""
+        wav = _make_wav()
+        with (
+            patch("main.OPENAI_API_KEY", "sk-test"),
+            patch("main.transcribe_audio", return_value="テスト"),
+            patch("main.identify_speaker", return_value=None),
+            patch("main.chat_with_llm", return_value="返事"),
+            patch("main.resolve_audio_url", return_value=("http://example.com/audio.mp3", None)),
+            patch("main._save_ingest_metrics") as mock_save,
+        ):
+            resp = client.post(
+                "/ingest-audio",
+                files={"file": ("test.wav", wav, "audio/wav")},
+                data={"mode": "sync"},
+            )
+
+        assert resp.status_code == 200
+        mock_save.assert_called_once()
+        assert mock_save.call_args.kwargs["mqtt_ms"] is None
+
+    def test_ingest_metrics_save_error_does_not_affect_response(self, client):
+        """メトリクス保存に失敗しても /ingest-audio のレスポンスには影響しない。"""
+        wav = _make_wav()
+        with (
+            patch("main.OPENAI_API_KEY", "sk-test"),
+            patch("main.transcribe_audio", return_value="テスト"),
+            patch("main.identify_speaker", return_value=None),
+            patch("main.chat_with_llm", return_value="返事"),
+            patch("main.resolve_audio_url", return_value=("http://example.com/audio.mp3", None)),
+            patch("main.publish_speak"),
+            patch("main._save_ingest_metrics", side_effect=RuntimeError("db down")),
+        ):
+            resp = client.post(
+                "/ingest-audio",
+                files={"file": ("test.wav", wav, "audio/wav")},
+                data={"mode": "async"},
+            )
+
+        assert resp.status_code == 200
+
 
 # ── unit: transcribe_audio ────────────────────────────────────────────────────
 
@@ -1137,6 +1205,29 @@ class TestGetPendingMessagesTool:
         assert out["count"] == 1
         assert out["messages"][0]["content"] == "全員向け"
         mock_mark.assert_called_once_with(1)
+
+
+# ── unit: /api/device/settings (servoTest) ───────────────────────────────────
+
+class TestDeviceSettingsServoTest:
+    def test_servo_test_true_is_published(self, client):
+        with patch("bridge.api.devices.publish_device_set") as mock_pub:
+            resp = client.post("/api/device/settings", json={"servoTest": True})
+        assert resp.status_code == 200
+        mock_pub.assert_called_once_with("default", servoTest=True)
+
+    def test_servo_test_false_is_published_not_dropped(self, client):
+        """restart と違い、servoTest=False も明示的に送信される（テスト停止のため）。"""
+        with patch("bridge.api.devices.publish_device_set") as mock_pub:
+            resp = client.post("/api/device/settings", json={"servoTest": False})
+        assert resp.status_code == 200
+        mock_pub.assert_called_once_with("default", servoTest=False)
+
+    def test_servo_test_omitted_is_not_sent(self, client):
+        with patch("bridge.api.devices.publish_device_set") as mock_pub:
+            resp = client.post("/api/device/settings", json={"brightness": 50})
+        assert resp.status_code == 200
+        mock_pub.assert_called_once_with("default", brightness=50)
 
 
 # ── unit: _slack_handle_timer ─────────────────────────────────────────────────
