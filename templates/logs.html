@@ -17,6 +17,7 @@
   <button onclick="setFilter('WARN')"  id="f-WARN"  class="filter-btn px-3 py-1 rounded-full border">WARN</button>
   <button onclick="setFilter('INFO')"  id="f-INFO"  class="filter-btn px-3 py-1 rounded-full border">INFO</button>
   <button onclick="setFilter('DEBUG')" id="f-DEBUG" class="filter-btn px-3 py-1 rounded-full border">DEBUG</button>
+  <button onclick="setFilter('TRACE')" id="f-TRACE" class="filter-btn px-3 py-1 rounded-full border">TRACE</button>
 </div>
 
 <div id="logList" class="font-mono text-xs space-y-0.5"></div>
@@ -33,7 +34,14 @@
     WARN:  'text-yellow-600 font-semibold',
     INFO:  'text-blue-600',
     DEBUG: 'text-gray-400',
+    TRACE: 'text-gray-300',
   };
+
+  // デバイスが送るログレベルの大文字小文字はファームウェア依存のため、
+  // 比較は必ず正規化してから行う（例: logLevel 設定は小文字 "error" 等）。
+  function normLevel(level) {
+    return String(level ?? '').toUpperCase();
+  }
 
   function esc(s) {
     return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -53,7 +61,7 @@
   function render() {
     const list  = document.getElementById('logList');
     const empty = document.getElementById('empty');
-    const filtered = _filter === 'ALL' ? _logs : _logs.filter(l => l.level === _filter);
+    const filtered = _filter === 'ALL' ? _logs : _logs.filter(l => normLevel(l.level) === _filter);
     if (!filtered.length) {
       list.innerHTML = '';
       empty.classList.remove('hidden');
@@ -61,7 +69,7 @@
     }
     empty.classList.add('hidden');
     list.innerHTML = filtered.map(l => {
-      const levelClass = LEVEL_COLOR[l.level] || 'text-gray-500';
+      const levelClass = LEVEL_COLOR[normLevel(l.level)] || 'text-gray-500';
       return `<div class="flex gap-2 py-0.5 border-b border-gray-100 hover:bg-gray-50 px-1">
         <span class="text-gray-400 shrink-0 w-36">${esc(l.ts_str)}</span>
         <span class="${levelClass} shrink-0 w-12">${esc(l.level)}</span>
