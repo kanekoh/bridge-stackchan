@@ -53,6 +53,19 @@
     </div>
   </div>
 
+  <div>
+    <label class="block text-xs text-gray-500 mb-1">ログレベル</label>
+    <select id="input-logLevel"
+      class="w-40 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400 bg-white">
+      <option value="">変更しない</option>
+      <option value="error">error</option>
+      <option value="warn">warn</option>
+      <option value="info">info</option>
+      <option value="debug">debug</option>
+      <option value="trace">trace</option>
+    </select>
+  </div>
+
   <div class="pt-2">
     <button onclick="submitSettings()" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">送信</button>
   </div>
@@ -141,12 +154,14 @@ async function submitSettings() {
   const greeting = readField('input-greeting');
   const sleepStart = readField('input-sleepStart');
   const sleepEnd = readField('input-sleepEnd');
+  const logLevel = readField('input-logLevel');
   if (brightness !== null) payload.brightness = Number(brightness);
   if (volume !== null) payload.volume = Number(volume);
   if (speakerId !== null) payload.speakerId = Number(speakerId);
   if (greeting !== null) payload.greeting = greeting;
   if (sleepStart !== null) payload.sleepStart = sleepStart;
   if (sleepEnd !== null) payload.sleepEnd = sleepEnd;
+  if (logLevel !== null) payload.logLevel = logLevel;
 
   if (Object.keys(payload).length === 0) {
     msg.textContent = '変更する項目を入力してください';

@@ -1270,6 +1270,29 @@ class TestDeviceSettingsServoTest:
         mock_pub.assert_called_once_with("default", brightness=50)
 
 
+# ── unit: /api/device/settings (logLevel) ────────────────────────────────────
+
+class TestDeviceSettingsLogLevel:
+    @pytest.mark.parametrize("level", ["error", "warn", "info", "debug", "trace"])
+    def test_valid_log_level_is_published(self, client, level):
+        with patch("bridge.api.devices.publish_device_set") as mock_pub:
+            resp = client.post("/api/device/settings", json={"logLevel": level})
+        assert resp.status_code == 200
+        mock_pub.assert_called_once_with("default", logLevel=level)
+
+    def test_invalid_log_level_rejected(self, client):
+        with patch("bridge.api.devices.publish_device_set") as mock_pub:
+            resp = client.post("/api/device/settings", json={"logLevel": "verbose"})
+        assert resp.status_code == 422
+        mock_pub.assert_not_called()
+
+    def test_log_level_omitted_is_not_sent(self, client):
+        with patch("bridge.api.devices.publish_device_set") as mock_pub:
+            resp = client.post("/api/device/settings", json={"brightness": 50})
+        assert resp.status_code == 200
+        mock_pub.assert_called_once_with("default", brightness=50)
+
+
 # ── unit: _slack_handle_timer ─────────────────────────────────────────────────
 
 class TestSlackHandleTimer:

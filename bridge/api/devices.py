@@ -26,6 +26,7 @@ class DeviceSettingsUpdate(BaseModel):
     sleepEnd: str | None = None
     restart: bool | None = None
     servoTest: Literal["x", "y", False] | None = None
+    logLevel: Literal["error", "warn", "info", "debug", "trace"] | None = None
 
 
 @router.get("/api/device/log")
@@ -84,6 +85,7 @@ def api_device_settings(req: DeviceSettingsUpdate):
         "sleepEnd": req.sleepEnd,
         "restart": restart,
         "servoTest": req.servoTest,  # "x"/"y"/False いずれも明示的に送る（restart と違い停止も必要なため）
+        "logLevel": req.logLevel,
     }
     sent = {k: v for k, v in sent.items() if v is not None}
     if not sent:
