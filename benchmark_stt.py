@@ -45,9 +45,9 @@ AUDIO_LLM_USER_TEXT: str = "この音声の内容に答えてください。短�
 
 # Pipeline A: STT モデル
 STT_MODELS: list[str] = [
-    "whisper-1",
     "gpt-4o-transcribe",
     "gpt-4o-mini-transcribe",
+    "gpt-transcribe",  # 2026-07-28 GA。gpt-4o-transcribe の後継（非同期・ファイル向け）
 ]
 
 # Pipeline A: Text LLM モデル
@@ -57,6 +57,7 @@ TEXT_LLM_MODELS: list[str] = [
     "gpt-4.1",
     "gpt-4.1-mini",
     "gpt-4.1-nano",
+    "gpt-5.6-luna",  # 2026-07 GA。低価格・低レイテンシ枠（$1/$6 per 1M tokens）
 ]
 
 # Pipeline B: 音声を直接受け付ける LLM モデル
@@ -152,6 +153,8 @@ async def run_stt(audio: bytes, fmt: str, model: str, client: openai.AsyncOpenAI
 
 # ── Pipeline A: Text LLM ──────────────────────────────────────────────────────
 async def run_text_llm(transcript: str, model: str, client: openai.AsyncOpenAI) -> tuple[str, float]:
+    # gpt-5 系は Chat Completions で max_tokens が使えず max_completion_tokens が必要
+    token_kwarg = {"max_completion_tokens": 200} if model.startswith("gpt-5") else {"max_tokens": 200}
     t0 = time.perf_counter()
     resp = await client.chat.completions.create(
         model=model,
@@ -159,7 +162,7 @@ async def run_text_llm(transcript: str, model: str, client: openai.AsyncOpenAI) 
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": transcript},
         ],
-        max_tokens=200,
+        **token_kwarg,
     )
     ms = (time.perf_counter() - t0) * 1000
     return resp.choices[0].message.content or "", ms

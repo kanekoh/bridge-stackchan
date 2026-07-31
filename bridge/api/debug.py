@@ -201,6 +201,28 @@ def api_p2pquake_status():
     }
 
 
+@router.get("/api/debug/earthquake/map")
+def api_debug_earthquake_map(limit: int = Query(default=20, le=200)):
+    """地図表示用に、緯度経度のある地震ログを新しい順で返す（表示件数は呼び出し側で選べる）。"""
+    with _db_lock:
+        rows = _db_mod._db_conn.execute(
+            "SELECT earthquake_id, place, scale, magnitude, lat, lon, depth, notified_at "
+            "FROM earthquake_log "
+            "WHERE lat IS NOT NULL AND lon IS NOT NULL "
+            "ORDER BY notified_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return {
+        "events": [
+            {
+                "id": r[0], "place": r[1], "scale": r[2], "magnitude": r[3],
+                "lat": r[4], "lon": r[5], "depth": r[6], "notified_at": r[7],
+            }
+            for r in rows
+        ],
+    }
+
+
 @router.post("/api/debug/p2pquake")
 async def debug_p2pquake(code: int = Query(551), force: bool = Query(False)):
     """

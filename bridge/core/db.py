@@ -133,6 +133,15 @@ def _init_db() -> None:
             notified_at   TEXT NOT NULL
         )
     """)
+    for col_def in [
+        "ALTER TABLE earthquake_log ADD COLUMN lat   REAL",
+        "ALTER TABLE earthquake_log ADD COLUMN lon   REAL",
+        "ALTER TABLE earthquake_log ADD COLUMN depth REAL",
+    ]:
+        try:
+            _db_conn.execute(col_def)
+        except sqlite3.OperationalError:
+            pass  # already exists
     _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS tsunami_state (
             area       TEXT PRIMARY KEY,

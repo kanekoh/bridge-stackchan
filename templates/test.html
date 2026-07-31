@@ -31,6 +31,28 @@
   <div id="wsEvents" class="mt-3 space-y-1 max-h-48 overflow-y-auto"></div>
 </div>
 
+<!-- 地震マップ -->
+<div class="bg-gray-50 rounded-lg border border-gray-200 p-4 mb-6">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">地震マップ（震源・保存済みログ）</h2>
+    <div class="flex items-center gap-2">
+      <label class="text-xs text-gray-400">表示件数
+        <select id="eqMapLimit" class="text-xs border border-gray-200 rounded px-1 py-0.5 ml-1">
+          <option value="10">10</option>
+          <option value="20" selected>20</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+        </select>
+      </label>
+      <button onclick="loadEqMap()" class="text-xs text-gray-400 hover:text-gray-600">↻ 更新</button>
+    </div>
+  </div>
+  <p class="text-xs text-gray-400 mb-1">円の大きさ=マグニチュード、色=震源の深さ（浅いほど暖色）</p>
+  <div id="eqMap" style="height:380px" class="rounded border border-gray-200 mb-1 bg-gray-50"></div>
+  <div id="eqMapStatus" class="text-xs text-gray-400">取得前</div>
+</div>
+
 <div class="space-y-5">
 
   <!-- そのまま読み上げ -->
@@ -584,6 +606,75 @@
 
   loadCoverage();
   loadWsStatus();
+
+  // ── 地震マップ（Leaflet.js） ────────────────────────────
+  let _eqMap = null;
+  let _eqMapLayers = [];
+  const EQ_SCALE_MAP = {
+    '-1': '震度不明', '10': '震度1', '20': '震度2', '30': '震度3',
+    '40': '震度4', '45': '震度4強', '50': '震度5弱', '55': '震度5強',
+    '60': '震度6弱', '65': '震度6強', '70': '震度7',
+  };
+  function eqScaleLabel(scale) {
+    if (scale == null) return '不明';
+    return EQ_SCALE_MAP[String(scale)] || `震度${scale}`;
+  }
+  function eqDepthColor(depth) {
+    if (depth == null) return '#9ca3af';   // 不明: グレー
+    if (depth <= 10)  return '#dc2626';    // ごく浅い: 赤
+    if (depth <= 30)  return '#f97316';    // 浅い: オレンジ
+    if (depth <= 100) return '#eab308';    // 中: 黄
+    if (depth <= 300) return '#3b82f6';    // 深い: 青
+    return '#7c3aed';                      // 非常に深い: 紫
+  }
+  function eqMagRadiusPx(mag) {
+    const m = mag != null && mag > 0 ? mag : 1;
+    return Math.max(4, m * 3.2);
+  }
+
+  async function loadEqMap() {
+    const statusEl = document.getElementById('eqMapStatus');
+    const limit = document.getElementById('eqMapLimit').value;
+    statusEl.textContent = '取得中...';
+    try {
+      const d = await apiFetch(`/api/debug/earthquake/map?limit=${limit}`);
+      const events = d.events || [];
+
+      if (!_eqMap) {
+        _eqMap = L.map('eqMap').setView([36.2, 138.2], 5);  // 日本全体が入る初期表示
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+          attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/">CARTO</a>',
+          maxZoom: 13,
+        }).addTo(_eqMap);
+      }
+      _eqMapLayers.forEach(l => _eqMap.removeLayer(l));
+      _eqMapLayers = [];
+
+      for (const ev of events) {
+        const color = eqDepthColor(ev.depth);
+        const layer = L.circleMarker([ev.lat, ev.lon], {
+          radius: eqMagRadiusPx(ev.magnitude),
+          color, fillColor: color, fillOpacity: 0.5, weight: 1.5,
+        }).bindPopup(
+          `<b>${esc(ev.place || '不明')}</b><br>` +
+          `M${ev.magnitude != null ? ev.magnitude : '?'}　${esc(eqScaleLabel(ev.scale))}<br>` +
+          `深さ: ${ev.depth != null ? ev.depth + 'km' : '不明'}<br>` +
+          `${esc((ev.notified_at || '').replace('T', ' ').slice(0, 16))}`
+        );
+        layer.addTo(_eqMap);
+        _eqMapLayers.push(layer);
+      }
+
+      statusEl.textContent = events.length
+        ? `${events.length} 件表示中（新しい順）`
+        : '位置情報つきの地震ログがありません';
+    } catch (e) {
+      statusEl.textContent = '❌ ' + e.message;
+    }
+  }
+
+  document.getElementById('eqMapLimit').addEventListener('change', loadEqMap);
+  loadEqMap();
 
   // ── ISS テスト ──────────────────────────────────────
   async function fetchIss() {

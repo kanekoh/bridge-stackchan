@@ -16,7 +16,7 @@ import aiohttp
 from bridge.config import (
     _JST,
     P2PQUAKE_ENABLED, P2PQUAKE_WS_URL, P2PQUAKE_MIN_SCALE,
-    P2PQUAKE_TSUNAMI_TARGET_AREAS, MQTT_DEVICE_ID,
+    P2PQUAKE_TSUNAMI_TARGET_AREAS, MQTT_DEVICE_ID, EARTHQUAKE_LOG_MAX_ROWS,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,15 +175,26 @@ def _eq_already_seen(earthquake_id: str) -> bool:
     return row is not None
 
 
-def _mark_eq_seen(earthquake_id: str, place: str, scale: int, magnitude: float) -> None:
+def _mark_eq_seen(
+    earthquake_id: str, place: str, scale: int, magnitude: float,
+    lat: float | None = None, lon: float | None = None, depth: float | None = None,
+) -> None:
     with sys.modules["bridge.core.db"]._db_lock:
-        sys.modules["bridge.core.db"]._db_conn.execute(
+        conn = sys.modules["bridge.core.db"]._db_conn
+        conn.execute(
             "INSERT OR IGNORE INTO earthquake_log "
-            "(earthquake_id, place, scale, magnitude, notified_at) "
-            "VALUES (?, ?, ?, ?, datetime('now'))",
-            (earthquake_id, place, scale, magnitude),
+            "(earthquake_id, place, scale, magnitude, lat, lon, depth, notified_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            (earthquake_id, place, scale, magnitude, lat, lon, depth),
         )
-        sys.modules["bridge.core.db"]._db_conn.commit()
+        # 保存上限を超えた分は古い順に削除（ディスク枯渇防止）
+        conn.execute(
+            "DELETE FROM earthquake_log WHERE earthquake_id NOT IN ("
+            "  SELECT earthquake_id FROM earthquake_log ORDER BY notified_at DESC LIMIT ?"
+            ")",
+            (EARTHQUAKE_LOG_MAX_ROWS,),
+        )
+        conn.commit()
 
 
 def _get_tsunami_grade(area: str) -> str | None:
@@ -300,6 +311,7 @@ async def _handle_earthquake(data: dict) -> None:
     # 震源距離を計算
     hypo_lat = eq.get("hypocenter", {}).get("latitude")
     hypo_lon = eq.get("hypocenter", {}).get("longitude")
+    hypo_depth = eq.get("hypocenter", {}).get("depth")
     dist_km: float | None = None
     try:
         home_lat = float(sys.modules["main"]._get_setting("location_lat", ""))
@@ -311,7 +323,7 @@ async def _handle_earthquake(data: dict) -> None:
 
     fixed_text = _build_earthquake_fixed_text(data, local_scale)
 
-    _mark_eq_seen(dedup_id, place, local_scale, mag)
+    _mark_eq_seen(dedup_id, place, local_scale, mag, lat=hypo_lat, lon=hypo_lon, depth=hypo_depth)
     logger.info("earthquake notify: id=%s type=%s place=%s scale=%s dist_km=%s",
                 earthquake_id, issue_type, place, local_scale,
                 f"{dist_km:.0f}" if dist_km is not None else "unknown")
