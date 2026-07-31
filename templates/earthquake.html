@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}地震{% endblock %}
+{% block nav_earthquake %}font-semibold text-blue-600{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-xl font-bold text-gray-800">地震</h1>
+  <a href="/ui/test" class="text-xs text-blue-500 hover:underline">テスト送信はテストページへ →</a>
+</div>
+
+<!-- P2P WebSocket 状態 -->
+<div class="bg-gray-50 rounded-lg border border-gray-200 p-4 mb-6">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">P2P地震情報 WebSocket</h2>
+    <button onclick="loadWsStatus()" class="text-xs text-gray-400 hover:text-gray-600">↻ 更新</button>
+  </div>
+  <div id="wsStatus" class="text-xs text-gray-400">読み込み中...</div>
+  <div id="wsEvents" class="mt-3 space-y-1 max-h-48 overflow-y-auto"></div>
+</div>
+
+<!-- 地震マップ -->
+<div class="bg-gray-50 rounded-lg border border-gray-200 p-4 mb-6">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">地震マップ（震源・保存済みログ）</h2>
+    <div class="flex items-center gap-2">
+      <label class="text-xs text-gray-400">表示件数
+        <select id="eqMapLimit" class="text-xs border border-gray-200 rounded px-1 py-0.5 ml-1">
+          <option value="10">10</option>
+          <option value="20" selected>20</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+        </select>
+      </label>
+      <button onclick="loadEqMap()" class="text-xs text-gray-400 hover:text-gray-600">↻ 更新</button>
+    </div>
+  </div>
+  <p class="text-xs text-gray-400 mb-1">円の大きさ=マグニチュード、色=震源の深さ（浅いほど暖色）</p>
+  <div id="eqMap" style="height:420px" class="rounded border border-gray-200 mb-1 bg-gray-50"></div>
+  <div id="eqMapStatus" class="text-xs text-gray-400">取得前</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  // ── P2P WebSocket ステータス ────────────────────────────────
+  const ACTION_LABEL = {
+    'dispatch':      '→ 処理',
+    'skip:dup_memory': '無視（重複）',
+  };
+  const CODE_LABEL = {
+    551: '地震情報',
+    552: '津波予報',
+    554: 'EEW発表検出',
+    555: '接続ピア数',
+    556: 'EEW警報',
+    561: '感知情報',
+    9611: '感知解析結果',
+  };
+
+  async function loadWsStatus() {
+    const statusEl = document.getElementById('wsStatus');
+    const eventsEl = document.getElementById('wsEvents');
+    try {
+      const d = await apiFetch('/api/debug/p2pquake/status');
+      if (!d.enabled) {
+        statusEl.textContent = '無効（P2PQUAKE_ENABLED=false）';
+        return;
+      }
+      const ws = d.ws;
+      const dot = ws.connected ? '🟢' : '🔴';
+      const since = ws.connected
+        ? `接続中 (${(ws.connected_at || '').slice(0,16).replace('T',' ')}〜)`
+        : `切断中 (再接続回数: ${ws.reconnect_count})`;
+      const last = ws.last_event_at
+        ? `最終受信: ${ws.last_event_at.slice(0,16).replace('T',' ')} code=${ws.last_event_code}`
+        : '受信なし';
+      statusEl.innerHTML = `<span class="font-medium">${dot} ${since}</span>　<span class="text-gray-400">${last}</span>`;
+
+      eventsEl.innerHTML = (d.recent_events || []).map(e => {
+        const t    = (e.time || '').slice(0,16).replace('T',' ');
+        const code = CODE_LABEL[e.code] || `code=${e.code}`;
+        const act  = ACTION_LABEL[e.action] || e.action;
+        const actColor = e.action === 'dispatch' ? 'text-blue-600' : 'text-gray-400';
+        return `<div class="flex gap-2 text-xs border-b border-gray-100 py-0.5">
+          <span class="text-gray-400 shrink-0">${t}</span>
+          <span class="font-medium shrink-0">${code}</span>
+          <span class="text-gray-500 truncate">${e.summary || ''}</span>
+          <span class="${actColor} shrink-0 ml-auto">${act}</span>
+        </div>`;
+      }).join('') || '<p class="text-gray-400 text-xs">受信履歴なし</p>';
+    } catch(e) {
+      statusEl.textContent = '❌ ' + e.message;
+    }
+  }
+
+  // ── 地震マップ（Leaflet.js） ────────────────────────────
+  let _eqMap = null;
+  let _eqMapLayers = [];
+  const EQ_SCALE_MAP = {
+    '-1': '震度不明', '10': '震度1', '20': '震度2', '30': '震度3',
+    '40': '震度4', '45': '震度4強', '50': '震度5弱', '55': '震度5強',
+    '60': '震度6弱', '65': '震度6強', '70': '震度7',
+  };
+  function eqScaleLabel(scale) {
+    if (scale == null) return '不明';
+    return EQ_SCALE_MAP[String(scale)] || `震度${scale}`;
+  }
+  function eqDepthColor(depth) {
+    if (depth == null) return '#9ca3af';   // 不明: グレー
+    if (depth <= 10)  return '#dc2626';    // ごく浅い: 赤
+    if (depth <= 30)  return '#f97316';    // 浅い: オレンジ
+    if (depth <= 100) return '#eab308';    // 中: 黄
+    if (depth <= 300) return '#3b82f6';    // 深い: 青
+    return '#7c3aed';                      // 非常に深い: 紫
+  }
+  function eqMagRadiusPx(mag) {
+    const m = mag != null && mag > 0 ? mag : 1;
+    return Math.max(4, m * 3.2);
+  }
+
+  async function loadEqMap() {
+    const statusEl = document.getElementById('eqMapStatus');
+    const limit = document.getElementById('eqMapLimit').value;
+    statusEl.textContent = '取得中...';
+    try {
+      const d = await apiFetch(`/api/debug/earthquake/map?limit=${limit}`);
+      const events = d.events || [];
+
+      if (!_eqMap) {
+        _eqMap = L.map('eqMap').setView([36.2, 138.2], 5);  // 日本全体が入る初期表示
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+          attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/">CARTO</a>',
+          maxZoom: 13,
+        }).addTo(_eqMap);
+      }
+      _eqMapLayers.forEach(l => _eqMap.removeLayer(l));
+      _eqMapLayers = [];
+
+      for (const ev of events) {
+        const color = eqDepthColor(ev.depth);
+        const layer = L.circleMarker([ev.lat, ev.lon], {
+          radius: eqMagRadiusPx(ev.magnitude),
+          color, fillColor: color, fillOpacity: 0.5, weight: 1.5,
+        }).bindPopup(
+          `<b>${esc(ev.place || '不明')}</b><br>` +
+          `M${ev.magnitude != null ? ev.magnitude : '?'}　${esc(eqScaleLabel(ev.scale))}<br>` +
+          `深さ: ${ev.depth != null ? ev.depth + 'km' : '不明'}<br>` +
+          `${esc((ev.notified_at || '').replace('T', ' ').slice(0, 16))}`
+        );
+        layer.addTo(_eqMap);
+        _eqMapLayers.push(layer);
+      }
+
+      statusEl.textContent = events.length
+        ? `${events.length} 件表示中（新しい順）`
+        : '位置情報つきの地震ログがありません';
+    } catch (e) {
+      statusEl.textContent = '❌ ' + e.message;
+    }
+  }
+
+  document.getElementById('eqMapLimit').addEventListener('change', loadEqMap);
+  loadWsStatus();
+  loadEqMap();
+</script>
+{% endblock %}

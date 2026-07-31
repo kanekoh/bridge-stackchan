@@ -1,0 +1,289 @@
+{% extends "base.html" %}
+{% block title %}天気{% endblock %}
+{% block nav_weather %}font-semibold text-blue-600{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-xl font-bold text-gray-800">天気</h1>
+  <a href="/ui/test" class="text-xs text-blue-500 hover:underline">テスト送信はテストページへ →</a>
+</div>
+
+<!-- 雨データ比較 -->
+<div class="bg-white rounded-lg border border-gray-200 p-5">
+  <div class="flex items-center justify-between mb-1">
+    <h2 class="font-semibold text-gray-700">雨データ比較（AMeDAS + Open-Meteo）</h2>
+    <button onclick="loadRainStatus()" class="text-xs text-gray-400 hover:text-gray-600">↻ 更新</button>
+  </div>
+  <p class="text-xs text-gray-400 mb-3">AMeDAS 多点観測・Open-Meteo の降水データを並べて確認できます</p>
+  <div id="rainMap" style="height:420px" class="rounded border border-gray-200 mb-1 bg-gray-50"></div>
+  <p class="text-xs text-gray-400 mb-4">
+    青円=降水中（大きさ＝強度） / 青実線=現在の前線 / 紫破線=過去の前線 / オレンジ破線=30分後予測 / 矢印=移動方向
+  </p>
+  <div id="rainStatus" class="text-xs text-gray-400">取得前</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  function rainBar(mmh, maxMmh) {
+    const pct = Math.min(100, (mmh / Math.max(maxMmh, 1)) * 100);
+    const color = mmh <= 0 ? 'bg-gray-200'
+                : mmh < 1  ? 'bg-blue-200'
+                : mmh < 5  ? 'bg-blue-400'
+                : mmh < 15 ? 'bg-yellow-400'
+                :             'bg-red-500';
+    return `<div class="flex items-center gap-1">
+      <div class="w-24 bg-gray-100 rounded h-2"><div class="${color} h-2 rounded" style="width:${pct}%"></div></div>
+      <span class="text-gray-600">${mmh > 0 ? mmh.toFixed(1) : '0'}</span>
+    </div>`;
+  }
+
+  function renderTimeline(entries, valueKey, unit, active) {
+    if (!entries || !entries.length) return '<span class="text-gray-400">データなし</span>';
+    const maxVal = Math.max(...entries.map(e => e[valueKey] || 0), 1);
+    return entries.map(e => {
+      const val = e[valueKey] || 0;
+      const typeColor = e.type === 'observed' ? 'text-gray-500' : 'text-blue-500';
+      const isCurrent = e.offset_min >= -5 && e.offset_min <= 5;
+      const rowClass = isCurrent ? 'bg-yellow-50 font-medium' : '';
+      return `<div class="flex items-center gap-2 py-0.5 ${rowClass}">
+        <span class="w-12 ${typeColor} shrink-0">${esc(e.time_jst)}</span>
+        <span class="w-14 text-gray-400 shrink-0">${e.offset_min >= 0 ? '+' : ''}${e.offset_min}分</span>
+        ${rainBar(val, maxVal)}
+        <span class="text-gray-400 text-xs shrink-0">${unit}</span>
+        ${isCurrent ? '<span class="text-yellow-600 text-xs">← 現在</span>' : ''}
+      </div>`;
+    }).join('');
+  }
+
+  async function loadRainStatus() {
+    const el = document.getElementById('rainStatus');
+    el.innerHTML = '<span class="text-gray-400">取得中（AMeDAS 7スナップ並列取得）...</span>';
+    try {
+      const d = await apiFetch('/api/debug/rain/status');
+      if (!d.ok) { el.textContent = '❌ ' + (d.detail || '失敗'); return; }
+
+      const src = d.active_source;
+      const ac  = d['amedas+openmeteo'] || {};
+
+      const activeBadge = `<span class="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">AMeDAS + Open-Meteo ✓使用中</span>`;
+
+      const confColor = c => c === 'high' ? 'text-green-600' : c === 'medium' ? 'text-yellow-600' : 'text-gray-400';
+      const confLabel = c => c === 'high' ? '確信度 高' : c === 'medium' ? '確信度 中' : '確信度 低';
+
+      // ── 通知システム状態 ──
+      const cooldownAt  = d.cooldown_notified_at;
+      const cooldownMin = d.cooldown_remaining_min;
+      const nextAction  = d.next_action || '—';
+
+      const cooldownHtml = cooldownAt
+        ? `クールダウン中（通知済: ${esc(cooldownAt.slice(11,16))} JST、あと ${cooldownMin ?? 0}分）`
+        : '通知可能（クールダウンなし）';
+      const cooldownCls = cooldownAt && (cooldownMin ?? 0) > 0 ? 'text-gray-400' : 'text-green-600';
+
+      const stateHtml = `
+        <div class="bg-gray-50 rounded p-3 mb-4 text-xs space-y-1">
+          <div class="font-semibold text-gray-600 mb-1">通知システム状態</div>
+          <div class="${cooldownCls}">⏱ ${esc(cooldownHtml)}</div>
+          <div class="text-gray-700">→ 次のアクション: <b>${esc(nextAction)}</b></div>
+        </div>`;
+
+      // ── AMeDAS パネル ──
+      const mv = ac.amedas || {};
+      let amedas_html = stateHtml;
+      if (ac.error) {
+        amedas_html += `<span class="text-red-500">${esc(ac.error)}</span>`;
+      } else {
+        // 現在の判定バナー（now_dry の内訳つき）
+        const nowDry     = ac.now_dry;
+        const soonWet    = ac.soon_wet;
+        const amedDry    = ac.amedas_now_dry;
+        const omDry      = ac.om_now_dry;
+        const bannerCls  = !nowDry ? 'bg-blue-50 text-blue-700 border-blue-200'
+                         : soonWet ? 'bg-orange-50 text-orange-700 border-orange-200'
+                         :           'bg-green-50 text-green-700 border-green-200';
+        const bannerTxt  = !nowDry ? '🌧 現在降雨中（近隣観測点で検知）'
+                         : soonWet ? '⚠ もうすぐ雨（接近中）'
+                         :           '☀ 現在乾燥・30分以内の雨なし';
+        const dot = ok => ok ? '<span class="text-green-500">●乾</span>' : '<span class="text-blue-500">●雨</span>';
+        amedas_html += `
+          <div class="border rounded px-3 py-2 mb-1 text-xs font-semibold ${bannerCls}">${bannerTxt}</div>
+          <div class="text-xs text-gray-400 mb-3 pl-1">
+            AMeDAS(20km): ${dot(amedDry)} &nbsp;|&nbsp; Open-Meteo(現在): ${dot(omDry)}
+            &nbsp;→&nbsp; 総合: ${dot(nowDry)}
+          </div>`;
+
+        // 移動ベクトル
+        if (mv.method === 'regression') {
+          const widespread = (mv.speed_kmh || 0) > 250;
+          const arrTxt = widespread ? '広域降雨（方向推定不可）'
+                       : mv.approaching ? `あと <b>${mv.arrival_min}</b> 分で到達予測`
+                       : mv.arrival_min === null ? '60分以内の接近なし'
+                       : '（すでに通過済み）';
+          amedas_html += `
+            <div class="bg-gray-50 rounded p-3 mb-3 space-y-1">
+              <div class="font-semibold text-gray-700 mb-1">雨の移動推定（AMeDAS 回帰）</div>
+              <div>移動方向: <b>${esc(mv.direction_str)}</b> (${mv.direction_deg}°)
+                   速度: <b>${widespread ? '—' : mv.speed_kmh + ' km/h'}</b></div>
+              <div>到達: ${arrTxt}</div>
+              <div class="${confColor(mv.confidence)}">${confLabel(mv.confidence)}
+                （${mv.n_stations}点回帰・RMSE ${mv.rmse_min}分）</div>
+              ${ac.openmeteo_confirms ? '<div class="text-green-600 font-semibold">✓ Open-Meteo も雨を予報</div>' : ''}
+            </div>`;
+        } else if (mv.method === 'insufficient_data') {
+          amedas_html += `<div class="text-gray-400 text-xs mb-3">回帰データ不足（${mv.n_stations}点）— 方向推定スキップ</div>`;
+        }
+
+        // 現在の降水観測点
+        const wet = mv.wet_now || [];
+        if (wet.length > 0) {
+          const rows = wet.slice(0, 8).map(s =>
+            `<tr class="border-t border-gray-100">
+               <td class="py-1 pr-3 font-medium">${esc(s.name)}</td>
+               <td class="pr-3 text-gray-500">${s.dist_km}km ${esc(s.direction)}</td>
+               <td class="text-blue-600">${s.prec_mm}mm/10min</td>
+             </tr>`).join('');
+          amedas_html += `
+            <div class="font-semibold text-gray-600 mb-1">現在降水中の観測点（近い順）</div>
+            <table class="w-full text-xs mb-3">${rows}</table>`;
+        } else {
+          amedas_html += `<div class="text-gray-400 text-xs mb-3">現在降水中の近隣観測点なし</div>`;
+        }
+
+        // Open-Meteo タイムライン（統合データ内）
+        const omInner = ac.openmeteo || {};
+        if (!omInner.error && omInner.timeline) {
+          amedas_html += `<div class="font-semibold text-gray-600 mb-1">Open-Meteo 予報タイムライン</div>`;
+          amedas_html += renderTimeline([...(omInner.timeline)], 'mm_15min', 'mm/15min', src === 'amedas+openmeteo');
+        }
+      }
+
+      el.innerHTML = `
+        <div>
+          <div class="mb-3">${activeBadge}</div>
+          ${amedas_html}
+        </div>`;
+
+      updateRainMap(d);
+
+    } catch(e) {
+      el.textContent = '❌ ' + e.message;
+    }
+  }
+
+  // ── 雨マップ（Leaflet.js） ──────────────────────────────
+  let _rainMap = null;
+  let _rainMapLayers = [];
+
+  function _offsetLatLon(lat, lon, bearingDeg, distKm) {
+    const R = 6371, d = distKm / R, b = bearingDeg * Math.PI / 180;
+    const φ1 = lat * Math.PI / 180, λ1 = lon * Math.PI / 180;
+    const φ2 = Math.asin(Math.sin(φ1)*Math.cos(d) + Math.cos(φ1)*Math.sin(d)*Math.cos(b));
+    const λ2 = λ1 + Math.atan2(Math.sin(b)*Math.sin(d)*Math.cos(φ1), Math.cos(d) - Math.sin(φ1)*Math.sin(φ2));
+    return [φ2 * 180/Math.PI, λ2 * 180/Math.PI];
+  }
+
+  function _addMapLayer(layer) {
+    layer.addTo(_rainMap);
+    _rainMapLayers.push(layer);
+  }
+
+  function updateRainMap(d) {
+    const tLat = d.target_lat, tLon = d.target_lon;
+    if (!tLat || !tLon) return;
+
+    if (!_rainMap) {
+      _rainMap = L.map('rainMap').setView([tLat, tLon], 8);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/">CARTO</a>',
+        maxZoom: 13,
+      }).addTo(_rainMap);
+    }
+
+    _rainMapLayers.forEach(l => _rainMap.removeLayer(l));
+    _rainMapLayers = [];
+
+    const ac = d['amedas+openmeteo'] || {};
+    const mv = ac.amedas || {};
+    const stations = mv.all_stations || [];
+    const coeffs = mv.regression_coeffs;
+    const cosLat = Math.cos(tLat * Math.PI / 180);
+    const _kmToLatLon = (dx, dy) => [tLat + dy / 111, tLon + dx / (111 * cosLat)];
+
+    // 等時線: t = a*x + b*y + c の等値線（雨前線の位置）
+    if (coeffs && mv.speed_kmh < 250) {
+      const [a, b, c] = coeffs;
+      const isoTimes = [
+        { t: -60, label: '60分前の前線', color: '#c4b5fd', dash: '4 6', w: 1 },
+        { t: -30, label: '30分前の前線', color: '#818cf8', dash: '6 4', w: 1.5 },
+        { t:   0, label: '現在の雨前線', color: '#3b82f6', dash: null,  w: 2.5 },
+        { t:  30, label: '30分後の予測', color: '#f97316', dash: '8 4', w: 1.5 },
+      ];
+      const HALF = 150;
+      for (const iso of isoTimes) {
+        let p1, p2;
+        if (Math.abs(b) > Math.abs(a)) {
+          const y1 = (iso.t - c - a * (-HALF)) / b;
+          const y2 = (iso.t - c - a *   HALF)  / b;
+          p1 = _kmToLatLon(-HALF, y1);
+          p2 = _kmToLatLon( HALF, y2);
+        } else {
+          const x1 = (iso.t - c - b * (-HALF)) / a;
+          const x2 = (iso.t - c - b *   HALF)  / a;
+          p1 = _kmToLatLon(x1, -HALF);
+          p2 = _kmToLatLon(x2,  HALF);
+        }
+        _addMapLayer(L.polyline([p1, p2], {
+          color: iso.color, weight: iso.w, dashArray: iso.dash, opacity: 0.8,
+        }).bindPopup(iso.label));
+      }
+    }
+
+    // 観測点の円（降水中=青、乾燥=グレー）
+    for (const s of stations) {
+      const p = s.prec_mm;
+      const wet = p > 0;
+      const color = wet ? '#2563eb' : '#9ca3af';
+      const radius = wet ? Math.max(4000, p * 4000) : 1500;
+      _addMapLayer(L.circle([s.lat, s.lon], {
+        radius, color, fillColor: color,
+        fillOpacity: wet ? 0.5 : 0.2, weight: wet ? 1.5 : 0.5,
+      }).bindPopup(`<b>${esc(s.name)}</b><br>${wet ? p + ' mm/10min' : '乾燥'}<br>距離 ${s.dist_km} km`));
+    }
+
+    // 設置場所マーカー
+    _addMapLayer(L.marker([tLat, tLon], {
+      icon: L.divIcon({ html: '<div style="font-size:22px;line-height:1;filter:drop-shadow(0 1px 2px #0008)">★</div>', iconAnchor:[11,11], className:'' }),
+      zIndexOffset: 1000,
+    }).bindPopup('設置場所'));
+
+    // 移動ベクトル矢印
+    if (mv.method === 'regression' && mv.speed_kmh < 250 && mv.direction_deg != null) {
+      const dir = mv.direction_deg;
+      const fromDir = (dir + 180) % 360;
+      const halfLen = Math.min(mv.speed_kmh * 0.4, 50);
+      const upstream   = _offsetLatLon(tLat, tLon, fromDir, halfLen);
+      const downstream = _offsetLatLon(tLat, tLon, dir, halfLen);
+      const arrowColor = mv.approaching ? '#ea580c' : '#94a3b8';
+
+      _addMapLayer(L.polyline([upstream, [tLat, tLon], downstream], {
+        color: arrowColor, weight: 3, dashArray: '8 5', opacity: 0.9,
+      }).bindPopup(`移動方向: ${esc(mv.direction_str)} / ${mv.speed_kmh} km/h${mv.approaching ? ' / あと'+mv.arrival_min+'分' : ''}`));
+
+      const tip  = _offsetLatLon(downstream[0], downstream[1], dir, 4);
+      const left = _offsetLatLon(downstream[0], downstream[1], (dir+145)%360, 5);
+      const rght = _offsetLatLon(downstream[0], downstream[1], (dir-145+360)%360, 5);
+      _addMapLayer(L.polygon([tip, left, rght], { color: arrowColor, fillOpacity: 0.9, weight: 1 }));
+    }
+  }
+
+  loadRainStatus();
+</script>
+{% endblock %}
