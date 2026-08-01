@@ -66,6 +66,12 @@ OPENAI_RESPONSES_BASE_URL = os.getenv("OPENAI_RESPONSES_BASE_URL", "https://api.
 OPENAI_RESPONSES_MODEL = os.getenv("OPENAI_RESPONSES_MODEL", "gpt-4o-mini")
 _raw_or = os.getenv("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS", "")
 OPENAI_RESPONSES_MAX_OUTPUT_TOKENS: int | None = int(_raw_or) if _raw_or.strip() else None
+# gpt-5.x 系（推論モデル）の reasoning effort。none/low/medium/high/xhigh/max。
+# 未設定なら medium がデフォルトになり、隠れ推論トークンの分だけ消費が増える。
+# 実測: gpt-5.6-luna + tool呼び出しで medium=reasoning 22トークン、low=17、none=0。
+# 会話用途では none で十分（tool呼び出しの精度低下は確認されていない）。
+# 空文字にすると reasoning パラメータ自体を送らず API 側のデフォルトに委ねる。
+OPENAI_RESPONSES_REASONING_EFFORT = os.getenv("OPENAI_RESPONSES_REASONING_EFFORT", "none")
 OPENAI_RESPONSES_WEB_SEARCH = os.getenv("OPENAI_RESPONSES_WEB_SEARCH", "false").lower() == "true"
 OPENAI_RESPONSES_WEB_SEARCH_TOOL = os.getenv("OPENAI_RESPONSES_WEB_SEARCH_TOOL", "web_search_preview")
 # 実験: True にすると Pass 1 では request_web_search のみ提示し、LLM が必要と判断したときだけ
@@ -159,7 +165,8 @@ __all__ = [
     "SPEAKER_ID_URL", "SPEAKER_ID_API_KEY", "SPEAKER_ID_THRESHOLD",
     "SPEAKER_ID_BROWSER_URL", "STT_MODEL",
     "LLM_BACKEND", "OPENAI_RESPONSES_BASE_URL", "OPENAI_RESPONSES_MODEL",
-    "OPENAI_RESPONSES_MAX_OUTPUT_TOKENS", "OPENAI_RESPONSES_WEB_SEARCH",
+    "OPENAI_RESPONSES_MAX_OUTPUT_TOKENS", "OPENAI_RESPONSES_REASONING_EFFORT",
+    "OPENAI_RESPONSES_WEB_SEARCH",
     "OPENAI_RESPONSES_WEB_SEARCH_TOOL", "OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND",
     "DISABLE_SESSION_HISTORY", "DISABLE_TOOLS",
     "SESSION_SUMMARY_THRESHOLD", "SESSION_SUMMARY_MAX_TOKENS",

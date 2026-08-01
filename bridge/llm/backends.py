@@ -27,6 +27,14 @@ def _cfg_val(name: str):
     return getattr(_cfg, name)
 
 
+_REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
+def _supports_reasoning_effort(model: str) -> bool:
+    """reasoning.effort パラメータを受け付けるモデルか（非対応モデルに送ると 400 エラーになる）。"""
+    return model.startswith(_REASONING_MODEL_PREFIXES)
+
+
 class LLMBackend(Protocol):
     async def chat(
         self,
@@ -164,6 +172,7 @@ class OpenAIResponsesBackend:
         OPENAI_API_KEY = _cfg_val("OPENAI_API_KEY")
         OPENAI_RESPONSES_MODEL = _cfg_val("OPENAI_RESPONSES_MODEL")
         OPENAI_RESPONSES_MAX_OUTPUT_TOKENS = _cfg_val("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS")
+        OPENAI_RESPONSES_REASONING_EFFORT = _cfg_val("OPENAI_RESPONSES_REASONING_EFFORT")
         OPENAI_RESPONSES_WEB_SEARCH = _cfg_val("OPENAI_RESPONSES_WEB_SEARCH")
         OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND = _cfg_val("OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND")
         OPENAI_RESPONSES_WEB_SEARCH_TOOL = _cfg_val("OPENAI_RESPONSES_WEB_SEARCH_TOOL")
@@ -257,6 +266,8 @@ class OpenAIResponsesBackend:
                 payload["previous_response_id"] = previous_response_id
             if OPENAI_RESPONSES_MAX_OUTPUT_TOKENS is not None:
                 payload["max_output_tokens"] = OPENAI_RESPONSES_MAX_OUTPUT_TOKENS
+            if OPENAI_RESPONSES_REASONING_EFFORT and _supports_reasoning_effort(OPENAI_RESPONSES_MODEL):
+                payload["reasoning"] = {"effort": OPENAI_RESPONSES_REASONING_EFFORT}
             if tools:
                 payload["tools"] = tools
 
