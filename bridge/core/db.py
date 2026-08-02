@@ -219,6 +219,18 @@ def _init_db() -> None:
     _db_conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_ingest_audio_metrics_ts ON ingest_audio_metrics(ts_ms)"
     )
+    # stt_ms は STT と話者認証の並列区間 max(STT, 話者認証) を記録しているため、
+    # どちらが律速かを切り分けられるよう内訳を別カラムで持つ。
+    for col_def in [
+        "ALTER TABLE ingest_audio_metrics ADD COLUMN stt_only_ms    INTEGER",
+        "ALTER TABLE ingest_audio_metrics ADD COLUMN speaker_id_ms  INTEGER",
+        "ALTER TABLE ingest_audio_metrics ADD COLUMN upload_ms      INTEGER",
+        "ALTER TABLE ingest_audio_metrics ADD COLUMN audio_bytes    INTEGER",
+    ]:
+        try:
+            _db_conn.execute(col_def)
+        except sqlite3.OperationalError:
+            pass  # already exists
     _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS location_history (
             id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -515,6 +527,10 @@ def _save_ingest_metrics(
     voicevox_ms: int,
     mqtt_ms: int | None,
     total_ms: int,
+    stt_only_ms: int | None = None,
+    speaker_id_ms: int | None = None,
+    upload_ms: int | None = None,
+    audio_bytes: int | None = None,
 ) -> None:
     """/ingest-audio の各ステージ所要時間を記録する（直近 5000 件を保持）。"""
     now = datetime.now(_JST)
@@ -522,13 +538,15 @@ def _save_ingest_metrics(
         _db_conn.execute(  # type: ignore[union-attr]
             "INSERT INTO ingest_audio_metrics"
             " (request_id, ts_ms, mode, transcript_chars, reply_chars,"
-            "  stt_ms, llm_ms, voicevox_ms, mqtt_ms, total_ms, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "  stt_ms, llm_ms, voicevox_ms, mqtt_ms, total_ms, created_at,"
+            "  stt_only_ms, speaker_id_ms, upload_ms, audio_bytes)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 request_id, int(now.timestamp() * 1000), mode,
                 transcript_chars, reply_chars,
                 stt_ms, llm_ms, voicevox_ms, mqtt_ms, total_ms,
                 now.isoformat(),
+                stt_only_ms, speaker_id_ms, upload_ms, audio_bytes,
             ),
         )
         _db_conn.execute(
@@ -543,7 +561,8 @@ def _fetch_ingest_metrics(hours: int) -> list[dict]:
     with _db_lock:
         rows = _db_conn.execute(  # type: ignore[union-attr]
             "SELECT ts_ms, mode, transcript_chars, reply_chars,"
-            "       stt_ms, llm_ms, voicevox_ms, mqtt_ms, total_ms"
+            "       stt_ms, llm_ms, voicevox_ms, mqtt_ms, total_ms,"
+            "       stt_only_ms, speaker_id_ms, upload_ms, audio_bytes"
             " FROM ingest_audio_metrics WHERE ts_ms >= ? ORDER BY ts_ms ASC",
             (cutoff_ms,),
         ).fetchall()
@@ -553,6 +572,8 @@ def _fetch_ingest_metrics(hours: int) -> list[dict]:
             "transcript_chars": r[2], "reply_chars": r[3],
             "stt_ms": r[4], "llm_ms": r[5], "voicevox_ms": r[6],
             "mqtt_ms": r[7], "total_ms": r[8],
+            "stt_only_ms": r[9], "speaker_id_ms": r[10],
+            "upload_ms": r[11], "audio_bytes": r[12],
         }
         for r in rows
     ]

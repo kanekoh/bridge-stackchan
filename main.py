@@ -244,19 +244,34 @@ async def ingest_audio(
 
     effective_session_key = session_key or MQTT_DEVICE_ID
     req_id = request_id or str(uuid.uuid4())
+    # file.read() は本体の受信完了までブロックするため、この区間 ≒ M5Stack からの
+    # アップロード所要時間。録音完了後に一括送信している間は丸ごと待ち時間になる。
+    _t_upload_start = time.monotonic()
     audio_bytes = await file.read()
+    upload_ms = round((time.monotonic() - _t_upload_start) * 1000)
     filename = file.filename or "audio.wav"
     logger.info(
-        "Received audio: filename=%s size=%d request_id=%s mode=%s session_key=%s",
-        filename, len(audio_bytes), req_id, mode, effective_session_key,
+        "Received audio: filename=%s size=%d upload_ms=%d request_id=%s mode=%s session_key=%s",
+        filename, len(audio_bytes), upload_ms, req_id, mode, effective_session_key,
     )
 
     _t0 = time.monotonic()
 
+    # STT と話者認証は並列だが、この区間の所要時間は max(STT, 話者認証) になる。
+    # どちらが律速かを知るため、それぞれの実時間を個別に計測する。
+    _stage_ms: dict[str, int] = {}
+
+    async def _timed(name: str, coro):
+        _t = time.monotonic()
+        try:
+            return await coro
+        finally:
+            _stage_ms[name] = round((time.monotonic() - _t) * 1000)
+
     try:
         transcript, speaker = await asyncio.gather(
-            transcribe_audio(audio_bytes, filename),
-            identify_speaker(audio_bytes),
+            _timed("stt", transcribe_audio(audio_bytes, filename)),
+            _timed("speaker_id", identify_speaker(audio_bytes)),
         )
     except Exception as e:
         logger.error("STT error: %s", e)
@@ -268,7 +283,11 @@ async def ingest_audio(
                 logger.error("STT error fallback speak failed: %s", speak_e)
         raise HTTPException(status_code=502, detail=f"STT error: {e}")
     _t_stt = time.monotonic()
-    logger.info("Transcript: request_id=%s text=%s speaker=%s", req_id, transcript[:80], speaker)
+    logger.info(
+        "Transcript: request_id=%s text=%s speaker=%s stt_ms=%s speaker_id_ms=%s stage_ms=%d",
+        req_id, transcript[:80], speaker,
+        _stage_ms.get("stt"), _stage_ms.get("speaker_id"), round((_t_stt - _t0) * 1000),
+    )
 
     try:
         reply = await chat_with_llm(
@@ -311,6 +330,10 @@ async def ingest_audio(
                 voicevox_ms=round((_t_voicevox - _t_llm) * 1000),
                 mqtt_ms=mqtt_ms,
                 total_ms=round((time.monotonic() - _t0) * 1000),
+                stt_only_ms=_stage_ms.get("stt"),
+                speaker_id_ms=_stage_ms.get("speaker_id"),
+                upload_ms=upload_ms,
+                audio_bytes=len(audio_bytes),
             )
         except Exception as e:
             logger.warning("ingest_audio metrics save error: %s", e)
