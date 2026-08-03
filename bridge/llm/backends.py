@@ -9,7 +9,7 @@ from bridge.core.expression import _STACKCHAN_SYSTEM_PROMPT
 from bridge.core.db import (
     _SessionData, _get_session_data, _save_session, _summarize_and_reset_session,
 )
-from bridge.llm.persona import _build_datetime_context, _build_location_context, _build_birthday_context
+from bridge.llm.persona import _build_datetime_context, _build_location_context, _build_birthday_context, _build_family_context
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,9 @@ class OpenClawResponsesBackend:
 
         user_input: str | list = f"[話者: {speaker}] {text}" if speaker else text
         instructions_parts = [_build_datetime_context()]
+        fam_ctx = _build_family_context()
+        if fam_ctx:
+            instructions_parts.append(fam_ctx)
         loc_ctx = _build_location_context()
         if loc_ctx:
             instructions_parts.append(loc_ctx)
@@ -194,6 +197,9 @@ class OpenAIResponsesBackend:
         notify_ctx: dict = notify_context if notify_context is not None else {}
 
         instructions_parts = [_STACKCHAN_SYSTEM_PROMPT, _build_datetime_context()]
+        fam_ctx = _build_family_context()
+        if fam_ctx:
+            instructions_parts.append(fam_ctx)
         loc_ctx = _build_location_context()
         if loc_ctx:
             instructions_parts.append(loc_ctx)

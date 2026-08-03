@@ -2,9 +2,30 @@ import logging
 from datetime import datetime
 
 from bridge.config import _JST
-from bridge.core.db import _get_setting
+from bridge.core.db import _get_setting, _get_all_family_members
 
 logger = logging.getLogger(__name__)
+
+
+def _build_family_context() -> str:
+    """登録済みの家族メンバーをシステムプロンプト用の文字列で返す。未登録なら空文字。
+
+    「家族に誰がいる？」に確実に答えられるようにするための常時注入。
+    件数が少なく変化も稀なので、検索せず全件そのまま渡す。
+    """
+    try:
+        members = _get_all_family_members()
+    except Exception as e:
+        logger.warning("family context build failed (non-fatal): %s", e)
+        return ""
+    names = [m["name"] for m in members if m.get("name")]
+    if not names:
+        return ""
+    return (
+        "【あなたの家族】" + "、".join(names) + "\n"
+        "これがあなたと一緒に暮らしている家族です。"
+        "「家族に誰がいる？」と聞かれたらこの人たちを答えること。"
+    )
 
 
 def _build_datetime_context() -> str:

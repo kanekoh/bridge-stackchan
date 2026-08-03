@@ -28,7 +28,7 @@ from bridge.core.db import (
     _get_all_family_members, _resolve_display_name,
     _record_slack_user, _save_message,
     _fetch_pending_messages, _mark_message_delivered, _filter_messages_for_speaker,
-    _save_ingest_metrics,
+    _save_ingest_metrics, _save_conversation, _fetch_conversations,
 )
 
 from bridge.llm.persona import _build_datetime_context, _build_location_context, _build_birthday_context
@@ -216,45 +216,25 @@ async def speak(req: SpeakRequest):
     return resp
 
 
-@app.post("/ingest-audio")
-async def ingest_audio(
-    file: UploadFile = File(...),
-    system_prompt_append: str = Form(""),
-    source: str = Form("stackchan"),
-    priority: str = Form("normal"),
-    request_id: str = Form(""),
-    mode: str = Form("async"),
-    session_key: str = Form(""),
-    expression: str = Form(""),
+async def _process_ingest_audio(
+    audio_bytes: bytes,
+    filename: str,
+    *,
+    system_prompt_append: str,
+    source: str,
+    priority: str,
+    req_id: str,
+    mode: str,
+    effective_session_key: str,
+    expression: str,
+    upload_ms: int,
+    transport: str,
 ):
+    """受信済み音声を STT → LLM → VOICEVOX → MQTT のパイプラインに流す共通処理。
+
+    /ingest-audio（一括受信）と /ingest-audio-stream（逐次受信）の両方から呼ばれる。
+    音声の受け取り方だけが違い、ここから先の処理は完全に同一。
     """
-    Receive audio from Stack-chan, run STT, call LLM, then deliver the reply.
-
-    Form fields (all optional):
-    - system_prompt_append: extra instructions appended to the base system prompt
-    - source: label stored in the MQTT message (default: "stackchan")
-    - priority: MQTT message priority (default: "normal")
-    - request_id: caller-supplied idempotency key (auto-generated if omitted)
-    - mode: "async" (default) publishes via MQTT; "sync" returns audioUrl in the response body only
-    - session_key: conversation session identifier (defaults to MQTT_DEVICE_ID)
-    - expression: default expression used when LLM reply does not include one (default: "neutral")
-    """
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
-
-    effective_session_key = session_key or MQTT_DEVICE_ID
-    req_id = request_id or str(uuid.uuid4())
-    # file.read() は本体の受信完了までブロックするため、この区間 ≒ M5Stack からの
-    # アップロード所要時間。録音完了後に一括送信している間は丸ごと待ち時間になる。
-    _t_upload_start = time.monotonic()
-    audio_bytes = await file.read()
-    upload_ms = round((time.monotonic() - _t_upload_start) * 1000)
-    filename = file.filename or "audio.wav"
-    logger.info(
-        "Received audio: filename=%s size=%d upload_ms=%d request_id=%s mode=%s session_key=%s",
-        filename, len(audio_bytes), upload_ms, req_id, mode, effective_session_key,
-    )
-
     _t0 = time.monotonic()
 
     # STT と話者認証は並列だが、この区間の所要時間は max(STT, 話者認証) になる。
@@ -311,6 +291,13 @@ async def ingest_audio(
     speaker_id, stackchan_expr = _resolve_expression(expression)
     logger.info("LLM reply: backend=%s request_id=%s expression=%s text=%s", LLM_BACKEND, req_id, expression, clean_reply[:80])
 
+    # 後から記憶を組み立て直せるよう、要約される前の生の会話を残す。
+    # 音声合成の成否とは独立させたいのでここで保存する（失敗しても会話は継続）。
+    _save_conversation(
+        session_key=effective_session_key, speaker=speaker,
+        user_text=transcript, reply_text=clean_reply, source=source,
+    )
+
     try:
         audio_url, audio_streaming_url = await resolve_audio_url(clean_reply, speaker_id)
     except Exception as e:
@@ -334,6 +321,7 @@ async def ingest_audio(
                 speaker_id_ms=_stage_ms.get("speaker_id"),
                 upload_ms=upload_ms,
                 audio_bytes=len(audio_bytes),
+                transport=transport,
             )
         except Exception as e:
             logger.warning("ingest_audio metrics save error: %s", e)
@@ -361,3 +349,124 @@ async def ingest_audio(
     if audio_streaming_url:
         resp["audioStreamingUrl"] = audio_streaming_url
     return resp
+
+
+@app.post("/ingest-audio")
+async def ingest_audio(
+    file: UploadFile = File(...),
+    system_prompt_append: str = Form(""),
+    source: str = Form("stackchan"),
+    priority: str = Form("normal"),
+    request_id: str = Form(""),
+    mode: str = Form("async"),
+    session_key: str = Form(""),
+    expression: str = Form(""),
+):
+    """
+    Receive audio from Stack-chan, run STT, call LLM, then deliver the reply.
+
+    Form fields (all optional):
+    - system_prompt_append: extra instructions appended to the base system prompt
+    - source: label stored in the MQTT message (default: "stackchan")
+    - priority: MQTT message priority (default: "normal")
+    - request_id: caller-supplied idempotency key (auto-generated if omitted)
+    - mode: "async" (default) publishes via MQTT; "sync" returns audioUrl in the response body only
+    - session_key: conversation session identifier (defaults to MQTT_DEVICE_ID)
+    - expression: default expression used when LLM reply does not include one (default: "neutral")
+    """
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
+
+    effective_session_key = session_key or MQTT_DEVICE_ID
+    req_id = request_id or str(uuid.uuid4())
+    # file.read() は本体の受信完了までブロックするため、この区間 ≒ M5Stack からの
+    # アップロード所要時間。録音完了後に一括送信している間は丸ごと待ち時間になる。
+    _t_upload_start = time.monotonic()
+    audio_bytes = await file.read()
+    upload_ms = round((time.monotonic() - _t_upload_start) * 1000)
+    filename = file.filename or "audio.wav"
+    logger.info(
+        "Received audio: filename=%s size=%d upload_ms=%d request_id=%s mode=%s session_key=%s",
+        filename, len(audio_bytes), upload_ms, req_id, mode, effective_session_key,
+    )
+    return await _process_ingest_audio(
+        audio_bytes, filename,
+        system_prompt_append=system_prompt_append, source=source, priority=priority,
+        req_id=req_id, mode=mode, effective_session_key=effective_session_key,
+        expression=expression, upload_ms=upload_ms, transport="batch",
+    )
+
+
+@app.post("/ingest-audio-stream")
+async def ingest_audio_stream(
+    request: Request,
+    audio_format: str = Query("pcm", description="pcm（生PCM）または wav"),
+    sample_rate: int = Query(16000),
+    channels: int = Query(1),
+    bits: int = Query(16),
+    system_prompt_append: str = Query(""),
+    source: str = Query("stackchan"),
+    priority: str = Query("normal"),
+    request_id: str = Query(""),
+    mode: str = Query("async"),
+    session_key: str = Query(""),
+    expression: str = Query(""),
+):
+    """
+    録音しながら送られてくる音声をチャンク単位で受け取り、揃った時点で /ingest-audio と
+    同じパイプラインに流す。
+
+    M5Stack 側が「録音完了 → 一括送信」ではなく「録音開始と同時に送信開始」にできるため、
+    アップロード時間を録音時間の裏に隠せる。受信後の処理は /ingest-audio と完全に同一。
+
+    Body: 音声データ本体（chunked transfer-encoding での逐次送信を想定）
+      - audio_format=pcm: ヘッダなしの生 PCM。sample_rate/channels/bits から WAV を組み立てる
+                          （WAV ヘッダは先頭にデータ長を持つため録音開始時点では書けない）
+      - audio_format=wav: WAV をそのまま送る場合
+
+    オプションは /ingest-audio と同じものをクエリパラメータで受け取る。
+    """
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not configured")
+
+    effective_session_key = session_key or MQTT_DEVICE_ID
+    req_id = request_id or str(uuid.uuid4())
+
+    _t_recv_start = time.monotonic()
+    _t_first_byte: float | None = None
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        if _t_first_byte is None:
+            _t_first_byte = time.monotonic()
+        chunks.append(chunk)
+        total += len(chunk)
+    raw = b"".join(chunks)
+
+    if not raw:
+        raise HTTPException(status_code=400, detail="audio body is empty")
+
+    # 受信区間は録音と重なるため、batch の upload_ms とは意味が異なる
+    # （録音時間を含む）。比較を誤らないよう transport 列で区別して記録する。
+    recv_ms = round((time.monotonic() - _t_recv_start) * 1000)
+    ttfb_ms = round(((_t_first_byte or _t_recv_start) - _t_recv_start) * 1000)
+
+    if audio_format == "wav" or _audio_mod.looks_like_wav(raw):
+        audio_bytes = raw
+    else:
+        audio_bytes = _audio_mod.pcm_to_wav(raw, sample_rate=sample_rate, channels=channels, bits=bits)
+
+    logger.info(
+        "Received audio (stream): format=%s raw=%d wav=%d chunks=%d recv_ms=%d ttfb_ms=%d"
+        " request_id=%s mode=%s session_key=%s",
+        audio_format, total, len(audio_bytes), len(chunks), recv_ms, ttfb_ms,
+        req_id, mode, effective_session_key,
+    )
+    return await _process_ingest_audio(
+        audio_bytes, "audio.wav",
+        system_prompt_append=system_prompt_append, source=source, priority=priority,
+        req_id=req_id, mode=mode, effective_session_key=effective_session_key,
+        expression=expression, upload_ms=recv_ms, transport="stream",
+    )

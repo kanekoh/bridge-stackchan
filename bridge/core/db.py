@@ -226,11 +226,31 @@ def _init_db() -> None:
         "ALTER TABLE ingest_audio_metrics ADD COLUMN speaker_id_ms  INTEGER",
         "ALTER TABLE ingest_audio_metrics ADD COLUMN upload_ms      INTEGER",
         "ALTER TABLE ingest_audio_metrics ADD COLUMN audio_bytes    INTEGER",
+        "ALTER TABLE ingest_audio_metrics ADD COLUMN transport      TEXT",
     ]:
         try:
             _db_conn.execute(col_def)
         except sqlite3.OperationalError:
             pass  # already exists
+    # 会話の生ログ。llm_sessions.summary は要約の要約で細部が失われるため、
+    # 後から記憶を組み立て直せるよう発話そのものを残す。
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_key TEXT,
+            speaker     TEXT,
+            user_text   TEXT NOT NULL,
+            reply_text  TEXT,
+            source      TEXT,
+            created_at  TEXT NOT NULL
+        )
+    """)
+    _db_conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversations_created ON conversations(created_at)"
+    )
+    _db_conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_conversations_speaker ON conversations(speaker, created_at)"
+    )
     _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS location_history (
             id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -310,6 +330,66 @@ def _get_all_family_members() -> list[dict]:
             "SELECT id, name, slack_user_id, mac_address, created_at, updated_at FROM family_members ORDER BY name",
         ).fetchall()
     return [{"id": r[0], "name": r[1], "slack_user_id": r[2], "mac_address": r[3], "created_at": r[4], "updated_at": r[5]} for r in rows]
+
+
+_CONVERSATION_MAX_ROWS = 50000
+
+
+def _save_conversation(
+    *,
+    session_key: str,
+    speaker: str | None,
+    user_text: str,
+    reply_text: str,
+    source: str,
+) -> None:
+    """会話 1 往復を生のまま保存する（要約前の記録を残すのが目的）。
+
+    保存に失敗しても会話自体は成立させたいので、例外は握りつぶして warning に留める。
+    """
+    if not user_text:
+        return
+    try:
+        with _db_lock:
+            _db_conn.execute(  # type: ignore[union-attr]
+                "INSERT INTO conversations"
+                " (session_key, speaker, user_text, reply_text, source, created_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (session_key, speaker, user_text, reply_text, source,
+                 datetime.now(_JST).isoformat()),
+            )
+            _db_conn.execute(  # type: ignore[union-attr]
+                "DELETE FROM conversations WHERE id NOT IN"
+                " (SELECT id FROM conversations ORDER BY id DESC LIMIT ?)",
+                (_CONVERSATION_MAX_ROWS,),
+            )
+            _db_conn.commit()  # type: ignore[union-attr]
+    except Exception as e:
+        logger.warning("conversation save failed (non-fatal): %s", e)
+
+
+def _fetch_conversations(
+    *, since: str | None = None, speaker: str | None = None, limit: int = 500,
+) -> list[dict]:
+    """会話ログを新しい順に取得する。夜間バッチや UI からの参照用。"""
+    sql = ("SELECT id, session_key, speaker, user_text, reply_text, source, created_at"
+           " FROM conversations WHERE 1=1")
+    params: list = []
+    if since:
+        sql += " AND created_at >= ?"
+        params.append(since)
+    if speaker:
+        sql += " AND speaker = ?"
+        params.append(speaker)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    with _db_lock:
+        rows = _db_conn.execute(sql, params).fetchall()  # type: ignore[union-attr]
+    return [
+        {"id": r[0], "session_key": r[1], "speaker": r[2], "user_text": r[3],
+         "reply_text": r[4], "source": r[5], "created_at": r[6]}
+        for r in rows
+    ]
 
 
 def _resolve_display_name(slack_user_id: str | None, fallback: str) -> str:
@@ -531,6 +611,7 @@ def _save_ingest_metrics(
     speaker_id_ms: int | None = None,
     upload_ms: int | None = None,
     audio_bytes: int | None = None,
+    transport: str | None = None,
 ) -> None:
     """/ingest-audio の各ステージ所要時間を記録する（直近 5000 件を保持）。"""
     now = datetime.now(_JST)
@@ -539,14 +620,14 @@ def _save_ingest_metrics(
             "INSERT INTO ingest_audio_metrics"
             " (request_id, ts_ms, mode, transcript_chars, reply_chars,"
             "  stt_ms, llm_ms, voicevox_ms, mqtt_ms, total_ms, created_at,"
-            "  stt_only_ms, speaker_id_ms, upload_ms, audio_bytes)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "  stt_only_ms, speaker_id_ms, upload_ms, audio_bytes, transport)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 request_id, int(now.timestamp() * 1000), mode,
                 transcript_chars, reply_chars,
                 stt_ms, llm_ms, voicevox_ms, mqtt_ms, total_ms,
                 now.isoformat(),
-                stt_only_ms, speaker_id_ms, upload_ms, audio_bytes,
+                stt_only_ms, speaker_id_ms, upload_ms, audio_bytes, transport,
             ),
         )
         _db_conn.execute(
@@ -562,7 +643,7 @@ def _fetch_ingest_metrics(hours: int) -> list[dict]:
         rows = _db_conn.execute(  # type: ignore[union-attr]
             "SELECT ts_ms, mode, transcript_chars, reply_chars,"
             "       stt_ms, llm_ms, voicevox_ms, mqtt_ms, total_ms,"
-            "       stt_only_ms, speaker_id_ms, upload_ms, audio_bytes"
+            "       stt_only_ms, speaker_id_ms, upload_ms, audio_bytes, transport"
             " FROM ingest_audio_metrics WHERE ts_ms >= ? ORDER BY ts_ms ASC",
             (cutoff_ms,),
         ).fetchall()
@@ -573,7 +654,7 @@ def _fetch_ingest_metrics(hours: int) -> list[dict]:
             "stt_ms": r[4], "llm_ms": r[5], "voicevox_ms": r[6],
             "mqtt_ms": r[7], "total_ms": r[8],
             "stt_only_ms": r[9], "speaker_id_ms": r[10],
-            "upload_ms": r[11], "audio_bytes": r[12],
+            "upload_ms": r[11], "audio_bytes": r[12], "transport": r[13],
         }
         for r in rows
     ]

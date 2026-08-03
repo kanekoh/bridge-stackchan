@@ -1,8 +1,29 @@
 import logging
+import struct
 import httpx
 from bridge.config import VOICEVOX_URL, VOICEVOX_SPEAKER, VOICEVOX_API_KEY
 
 logger = logging.getLogger(__name__)
+
+
+def pcm_to_wav(pcm: bytes, sample_rate: int = 16000, channels: int = 1, bits: int = 16) -> bytes:
+    """生 PCM に 44 バイトの WAV ヘッダを付けて返す。
+
+    WAV ヘッダは先頭にデータ長を持つため、録音開始時点では確定できない。
+    ストリーミング受信では生 PCM を受け取り、全チャンクが揃ってから
+    ここでヘッダを組み立てる。
+    """
+    byte_rate = sample_rate * channels * bits // 8
+    block_align = channels * bits // 8
+    header = b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE"
+    header += b"fmt " + struct.pack("<IHHIIHH", 16, 1, channels, sample_rate, byte_rate, block_align, bits)
+    header += b"data" + struct.pack("<I", len(pcm))
+    return header + pcm
+
+
+def looks_like_wav(data: bytes) -> bool:
+    """先頭が RIFF/WAVE なら WAV とみなす。"""
+    return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE"
 
 # Shared httpx.AsyncClient — set by main.py during lifespan startup.
 # This module re-uses the client created in main.py to avoid creating a

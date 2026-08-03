@@ -17,7 +17,7 @@ from bridge.config import (
     ISS_MIN_ELEVATION, SESSION_SUMMARY_THRESHOLD, LLM_BACKEND, MQTT_DEVICE_ID,
 )
 import bridge.core.db as _db_mod
-from bridge.core.db import _db_lock, _get_setting, _set_setting, _fetch_ingest_metrics
+from bridge.core.db import _db_lock, _get_setting, _set_setting, _fetch_ingest_metrics, _fetch_conversations
 from bridge.core.expression import _parse_expression, _resolve_expression
 from bridge.core.audio import resolve_audio_url
 from bridge.devices.mqtt import publish_speak
@@ -199,6 +199,15 @@ def api_p2pquake_status():
         "ws": dict(_p2pquake_ws_status),
         "recent_events": list(reversed(_p2pquake_recent_events)),  # 新しい順
     }
+
+
+@router.get("/api/debug/conversations")
+def api_debug_conversations(
+    limit: int = Query(default=100, le=1000),
+    speaker: str = Query(default=""),
+):
+    """保存済みの会話生ログを新しい順に返す（記憶抽出バッチ・確認用）。"""
+    return {"conversations": _fetch_conversations(speaker=speaker or None, limit=limit)}
 
 
 @router.get("/api/debug/earthquake/map")
