@@ -63,8 +63,66 @@
 
 {% block scripts %}
 <script>
+  // モデル選択：価格と実測レイテンシを並べた比較表から選ぶ
+  function renderModelSelect(s) {
+    const effective = s.value || s.env_default || '';
+    const isStt = s.options.some(o => o.price_min !== undefined);
+    const money = v => '$' + (v < 0.01 ? v.toFixed(4) : v.toFixed(2));
+    const priceCell = o => isStt
+      ? `<td class="py-2 pr-3 text-right whitespace-nowrap">${money(o.price_min)}</td>`
+      : `<td class="py-2 pr-3 text-right whitespace-nowrap">${money(o.price_in)}<span class="text-gray-300"> / </span>${money(o.price_out)}</td>`;
+    // 一番安いもの・一番速いものにしるしを付ける
+    const cheapest = s.options.reduce((a, b) =>
+      (isStt ? a.price_min <= b.price_min : a.price_in <= b.price_in) ? a : b);
+    const fastest = s.options.reduce((a, b) => a.latency_ms <= b.latency_ms ? a : b);
+    const badge = o => [
+      o === cheapest ? '<span class="ml-1 px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700">最安</span>' : '',
+      o === fastest  ? '<span class="ml-1 px-1.5 py-0.5 rounded text-xs bg-blue-50 text-blue-700">最速</span>' : '',
+    ].join('');
+
+    const rows = s.options.map(o => `
+      <tr class="border-t border-gray-100 hover:bg-gray-50 cursor-pointer ${effective === o.value ? 'bg-blue-50' : ''}"
+          onclick="document.getElementById('opt-${esc(s.key)}-${esc(o.value)}').checked = true">
+        <td class="py-2 pr-2 align-top">
+          <input type="radio" id="opt-${esc(s.key)}-${esc(o.value)}" name="${esc(s.key)}" value="${esc(o.value)}"
+                 class="accent-blue-500" ${effective === o.value ? 'checked' : ''}>
+        </td>
+        <td class="py-2 pr-3 align-top">
+          <div class="font-mono text-xs text-gray-800">${esc(o.label)}${badge(o)}</div>
+          <div class="text-xs text-gray-400 mt-0.5">${esc(o.note || '')}</div>
+        </td>
+        ${priceCell(o)}
+        <td class="py-2 pr-3 text-right whitespace-nowrap text-gray-600">${o.latency_ms}ms</td>
+        <td class="py-2 text-right whitespace-nowrap text-gray-500">${o.tool_ms ? o.tool_ms + 'ms' : '—'}</td>
+      </tr>`).join('');
+
+    return `
+      <div class="w-full overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead>
+            <tr class="text-gray-400">
+              <th class="w-6"></th>
+              <th class="text-left font-normal py-1">モデル</th>
+              <th class="text-right font-normal py-1 pr-3 whitespace-nowrap">
+                価格${isStt ? '' : '（入力/出力）'}<br><span class="text-gray-300">${esc(s.price_unit || '')}あたり</span>
+              </th>
+              <th class="text-right font-normal py-1 pr-3 whitespace-nowrap">応答<br><span class="text-gray-300">実測</span></th>
+              <th class="text-right font-normal py-1 whitespace-nowrap">ツール込<br><span class="text-gray-300">実測</span></th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <p class="text-xs text-gray-400 mt-2">
+          応答＝短い雑談1往復、ツール込＝タイマー設定など道具を使う場合の合計。同一条件での実測値で、通信状況により上下します。
+        </p>
+      </div>`;
+  }
+
   function renderInput(s) {
     const effective = s.value || s.env_default || '';
+    if (s.type === 'model_select' && s.options) {
+      return renderModelSelect(s);
+    }
     if (s.type === 'select' && s.options) {
       const opts = s.options.map(o =>
         `<option value="${esc(o.value)}" ${effective === o.value ? 'selected' : ''}>${esc(o.label)}</option>`
@@ -92,19 +150,25 @@
           <p class="text-xs text-gray-400 mt-0.5">${esc(s.description)}</p>
           ${s.env_default ? `<p class="text-xs text-gray-400 mt-1">環境変数デフォルト: <code class="bg-gray-100 px-1 rounded">${esc(s.env_default)}</code></p>` : ''}
         </div>
-        <div class="flex gap-2 items-start">
+        <div class="${s.type === 'model_select' ? 'flex flex-col gap-2 items-stretch' : 'flex gap-2 items-start'}">
           ${renderInput(s)}
+          <div class="${s.type === 'model_select' ? 'flex gap-2 justify-end' : 'contents'}">
           <button onclick="saveSetting('${esc(s.key)}')" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded whitespace-nowrap">保存</button>
           <button onclick="resetSetting('${esc(s.key)}')" class="text-gray-400 hover:text-gray-600 text-sm px-3 py-2 whitespace-nowrap" title="デフォルトに戻す">↺</button>
+          </div>
         </div>
       </div>`).join('');
   }
 
   async function saveSetting(key) {
-    const input = document.getElementById('input-' + key);
     const msg = document.getElementById('saveMsg');
+    // model_select は input 要素ではなく radio 群なので、選択中の値を拾う
+    const radio = document.querySelector(`input[name="${key}"]:checked`);
+    const input = document.getElementById('input-' + key);
+    const value = radio ? radio.value : (input ? input.value : '');
+    if (!radio && !input) { msg.textContent = '❌ 入力要素が見つかりません'; return; }
     const fd = new FormData();
-    fd.append('value', input.value);
+    fd.append('value', value);
     try {
       await apiFetch(`/api/settings/${key}`, { method: 'PUT', body: fd });
       msg.textContent = '✅ 保存しました（反映は次回ページ読み込み時）';

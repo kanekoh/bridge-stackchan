@@ -10,6 +10,7 @@ from bridge.config import (
     P2PQUAKE_MIN_SCALE, P2PQUAKE_TSUNAMI_TARGET_AREAS,
     WEATHER_NOTIFY_RAIN, ISS_NOTIFY_ENABLED,
     GOOGLE_GEOLOCATION_API_KEY,
+    OPENAI_RESPONSES_MODEL, STT_MODEL, OPENAI_RESPONSES_REASONING_EFFORT,
 )
 import bridge.core.db as _db_mod
 from bridge.core.db import (
@@ -24,7 +25,91 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+# 会話生成に使うモデル。低価格帯のみを選択肢にする。
+# latency_ms / tool_ms は実測値（Responses API・ツール定義込み・gpt-5 系は effort=none）。
+# 価格は 1M トークンあたりの USD。数値は目安で、OpenAI 側の改定で変わりうる。
+_LLM_MODEL_OPTIONS = [
+    {
+        "value": "gpt-4.1-nano", "label": "gpt-4.1-nano",
+        "price_in": 0.10, "price_out": 0.40,
+        "latency_ms": 1279, "tool_ms": 4307,
+        "note": "最安。単純な応答向き。ツール利用時は遅め",
+    },
+    {
+        "value": "gpt-4o-mini", "label": "gpt-4o-mini",
+        "price_in": 0.15, "price_out": 0.60,
+        "latency_ms": 1955, "tool_ms": 2110,
+        "note": "安価で安定。ツール往復が速い",
+    },
+    {
+        "value": "gpt-5.6-luna", "label": "gpt-5.6-luna",
+        "price_in": 0.20, "price_out": 1.20,
+        "latency_ms": 951, "tool_ms": 2544,
+        "note": "新しい世代。応答が速い。推論の深さは下の設定で調整",
+    },
+    {
+        "value": "gpt-4.1-mini", "label": "gpt-4.1-mini",
+        "price_in": 0.40, "price_out": 1.60,
+        "latency_ms": 1202, "tool_ms": 2812,
+        "note": "この中では高め。バランス型",
+    },
+]
+
+# 音声認識モデル。価格は音声1分あたりの USD、latency_ms は実測平均。
+_STT_MODEL_OPTIONS = [
+    {
+        "value": "gpt-4o-mini-transcribe", "label": "gpt-4o-mini-transcribe",
+        "price_min": 0.003, "latency_ms": 828,
+        "note": "最安。ただし実測のばらつきが大きい",
+    },
+    {
+        "value": "gpt-transcribe", "label": "gpt-transcribe",
+        "price_min": 0.0045, "latency_ms": 619,
+        "note": "最も速く安定。誤り率も低い（2026-07 の新モデル）",
+    },
+    {
+        "value": "gpt-4o-transcribe", "label": "gpt-4o-transcribe",
+        "price_min": 0.006, "latency_ms": 748,
+        "note": "従来の上位モデル",
+    },
+]
+
 _EDITABLE_SETTINGS = {
+    "openai_responses_model": {
+        "label": "会話モデル（LLM）",
+        "description": (
+            "スタックちゃんの返答を生成するモデル。低価格帯のみを選択肢にしています。"
+            "レイテンシは同一条件での実測値で、通信状況により上下します。"
+        ),
+        "env_fallback": lambda: OPENAI_RESPONSES_MODEL,
+        "type": "model_select",
+        "options": _LLM_MODEL_OPTIONS,
+        "price_unit": "1Mトークン",
+    },
+    "openai_responses_reasoning_effort": {
+        "label": "推論の深さ（gpt-5 系のみ）",
+        "description": (
+            "gpt-5 系モデルが返答前にどれだけ考えるか。深くするほど遅く、"
+            "隠れた推論トークンのぶん課金も増えます。会話用途では none で十分です。"
+            "gpt-4 系を選んでいる場合この設定は送信されません。"
+        ),
+        "env_fallback": lambda: OPENAI_RESPONSES_REASONING_EFFORT,
+        "type": "select",
+        "options": [
+            {"value": "none",   "label": "none — 推論なし（推奨・最速）"},
+            {"value": "low",    "label": "low — 少し考える"},
+            {"value": "medium", "label": "medium — 標準（API既定）"},
+            {"value": "high",   "label": "high — じっくり考える"},
+        ],
+    },
+    "stt_model": {
+        "label": "音声認識モデル（STT）",
+        "description": "話しかけた音声を文字にするモデル。価格は音声1分あたりです。",
+        "env_fallback": lambda: STT_MODEL,
+        "type": "model_select",
+        "options": _STT_MODEL_OPTIONS,
+        "price_unit": "音声1分",
+    },
     "speaker_id_browser_url": {
         "label": "Speaker-ID ブラウザ向け URL",
         "description": "ブラウザから話者登録・テストページにアクセスする URL（例: http://raspberrypi:8082）",
@@ -130,6 +215,8 @@ def api_get_settings():
         }
         if "options" in meta:
             entry["options"] = meta["options"]
+        if "price_unit" in meta:
+            entry["price_unit"] = meta["price_unit"]
         result.append(entry)
     return result
 

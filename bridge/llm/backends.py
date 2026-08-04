@@ -8,6 +8,7 @@ import bridge.config as _cfg
 from bridge.core.expression import _STACKCHAN_SYSTEM_PROMPT
 from bridge.core.db import (
     _SessionData, _get_session_data, _save_session, _summarize_and_reset_session,
+    _get_setting,
 )
 from bridge.llm.persona import _build_datetime_context, _build_location_context, _build_birthday_context, _build_family_context
 
@@ -173,9 +174,9 @@ class OpenAIResponsesBackend:
 
         OPENAI_RESPONSES_BASE_URL = _cfg_val("OPENAI_RESPONSES_BASE_URL")
         OPENAI_API_KEY = _cfg_val("OPENAI_API_KEY")
-        OPENAI_RESPONSES_MODEL = _cfg_val("OPENAI_RESPONSES_MODEL")
+        OPENAI_RESPONSES_MODEL = _get_setting("openai_responses_model", "") or _cfg_val("OPENAI_RESPONSES_MODEL")
         OPENAI_RESPONSES_MAX_OUTPUT_TOKENS = _cfg_val("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS")
-        OPENAI_RESPONSES_REASONING_EFFORT = _cfg_val("OPENAI_RESPONSES_REASONING_EFFORT")
+        OPENAI_RESPONSES_REASONING_EFFORT = _get_setting("openai_responses_reasoning_effort", "") or _cfg_val("OPENAI_RESPONSES_REASONING_EFFORT")
         OPENAI_RESPONSES_WEB_SEARCH = _cfg_val("OPENAI_RESPONSES_WEB_SEARCH")
         OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND = _cfg_val("OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND")
         OPENAI_RESPONSES_WEB_SEARCH_TOOL = _cfg_val("OPENAI_RESPONSES_WEB_SEARCH_TOOL")

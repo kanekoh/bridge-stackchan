@@ -4,6 +4,7 @@ import sys
 import httpx
 import openai
 from bridge.config import OPENAI_API_KEY, STT_MODEL
+from bridge.core.db import _get_setting
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,8 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     buf = io.BytesIO(audio_bytes)
     buf.name = filename or "audio.wav"
     openai_client = _get_main_attr("_openai_client") or openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
-    stt_model = _get_main_attr("STT_MODEL", STT_MODEL)
+    # 設定画面の値を優先し、未設定なら env のデフォルトを使う
+    stt_model = _get_setting("stt_model", "") or _get_main_attr("STT_MODEL", STT_MODEL)
     result = await openai_client.audio.transcriptions.create(
         model=stt_model,
         file=buf,
