@@ -10,7 +10,10 @@ from bridge.core.db import (
     _SessionData, _get_session_data, _save_session, _summarize_and_reset_session,
     _get_setting,
 )
-from bridge.llm.persona import _build_datetime_context, _build_location_context, _build_birthday_context, _build_family_context
+from bridge.llm.persona import (
+    _build_datetime_context, _build_location_context, _build_birthday_context,
+    _build_family_context, _build_memory_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,7 @@ class OpenClawResponsesBackend:
         _CALENDAR_TOOLS = getattr(main_mod, "_CALENDAR_TOOLS", [])
         _MESSAGE_TOOLS = getattr(main_mod, "_MESSAGE_TOOLS", [])
         _ALERT_TOOLS = getattr(main_mod, "_ALERT_TOOLS", [])
+        _MEMORY_TOOLS = getattr(main_mod, "_MEMORY_TOOLS", [])
 
         OPENCLAW_BASE_URL = _cfg_val("OPENCLAW_BASE_URL")
         OPENCLAW_GATEWAY_TOKEN = _cfg_val("OPENCLAW_GATEWAY_TOKEN")
@@ -107,6 +111,11 @@ class OpenClawResponsesBackend:
         fam_ctx = _build_family_context()
         if fam_ctx:
             instructions_parts.append(fam_ctx)
+        # 通知の一言生成では記憶を持ち出さない（会話のときだけ）
+        if purpose != "notify":
+            mem_ctx = _build_memory_context(speaker)
+            if mem_ctx:
+                instructions_parts.append(mem_ctx)
         loc_ctx = _build_location_context()
         if loc_ctx:
             instructions_parts.append(loc_ctx)
@@ -122,6 +131,8 @@ class OpenClawResponsesBackend:
             tools.extend(_CALENDAR_TOOLS)
         if use_functions:
             tools.extend(_MESSAGE_TOOLS)
+        if use_functions:
+            tools.extend(_MEMORY_TOOLS)
         if use_functions and P2PQUAKE_ENABLED:
             tools.extend(_ALERT_TOOLS)
 
@@ -185,6 +196,7 @@ class OpenAIResponsesBackend:
         _CALENDAR_TOOLS = getattr(main_mod, "_CALENDAR_TOOLS", [])
         _MESSAGE_TOOLS = getattr(main_mod, "_MESSAGE_TOOLS", [])
         _ALERT_TOOLS = getattr(main_mod, "_ALERT_TOOLS", [])
+        _MEMORY_TOOLS = getattr(main_mod, "_MEMORY_TOOLS", [])
         _REQUEST_WEB_SEARCH_TOOL = getattr(main_mod, "_REQUEST_WEB_SEARCH_TOOL", None)
 
         OPENAI_RESPONSES_BASE_URL = _cfg_val("OPENAI_RESPONSES_BASE_URL")
@@ -216,6 +228,11 @@ class OpenAIResponsesBackend:
         fam_ctx = _build_family_context()
         if fam_ctx:
             instructions_parts.append(fam_ctx)
+        # 通知の一言生成では記憶を持ち出さない（会話のときだけ）
+        if purpose != "notify":
+            mem_ctx = _build_memory_context(speaker)
+            if mem_ctx:
+                instructions_parts.append(mem_ctx)
         loc_ctx = _build_location_context()
         if loc_ctx:
             instructions_parts.append(loc_ctx)
@@ -248,6 +265,8 @@ class OpenAIResponsesBackend:
             tools.extend(_CALENDAR_TOOLS)
         if use_functions and not DISABLE_TOOLS:
             tools.extend(_MESSAGE_TOOLS)
+        if use_functions and not DISABLE_TOOLS:
+            tools.extend(_MEMORY_TOOLS)
         if use_functions and P2PQUAKE_ENABLED and not DISABLE_TOOLS:
             tools.extend(_ALERT_TOOLS)
         if OPENAI_RESPONSES_WEB_SEARCH and not DISABLE_TOOLS:

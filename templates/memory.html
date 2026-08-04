@@ -17,6 +17,27 @@
   <div id="knownNow" class="bg-white rounded-lg border border-gray-200 p-4 text-sm text-gray-500">読み込み中...</div>
 </section>
 
+<!-- 長期記憶 -->
+<section class="mb-6">
+  <div class="flex items-center justify-between mb-2">
+    <h2 class="text-xs font-semibold text-gray-400 tracking-wide">覚えていること（長期記憶）</h2>
+    <div class="flex items-center gap-2">
+      <label class="text-xs text-gray-400">見る人
+        <select id="memSpeaker" class="text-xs border border-gray-200 rounded px-1 py-0.5 ml-1">
+          <option value="">すべて（管理者視点）</option>
+        </select>
+      </label>
+      <button onclick="extractNow()" class="text-xs border border-gray-300 hover:bg-gray-50 rounded px-2 py-1">今すぐ抽出</button>
+    </div>
+  </div>
+  <p class="text-xs text-gray-400 mb-2">
+    夜間バッチが会話から抜き出したものです。「見る人」を選ぶと、その人に話してよい記憶だけに絞れます
+    （サプライズなど、本人に隠す記憶はここで確認できます）。
+  </p>
+  <div id="memStatus" class="text-xs text-gray-400 mb-2"></div>
+  <div id="memories" class="space-y-2"></div>
+</section>
+
 <!-- セッション要約 -->
 <section class="mb-6">
   <h2 class="text-xs font-semibold text-gray-400 mb-2 tracking-wide">会話の要約（短期記憶）</h2>
@@ -146,7 +167,66 @@ async function loadConversations() {
   }
 }
 
-function loadAll() { loadKnownNow(); loadSessions(); loadConversations(); }
+async function loadMemories() {
+  const el = document.getElementById('memories');
+  const status = document.getElementById('memStatus');
+  const sp = document.getElementById('memSpeaker').value;
+  try {
+    const d = await apiFetch('/api/debug/memories' + (sp ? `?speaker=${encodeURIComponent(sp)}` : ''));
+    const list = d.memories || [];
+    const c = d.counts || {};
+    el.innerHTML = list.map(m => `
+      <div class="bg-white rounded-lg border border-gray-200 p-3 flex items-start gap-3">
+        <div class="flex-1 min-w-0">
+          <p class="text-sm text-gray-800">${esc(m.content)}</p>
+          <div class="flex flex-wrap items-center gap-1.5 mt-1 text-xs">
+            <span class="px-1.5 py-0.5 rounded ${m.kind === 'profile' ? 'bg-purple-50 text-purple-700' : 'bg-gray-100 text-gray-500'}">${esc(m.kind)}</span>
+            ${m.about ? `<span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">${esc(m.about)}のこと</span>` : ''}
+            ${m.hide_from
+              ? `<span class="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">🤫 ${esc(m.hide_from)}には内緒</span>`
+              : ''}
+            <span class="text-gray-300">${esc((m.happened_on || m.created_at || '').slice(0,10))}</span>
+          </div>
+        </div>
+        <button onclick="forgetMemory(${m.id})" class="text-gray-300 hover:text-red-500 text-xs shrink-0" title="この記憶を消す">✕</button>
+      </div>`).join('');
+    status.textContent = list.length
+      ? `${list.length} 件表示中（全 ${c.total || 0} 件・検索可能 ${c.embedded || 0} 件）`
+      : 'まだ記憶がありません。会話が貯まると夜間に抽出されます。';
+  } catch (e) {
+    status.textContent = '❌ ' + e.message;
+  }
+}
+
+async function forgetMemory(id) {
+  if (!confirm('この記憶を消しますか？')) return;
+  try {
+    await apiFetch(`/api/debug/memories/${id}`, { method: 'DELETE' });
+    loadMemories();
+  } catch (e) { alert('失敗: ' + e.message); }
+}
+
+async function extractNow() {
+  const status = document.getElementById('memStatus');
+  status.textContent = '会話から抽出中...';
+  try {
+    const r = await apiFetch('/api/debug/memories/extract?hours=24', { method: 'POST' });
+    status.textContent = `会話${r.conversations}件から ${r.saved} 件を新しく覚えました`;
+    loadMemories();
+  } catch (e) { status.textContent = '❌ ' + e.message; }
+}
+
+async function fillSpeakerOptions() {
+  try {
+    const members = await apiFetch('/api/family-members');
+    const sel = document.getElementById('memSpeaker');
+    sel.innerHTML = '<option value="">すべて（管理者視点）</option>' +
+      members.map(m => `<option value="${esc(m.name)}">${esc(m.name)}</option>`).join('');
+  } catch (e) { /* 家族未登録なら「すべて」のみ */ }
+}
+document.getElementById('memSpeaker').addEventListener('change', loadMemories);
+
+function loadAll() { loadKnownNow(); fillSpeakerOptions(); loadMemories(); loadSessions(); loadConversations(); }
 document.getElementById('speakerFilter').addEventListener('change', loadConversations);
 document.getElementById('limitSel').addEventListener('change', loadConversations);
 loadAll();

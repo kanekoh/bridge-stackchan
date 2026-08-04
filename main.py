@@ -40,6 +40,7 @@ from bridge.llm.backends import (
 
 from bridge.llm.tools import (
     _TIMER_TOOLS, _CALENDAR_TOOLS, _MESSAGE_TOOLS, _ALERT_TOOLS, _WEATHER_TOOLS,
+    _MEMORY_TOOLS,
     _REQUEST_WEB_SEARCH_TOOL,
     _tool_get_weather, _tool_get_upcoming_items, _tool_get_recent_alerts,
     _execute_tool, _handle_function_calls,
@@ -64,6 +65,10 @@ from bridge.features.weather.notify import (
     _iss_speak, _iss_notify_loop,
     _iss_tle_cache, _iss_notified_passes,
     _HtmlTextExtractor, _expand_url_template, _run_web_check, _web_check_notify_loop,
+)
+
+from bridge.features.memory import (
+    extract_memories, memory_extract_loop,
 )
 
 from bridge.features.quake import (
@@ -128,6 +133,9 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_web_check_notify_loop())
     logger.info("Web check notify loop started")
+
+    asyncio.create_task(memory_extract_loop())
+    logger.info("Memory extract loop started")
 
     _mqtt_conn.start()
     logger.info("MQTT eager connect started")

@@ -251,6 +251,33 @@ def _init_db() -> None:
     _db_conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_conversations_speaker ON conversations(speaker, created_at)"
     )
+    # 会話ログから夜間バッチが抽出した長期記憶。
+    # about   : 誰についての記憶か（その人が話しかけたときに引く）
+    # source  : 誰から聞いたか
+    # hide_from: この人には話してはいけない（カンマ区切り。空なら誰にでも話してよい）
+    #            例: しおりの誕生日プレゼントの記憶 → hide_from="しおり"
+    #            「誰に見せてよいか」より「誰に隠すか」の方が LLM が取り違えにくい
+    # embedding: 検索用ベクトル（float32 の生バイト列。次元は embed_dim に持つ）
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS memories (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            content     TEXT NOT NULL,
+            about       TEXT,
+            source      TEXT,
+            hide_from   TEXT NOT NULL DEFAULT '',
+            kind        TEXT NOT NULL DEFAULT 'episode',
+            happened_on TEXT,
+            embedding   BLOB,
+            embed_dim   INTEGER,
+            created_at  TEXT NOT NULL
+        )
+    """)
+    _db_conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_about ON memories(about, created_at)"
+    )
+    _db_conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content ON memories(content)"
+    )
     _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS location_history (
             id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -370,11 +397,19 @@ def _save_conversation(
 
 def _fetch_conversations(
     *, since: str | None = None, speaker: str | None = None, limit: int = 500,
+    after_id: int | None = None,
 ) -> list[dict]:
-    """会話ログを新しい順に取得する。夜間バッチや UI からの参照用。"""
+    """会話ログを新しい順に取得する。夜間バッチや UI からの参照用。
+
+    after_id を渡すとその id より新しいものだけを返す。抽出済みの会話を
+    再度処理して似た記憶が二重に増えるのを防ぐために使う。
+    """
     sql = ("SELECT id, session_key, speaker, user_text, reply_text, source, created_at"
            " FROM conversations WHERE 1=1")
     params: list = []
+    if after_id is not None:
+        sql += " AND id > ?"
+        params.append(after_id)
     if since:
         sql += " AND created_at >= ?"
         params.append(since)
@@ -390,6 +425,110 @@ def _fetch_conversations(
          "reply_text": r[4], "source": r[5], "created_at": r[6]}
         for r in rows
     ]
+
+
+def _save_memory(
+    *,
+    content: str,
+    about: str | None = None,
+    source: str | None = None,
+    hide_from: str = "",
+    kind: str = "episode",
+    happened_on: str | None = None,
+    embedding: bytes | None = None,
+    embed_dim: int | None = None,
+) -> bool:
+    """記憶を1件保存する。同じ本文が既にあれば無視する（True を返したら新規保存）。"""
+    content = (content or "").strip()
+    if not content:
+        return False
+    try:
+        with _db_lock:
+            cur = _db_conn.execute(  # type: ignore[union-attr]
+                "INSERT OR IGNORE INTO memories"
+                " (content, about, source, hide_from, kind, happened_on, embedding, embed_dim, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (content, about, source, hide_from, kind, happened_on,
+                 embedding, embed_dim, datetime.now(_JST).isoformat()),
+            )
+            _db_conn.commit()  # type: ignore[union-attr]
+        return cur.rowcount > 0
+    except Exception as e:
+        logger.warning("memory save failed (non-fatal): %s", e)
+        return False
+
+
+def _fetch_memories_for_speaker(speaker: str | None, limit: int = 8) -> list[dict]:
+    """話者に見せてよい記憶を新しい順に返す（プロンプト常時注入用・埋め込み不要）。
+
+    speaker が特定できない場合は visible='all' のものだけに絞る。
+    伝言の _filter_messages_for_speaker と同じ考え方で、誰に見せてよいかを守る。
+    """
+    sql = ("SELECT id, content, about, source, hide_from, kind, happened_on, created_at"
+           " FROM memories WHERE ")
+    params: list = []
+    if speaker:
+        # hide_from に名前が含まれていなければ見せる。本人についての記憶を上に。
+        sql += "(hide_from = '' OR (',' || hide_from || ',') NOT LIKE ('%,' || ? || ',%')) "
+        params.append(speaker)
+        sql += "ORDER BY (about = ?) DESC, id DESC LIMIT ?"
+        params.extend([speaker, limit])
+    else:
+        # 話者が分からないときは、隠すべき相手が指定された記憶は一切出さない
+        sql += "hide_from = '' ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+    try:
+        with _db_lock:
+            rows = _db_conn.execute(sql, params).fetchall()  # type: ignore[union-attr]
+    except Exception as e:
+        logger.warning("memory fetch failed (non-fatal): %s", e)
+        return []
+    return [
+        {"id": r[0], "content": r[1], "about": r[2], "source": r[3],
+         "hide_from": r[4], "kind": r[5], "happened_on": r[6], "created_at": r[7]}
+        for r in rows
+    ]
+
+
+def _fetch_memories_with_embeddings(speaker: str | None) -> list[dict]:
+    """検索対象の記憶を埋め込み付きで返す（recall ツール用）。"""
+    sql = ("SELECT id, content, about, source, happened_on, created_at, embedding, embed_dim"
+           " FROM memories WHERE embedding IS NOT NULL AND ")
+    params: list = []
+    if speaker:
+        sql += "(hide_from = '' OR (',' || hide_from || ',') NOT LIKE ('%,' || ? || ',%'))"
+        params.append(speaker)
+    else:
+        sql += "hide_from = ''"
+    try:
+        with _db_lock:
+            rows = _db_conn.execute(sql, params).fetchall()  # type: ignore[union-attr]
+    except Exception as e:
+        logger.warning("memory embedding fetch failed (non-fatal): %s", e)
+        return []
+    return [
+        {"id": r[0], "content": r[1], "about": r[2], "source": r[3],
+         "happened_on": r[4], "created_at": r[5], "embedding": r[6], "embed_dim": r[7]}
+        for r in rows
+    ]
+
+
+def _count_memories() -> dict:
+    try:
+        with _db_lock:
+            total = _db_conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]  # type: ignore[union-attr]
+            embedded = _db_conn.execute(  # type: ignore[union-attr]
+                "SELECT COUNT(*) FROM memories WHERE embedding IS NOT NULL").fetchone()[0]
+    except Exception:
+        return {"total": 0, "embedded": 0}
+    return {"total": total, "embedded": embedded}
+
+
+def _delete_memory(memory_id: int) -> bool:
+    with _db_lock:
+        cur = _db_conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))  # type: ignore[union-attr]
+        _db_conn.commit()  # type: ignore[union-attr]
+    return cur.rowcount > 0
 
 
 def _resolve_display_name(slack_user_id: str | None, fallback: str) -> str:

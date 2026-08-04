@@ -4,7 +4,7 @@ import json
 import socket
 import statistics
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import aiohttp
 from fastapi import APIRouter, HTTPException, Query
@@ -17,7 +17,11 @@ from bridge.config import (
     ISS_MIN_ELEVATION, SESSION_SUMMARY_THRESHOLD, LLM_BACKEND, MQTT_DEVICE_ID,
 )
 import bridge.core.db as _db_mod
-from bridge.core.db import _db_lock, _get_setting, _set_setting, _fetch_ingest_metrics, _fetch_conversations
+from bridge.core.db import (
+    _db_lock, _get_setting, _set_setting, _fetch_ingest_metrics, _fetch_conversations,
+    _fetch_memories_for_speaker, _count_memories, _delete_memory,
+)
+from bridge.features.memory import extract_memories
 from bridge.core.expression import _parse_expression, _resolve_expression
 from bridge.core.audio import resolve_audio_url
 from bridge.devices.mqtt import publish_speak
@@ -208,6 +212,29 @@ def api_debug_conversations(
 ):
     """保存済みの会話生ログを新しい順に返す（記憶抽出バッチ・確認用）。"""
     return {"conversations": _fetch_conversations(speaker=speaker or None, limit=limit)}
+
+
+@router.get("/api/debug/memories")
+def api_debug_memories(speaker: str = Query(default=""), limit: int = Query(default=200, le=1000)):
+    """保存済みの長期記憶を返す。speaker を指定するとその人に見せてよいものだけ。"""
+    return {
+        "counts": _count_memories(),
+        "memories": _fetch_memories_for_speaker(speaker or None, limit=limit),
+    }
+
+
+@router.delete("/api/debug/memories/{memory_id}", status_code=204)
+def api_delete_memory(memory_id: int):
+    """記憶を1件削除する（間違って覚えたものを消せるように）。"""
+    if not _delete_memory(memory_id):
+        raise HTTPException(status_code=404, detail="見つかりませんでした")
+
+
+@router.post("/api/debug/memories/extract")
+async def api_extract_memories(hours: int = Query(default=24, le=720)):
+    """記憶抽出を今すぐ実行する（夜間バッチを待たずに試すため）。"""
+    since = (datetime.now(_JST) - timedelta(hours=hours)).isoformat()
+    return await extract_memories(since_iso=since)
 
 
 @router.get("/api/debug/earthquake/map")

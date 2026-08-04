@@ -157,6 +157,29 @@ _WEATHER_TOOLS = [
     },
 ]
 
+_MEMORY_TOOLS = [
+    {
+        "type": "function",
+        "name": "recall",
+        "description": (
+            "昔の出来事や、前に聞いた話を思い出す。"
+            "「夏休みどこ行ったっけ？」「前に話したあれ何だっけ？」など、"
+            "少し前のことを聞かれて手元の記憶では答えられないときに使う。"
+            "直近の話題や今わかっていることには使わない。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "思い出したい内容を簡潔に（例：夏休みの旅行、しおりの好きな食べ物）",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+]
+
 # ON_DEMAND モード時のみ Pass 1 のツール一覧に追加される。
 # LLM がこれを呼ぶと notify_context に enable_web_search フラグが立ち、
 # 次のループで本物の web_search_preview に差し替えられる。
@@ -367,6 +390,33 @@ def _tool_get_recent_alerts(args: dict) -> dict:
     }
 
 
+async def _tool_recall(args: dict, notify_context: dict) -> dict:
+    """埋め込み検索で長期記憶を引く。話者に見せてよいものだけが対象。"""
+    from bridge.core.db import _fetch_memories_with_embeddings
+    from bridge.llm.embeddings import embed_one, search
+
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return {"status": "error", "message": "検索内容が空です"}
+    speaker = notify_context.get("speaker")
+    rows = _fetch_memories_with_embeddings(speaker)
+    if not rows:
+        return {"status": "ok", "memories": [], "note": "まだ覚えていることがありません"}
+    qvec = await embed_one(query)
+    if qvec is None:
+        return {"status": "error", "message": "記憶の検索に失敗しました"}
+    hits = search(qvec, rows, top_k=5)
+    logger.info("Function call recall: query=%s hits=%d speaker=%s", query, len(hits), speaker)
+    return {
+        "status": "ok",
+        "memories": [
+            {"content": h["content"], "about": h.get("about"),
+             "when": h.get("happened_on") or (h.get("created_at") or "")[:10]}
+            for h in hits
+        ],
+    }
+
+
 async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
     """Execute a named tool and return the raw result dict (protocol-agnostic)."""
     _main = sys.modules["main"]
@@ -385,6 +435,8 @@ async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
             args.get("label"), args.get("seconds"), timer_id,
         )
         return {"status": "ok", "timer_id": timer_id, "label": args.get("label"), "seconds": args.get("seconds")}
+    if name == "recall":
+        return await _tool_recall(args, notify_context)
     if name == "list_timers":
         _active_timer_infos = _main._active_timer_infos
         now = datetime.now(_JST)

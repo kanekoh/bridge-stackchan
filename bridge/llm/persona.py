@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 
 from bridge.config import _JST
-from bridge.core.db import _get_setting, _get_all_family_members
+from bridge.core.db import _get_setting, _get_all_family_members, _fetch_memories_for_speaker
 
 logger = logging.getLogger(__name__)
 
@@ -63,4 +63,24 @@ def _build_birthday_context() -> str:
         "【今日はあなたの誕生日です】今日はスタックちゃんの誕生日です。"
         "話しかけられた流れの中で自然に触れてよいですが、無理に毎回言う必要はありません。"
         "お祝いされたら素直に喜んでください。"
+    )
+
+
+def _build_memory_context(speaker: str | None) -> str:
+    """話者に見せてよい記憶を数件、プロンプト用の文字列にして返す。
+
+    埋め込み検索はせず DB を読むだけ（1ms 未満）なので、応答が遅くならない。
+    ここに入った記憶は、聞かれなくても自然と返答ににじむ。
+    """
+    try:
+        memories = _fetch_memories_for_speaker(speaker, limit=8)
+    except Exception as e:
+        logger.warning("memory context build failed (non-fatal): %s", e)
+        return ""
+    if not memories:
+        return ""
+    lines = [f"・{m['content']}" for m in memories]
+    return (
+        "【覚えていること】\n" + "\n".join(lines) + "\n"
+        "会話の流れで自然に触れてよいですが、関係ないときは無理に持ち出さないこと。"
     )
