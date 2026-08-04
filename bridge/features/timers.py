@@ -57,6 +57,7 @@ async def _fire_timer(info: _TimerInfo) -> None:
             system_prompt_append=timer_instruction,
             session_key=info.session_key,
             use_functions=False,  # タイマー発火中は新たなタイマーを受け付けない
+            purpose="notify",
         )
     except Exception as e:
         logger.error("Timer LLM error: timer_id=%s error=%s", info.timer_id, e)

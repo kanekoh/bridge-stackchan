@@ -554,8 +554,14 @@ async def _summarize_and_reset_session(session_key: str, previous_response_id: s
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENAI_API_KEY}",
     }
+    # 要約はツールも使わない単純な生成なので、通知用の安いモデルがあればそれを使う
+    summary_model = (
+        _get_setting("openai_responses_model_notify", "")
+        or _get_setting("openai_responses_model", "")
+        or OPENAI_RESPONSES_MODEL
+    )
     payload = {
-        "model": OPENAI_RESPONSES_MODEL,
+        "model": summary_model,
         "previous_response_id": previous_response_id,
         "input": (
             "これまでの会話を日本語で要約してください。"

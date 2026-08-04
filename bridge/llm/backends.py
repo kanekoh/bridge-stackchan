@@ -36,6 +36,18 @@ def _supports_reasoning_effort(model: str) -> bool:
     return model.startswith(_REASONING_MODEL_PREFIXES)
 
 
+def _resolve_model(purpose: str) -> str:
+    """用途に応じて使うモデルを決める。
+
+    purpose="notify" は地震・天気・タイマーなどの短い一言生成。ツールも会話履歴も
+    使わないため、会話用より安いモデルで足りる。未設定なら会話用にフォールバックする。
+    """
+    chat_model = _get_setting("openai_responses_model", "") or _cfg_val("OPENAI_RESPONSES_MODEL")
+    if purpose == "notify":
+        return _get_setting("openai_responses_model_notify", "") or chat_model
+    return chat_model
+
+
 class LLMBackend(Protocol):
     async def chat(
         self,
@@ -46,6 +58,7 @@ class LLMBackend(Protocol):
         session_key: str,
         notify_context: dict | None,
         use_functions: bool,
+        purpose: str = "chat",
     ) -> str: ...
 
 
@@ -59,6 +72,7 @@ class OpenClawResponsesBackend:
         session_key: str,
         notify_context: dict | None,
         use_functions: bool,
+        purpose: str = "chat",
     ) -> str:
         main_mod = _get_main()
         _http_client = getattr(main_mod, "_http_client", None)
@@ -72,7 +86,7 @@ class OpenClawResponsesBackend:
         OPENCLAW_BASE_URL = _cfg_val("OPENCLAW_BASE_URL")
         OPENCLAW_GATEWAY_TOKEN = _cfg_val("OPENCLAW_GATEWAY_TOKEN")
         OPENCLAW_SESSION_KEY = _cfg_val("OPENCLAW_SESSION_KEY")
-        OPENCLAW_MODEL = _cfg_val("OPENCLAW_MODEL")
+        OPENCLAW_MODEL = _cfg_val("OPENCLAW_MODEL")  # OpenClaw はモデル切替の対象外
         OPENCLAW_MAX_OUTPUT_TOKENS = _cfg_val("OPENCLAW_MAX_OUTPUT_TOKENS")
         CALENDAR_ENABLED = _cfg_val("CALENDAR_ENABLED")
         P2PQUAKE_ENABLED = _cfg_val("P2PQUAKE_ENABLED")
@@ -161,6 +175,7 @@ class OpenAIResponsesBackend:
         session_key: str,
         notify_context: dict | None,
         use_functions: bool,
+        purpose: str = "chat",
     ) -> str:
         main_mod = _get_main()
         _http_client = getattr(main_mod, "_http_client", None)
@@ -174,7 +189,7 @@ class OpenAIResponsesBackend:
 
         OPENAI_RESPONSES_BASE_URL = _cfg_val("OPENAI_RESPONSES_BASE_URL")
         OPENAI_API_KEY = _cfg_val("OPENAI_API_KEY")
-        OPENAI_RESPONSES_MODEL = _get_setting("openai_responses_model", "") or _cfg_val("OPENAI_RESPONSES_MODEL")
+        OPENAI_RESPONSES_MODEL = _resolve_model(purpose)
         OPENAI_RESPONSES_MAX_OUTPUT_TOKENS = _cfg_val("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS")
         OPENAI_RESPONSES_REASONING_EFFORT = _get_setting("openai_responses_reasoning_effort", "") or _cfg_val("OPENAI_RESPONSES_REASONING_EFFORT")
         OPENAI_RESPONSES_WEB_SEARCH = _cfg_val("OPENAI_RESPONSES_WEB_SEARCH")
@@ -373,9 +388,10 @@ async def chat_with_openclaw(
     system_prompt_append: str = "",
     notify_context: dict | None = None,
     use_functions: bool = True,
+    purpose: str = "chat",
 ) -> str:
     return await _BACKENDS["openclaw"].chat(
-        text, None, speaker, system_prompt_append, "", notify_context, use_functions
+        text, None, speaker, system_prompt_append, "", notify_context, use_functions, purpose
     )
 
 
@@ -386,9 +402,10 @@ async def chat_with_openai_responses(
     session_key: str = "",
     notify_context: dict | None = None,
     use_functions: bool = True,
+    purpose: str = "chat",
 ) -> str:
     return await _BACKENDS["openai"].chat(
-        text, None, speaker, system_prompt_append, session_key, notify_context, use_functions
+        text, None, speaker, system_prompt_append, session_key, notify_context, use_functions, purpose
     )
 
 
@@ -399,14 +416,16 @@ async def chat_with_llm(
     session_key: str = "",
     notify_context: dict | None = None,
     use_functions: bool = True,
+    purpose: str = "chat",
 ) -> str:
     """Dispatch to the configured LLM backend (LLM_BACKEND env).
 
     notify_context: {"session_key": str, "slack_channel": str | None}
     use_functions: False にすると Function Calling ツールを含めない（タイマー発火時など）
+    purpose: "notify" にすると通知用の安いモデルを使う（地震・天気・タイマーなど）
     """
     LLM_BACKEND = _cfg_val("LLM_BACKEND")
     backend = _BACKENDS.get(LLM_BACKEND)
     if backend is None:
         raise ValueError(f"Unknown LLM_BACKEND: {LLM_BACKEND!r}")
-    return await backend.chat(text, None, speaker, system_prompt_append, session_key, notify_context, use_functions)
+    return await backend.chat(text, None, speaker, system_prompt_append, session_key, notify_context, use_functions, purpose)

@@ -86,6 +86,18 @@ _EDITABLE_SETTINGS = {
         "options": _LLM_MODEL_OPTIONS,
         "price_unit": "1Mトークン",
     },
+    "openai_responses_model_notify": {
+        "label": "通知モデル（地震・天気・タイマーなど）",
+        "description": (
+            "地震・天気・タイマー・カレンダーなどの短い一言を作るモデル。"
+            "道具も会話履歴も使わない単純な生成なので、会話モデルより安いものを選べます。"
+            "会話の要約にも使われます。未設定なら会話モデルと同じものを使います。"
+        ),
+        "env_fallback": lambda: OPENAI_RESPONSES_MODEL,
+        "type": "model_select",
+        "options": _LLM_MODEL_OPTIONS,
+        "price_unit": "1Mトークン",
+    },
     "openai_responses_reasoning_effort": {
         "label": "推論の深さ（gpt-5 系のみ）",
         "description": (

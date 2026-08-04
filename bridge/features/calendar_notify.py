@@ -38,6 +38,7 @@ async def _fire_calendar_notification(item: dict) -> None:
                 "依頼者への返答にはしないでください。"
             ),
             use_functions=False,
+            purpose="notify",
         )
     except Exception as e:
         logger.error("Calendar notification LLM error: item_id=%s error=%s", item["id"], e)

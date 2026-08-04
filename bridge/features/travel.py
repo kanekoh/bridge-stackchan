@@ -56,6 +56,7 @@ async def _speak_travel_comment(prompt: str, source: str) -> None:
             ),
             session_key=MQTT_DEVICE_ID,
             use_functions=False,
+            purpose="notify",
         )
     except Exception:
         logger.exception("travel comment LLM failed")
