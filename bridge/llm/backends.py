@@ -39,6 +39,15 @@ def _supports_reasoning_effort(model: str) -> bool:
     return model.startswith(_REASONING_MODEL_PREFIXES)
 
 
+# ホスト型ツール web_search_preview に対応しないモデル。
+# 付けたまま送ると 400 になるため、送信前に落とす。
+_NO_WEB_SEARCH_MODELS = ("gpt-4.1-nano",)
+
+
+def _supports_web_search(model: str) -> bool:
+    return not model.startswith(_NO_WEB_SEARCH_MODELS)
+
+
 def _resolve_model(purpose: str) -> str:
     """用途に応じて使うモデルを決める。
 
@@ -269,7 +278,14 @@ class OpenAIResponsesBackend:
             tools.extend(_MEMORY_TOOLS)
         if use_functions and P2PQUAKE_ENABLED and not DISABLE_TOOLS:
             tools.extend(_ALERT_TOOLS)
-        if OPENAI_RESPONSES_WEB_SEARCH and not DISABLE_TOOLS:
+        # use_functions=False は「道具なしで一言返す」意味なので Web 検索も付けない。
+        # 通知の一言生成に検索は不要で、非対応モデルでは 400 の原因にもなる。
+        if (
+            OPENAI_RESPONSES_WEB_SEARCH
+            and not DISABLE_TOOLS
+            and use_functions
+            and _supports_web_search(OPENAI_RESPONSES_MODEL)
+        ):
             if OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
                 if _REQUEST_WEB_SEARCH_TOOL:
                     tools.append(_REQUEST_WEB_SEARCH_TOOL)
@@ -293,7 +309,10 @@ class OpenAIResponsesBackend:
                 and notify_ctx.get("enable_web_search")
             ):
                 tools = [t for t in tools if t.get("name") != "request_web_search"]
-                if not any(t.get("type") == OPENAI_RESPONSES_WEB_SEARCH_TOOL for t in tools):
+                if (
+                    _supports_web_search(OPENAI_RESPONSES_MODEL)
+                    and not any(t.get("type") == OPENAI_RESPONSES_WEB_SEARCH_TOOL for t in tools)
+                ):
                     tools.append({"type": OPENAI_RESPONSES_WEB_SEARCH_TOOL})
                     logger.info("Web search promoted to Pass 2")
                 notify_ctx["enable_web_search"] = False  # 多重昇格防止

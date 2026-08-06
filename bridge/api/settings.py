@@ -33,7 +33,7 @@ _LLM_MODEL_OPTIONS = [
         "value": "gpt-4.1-nano", "label": "gpt-4.1-nano",
         "price_in": 0.10, "price_out": 0.40,
         "latency_ms": 1279, "tool_ms": 4307,
-        "note": "最安。単純な応答向き。ツール利用時は遅め",
+        "note": "最安。ただし Web 検索に非対応。通知用に向く",
     },
     {
         "value": "gpt-4o-mini", "label": "gpt-4o-mini",
@@ -80,6 +80,8 @@ _EDITABLE_SETTINGS = {
         "description": (
             "スタックちゃんの返答を生成するモデル。低価格帯のみを選択肢にしています。"
             "レイテンシは同一条件での実測値で、通信状況により上下します。"
+            "gpt-4.1-nano は Web 検索に対応していないため、会話モデルに選ぶと"
+            "Web 検索を有効にしていても使われません（通知モデルには問題ありません）。"
         ),
         "env_fallback": lambda: OPENAI_RESPONSES_MODEL,
         "type": "model_select",
