@@ -397,7 +397,7 @@ def _save_conversation(
 
 def _fetch_conversations(
     *, since: str | None = None, speaker: str | None = None, limit: int = 500,
-    after_id: int | None = None,
+    after_id: int | None = None, oldest_first: bool = False,
 ) -> list[dict]:
     """会話ログを新しい順に取得する。夜間バッチや UI からの参照用。
 
@@ -416,7 +416,9 @@ def _fetch_conversations(
     if speaker:
         sql += " AND speaker = ?"
         params.append(speaker)
-    sql += " ORDER BY id DESC LIMIT ?"
+    # 記憶抽出は古い順に処理する。新しい順で切ると、あふれた古い会話が
+    # after_id の前進によって二度と処理されなくなる。
+    sql += " ORDER BY id ASC LIMIT ?" if oldest_first else " ORDER BY id DESC LIMIT ?"
     params.append(limit)
     with _db_lock:
         rows = _db_conn.execute(sql, params).fetchall()  # type: ignore[union-attr]

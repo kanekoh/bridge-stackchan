@@ -231,10 +231,12 @@ def api_delete_memory(memory_id: int):
 
 
 @router.post("/api/debug/memories/extract")
-async def api_extract_memories(hours: int = Query(default=24, le=720)):
-    """記憶抽出を今すぐ実行する（夜間バッチを待たずに試すため）。"""
-    since = (datetime.now(_JST) - timedelta(hours=hours)).isoformat()
-    return await extract_memories(since_iso=since)
+async def api_extract_memories(reprocess: bool = Query(default=False)):
+    """未処理の会話から記憶抽出を今すぐ実行する（夜間バッチを待たずに試すため）。
+
+    reprocess=true で、処理済みの会話も最初から取り直す。
+    """
+    return await extract_memories(reprocess=reprocess)
 
 
 @router.get("/api/debug/earthquake/map")

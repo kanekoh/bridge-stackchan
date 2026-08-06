@@ -210,8 +210,10 @@ async function extractNow() {
   const status = document.getElementById('memStatus');
   status.textContent = '会話から抽出中...';
   try {
-    const r = await apiFetch('/api/debug/memories/extract?hours=24', { method: 'POST' });
-    status.textContent = `会話${r.conversations}件から ${r.saved} 件を新しく覚えました`;
+    const r = await apiFetch('/api/debug/memories/extract', { method: 'POST' });
+    status.textContent = r.conversations
+      ? `会話${r.conversations}件から ${r.saved} 件を新しく覚えました`
+      : '新しい会話はありませんでした';
     loadMemories();
   } catch (e) { status.textContent = '❌ ' + e.message; }
 }

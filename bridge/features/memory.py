@@ -12,9 +12,9 @@ import asyncio
 import json
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from bridge.config import _JST, MQTT_DEVICE_ID
+from bridge.config import _JST
 from bridge.core.db import (
     _fetch_conversations, _save_memory, _get_setting, _set_setting,
     _fetch_memories_with_embeddings,
@@ -89,22 +89,8 @@ def _parse_items(raw: str) -> list[dict]:
 _DUPLICATE_SCORE = 0.92
 
 
-async def extract_memories(since_iso: str | None = None, limit: int = 300,
-                           reprocess: bool = False) -> dict:
-    """会話ログから記憶を抽出して保存する。抽出件数などを返す。
-
-    前回処理した会話 id を覚えておき、既に見た会話は対象外にする。
-    reprocess=True で最初から取り直す。
-    """
-    after_id = None
-    if not reprocess:
-        last = _get_setting("memory_extracted_until_id", "")
-        after_id = int(last) if last.isdigit() else None
-    rows = _fetch_conversations(since=since_iso, limit=limit, after_id=after_id)
-    if not rows:
-        return {"conversations": 0, "extracted": 0, "saved": 0, "embedded": 0,
-                "skipped_as_duplicate": 0}
-
+async def _extract_one_batch(rows: list[dict]) -> dict:
+    """会話 rows から記憶を抽出して保存する（1バッチ分）。"""
     prompt = _EXTRACT_PROMPT + _format_conversations(rows)
     try:
         raw = await sys.modules["main"].chat_with_llm(
@@ -115,13 +101,12 @@ async def extract_memories(since_iso: str | None = None, limit: int = 300,
         )
     except Exception as e:
         logger.error("memory extraction LLM failed: %s: %s", type(e).__name__, e)
-        return {"conversations": len(rows), "extracted": 0, "saved": 0, "embedded": 0,
+        return {"extracted": 0, "saved": 0, "embedded": 0, "skipped_as_duplicate": 0,
                 "error": str(e)}
 
     items = _parse_items(raw)
     if not items:
-        logger.info("memory extraction: nothing to remember (conversations=%d)", len(rows))
-        return {"conversations": len(rows), "extracted": 0, "saved": 0, "embedded": 0}
+        return {"extracted": 0, "saved": 0, "embedded": 0, "skipped_as_duplicate": 0}
 
     # 埋め込みはまとめて1回のリクエストで作る
     contents = [str(i["content"]).strip() for i in items]
@@ -142,7 +127,7 @@ async def extract_memories(since_iso: str | None = None, limit: int = 300,
             source=None,
             hide_from=str(item.get("hide_from") or "").strip(),
             kind=str(item.get("kind") or "episode"),
-            happened_on=datetime.now(_JST).date().isoformat(),
+            happened_on=(rows[-1].get("created_at") or "")[:10] or None,
             embedding=blob,
             embed_dim=EMBED_DIM if blob else None,
         )
@@ -152,18 +137,55 @@ async def extract_memories(since_iso: str | None = None, limit: int = 300,
                 embedded += 1
                 existing.append({"content": item["content"], "embedding": blob,
                                  "embed_dim": EMBED_DIM})
+    return {"extracted": len(items), "saved": saved, "embedded": embedded,
+            "skipped_as_duplicate": skipped}
 
-    # ここまで処理した会話 id を記録して、次回は続きから見る
-    max_id = max(r["id"] for r in rows)
-    _set_setting("memory_extracted_until_id", str(max_id))
 
-    logger.info(
-        "memory extraction done: conversations=%d extracted=%d saved=%d embedded=%d "
-        "skipped_as_duplicate=%d until_id=%d",
-        len(rows), len(items), saved, embedded, skipped, max_id,
-    )
-    return {"conversations": len(rows), "extracted": len(items), "saved": saved,
-            "embedded": embedded, "skipped_as_duplicate": skipped, "until_id": max_id}
+async def extract_memories(limit: int = 300, reprocess: bool = False,
+                           max_batches: int = 10) -> dict:
+    """未処理の会話ログから記憶を抽出して保存する。
+
+    処理済みの会話 id を記録し、次回はその続きから読む。日付での絞り込みは
+    しない。日付で絞ると、ブリッジが止まっていた期間の会話が範囲から外れた
+    まま id だけ前進し、その間の会話が二度と抽出されなくなるため。
+
+    未処理が limit を超える場合は古い順に複数バッチに分けて処理する
+    （新しい順に切ると、あふれた古い会話が取り残される）。
+    reprocess=True で最初から取り直す。
+    """
+    if reprocess:
+        _set_setting("memory_extracted_until_id", "")
+
+    total = {"conversations": 0, "extracted": 0, "saved": 0, "embedded": 0,
+             "skipped_as_duplicate": 0, "batches": 0}
+    for _ in range(max_batches):
+        last = _get_setting("memory_extracted_until_id", "")
+        after_id = int(last) if last.isdigit() else None
+        rows = _fetch_conversations(limit=limit, after_id=after_id, oldest_first=True)
+        if not rows:
+            break
+
+        result = await _extract_one_batch(rows)
+        if result.get("error"):
+            total["error"] = result["error"]
+            break
+
+        # 実際に処理できたバッチの分だけ id を進める
+        max_id = max(r["id"] for r in rows)
+        _set_setting("memory_extracted_until_id", str(max_id))
+
+        total["conversations"] += len(rows)
+        total["batches"] += 1
+        for k in ("extracted", "saved", "embedded", "skipped_as_duplicate"):
+            total[k] += result.get(k, 0)
+        total["until_id"] = max_id
+
+        if len(rows) < limit:      # 追いついた
+            break
+
+    if total["conversations"]:
+        logger.info("memory extraction done: %s", total)
+    return total
 
 
 async def memory_extract_loop() -> None:
@@ -175,8 +197,7 @@ async def memory_extract_loop() -> None:
             today = now.date().isoformat()
             done = _get_setting("memory_extracted_date", "")
             if now.hour >= _EXTRACT_HOUR and done != today:
-                since = (now - timedelta(days=1)).isoformat()
-                result = await extract_memories(since_iso=since)
+                result = await extract_memories()
                 _set_setting("memory_extracted_date", today)
                 logger.info("nightly memory extraction: %s", result)
         except Exception:
