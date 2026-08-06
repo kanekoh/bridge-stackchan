@@ -97,7 +97,7 @@ async def _extract_one_batch(rows: list[dict]) -> dict:
             prompt,
             session_key="",          # 会話履歴に混ぜない（記憶の抽出は独立した処理）
             use_functions=False,
-            purpose="notify",        # 単純な抽出なので安いモデルで足りる
+            purpose="memory",        # 抽出専用モデル（未設定なら会話モデル）
         )
     except Exception as e:
         logger.error("memory extraction LLM failed: %s: %s", type(e).__name__, e)
@@ -141,7 +141,7 @@ async def _extract_one_batch(rows: list[dict]) -> dict:
             "skipped_as_duplicate": skipped}
 
 
-async def extract_memories(limit: int = 300, reprocess: bool = False,
+async def extract_memories(limit: int = 60, reprocess: bool = False,
                            max_batches: int = 10) -> dict:
     """未処理の会話ログから記憶を抽出して保存する。
 
@@ -150,7 +150,8 @@ async def extract_memories(limit: int = 300, reprocess: bool = False,
     まま id だけ前進し、その間の会話が二度と抽出されなくなるため。
 
     未処理が limit を超える場合は古い順に複数バッチに分けて処理する
-    （新しい順に切ると、あふれた古い会話が取り残される）。
+    （新しい順に切ると、あふれた古い会話が取り残される）。1バッチを大きくしすぎると
+    返答の JSON が長くなり途中で切れて全滅するため、控えめな件数で刻む。
     reprocess=True で最初から取り直す。
     """
     if reprocess:

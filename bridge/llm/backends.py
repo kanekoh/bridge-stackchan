@@ -48,16 +48,36 @@ def _supports_web_search(model: str) -> bool:
     return not model.startswith(_NO_WEB_SEARCH_MODELS)
 
 
+# 記憶抽出は JSON を組み立てるため、会話用の出力上限では途中で切れて
+# パースに失敗する。1日分をまとめて処理するので余裕を持たせる。
+_MEMORY_MAX_OUTPUT_TOKENS = 4000
+
+
 def _resolve_model(purpose: str) -> str:
     """用途に応じて使うモデルを決める。
 
     purpose="notify" は地震・天気・タイマーなどの短い一言生成。ツールも会話履歴も
-    使わないため、会話用より安いモデルで足りる。未設定なら会話用にフォールバックする。
+    使わないため、会話用より安いモデルで足りる。
+    purpose="memory" は会話ログからの記憶抽出。1日1回しか走らずコスト差が無視
+    できる一方、hide_from の判断を誤るとサプライズが漏れるため安さより確実さを取る。
+    いずれも未設定なら会話用にフォールバックする。
     """
     chat_model = _get_setting("openai_responses_model", "") or _cfg_val("OPENAI_RESPONSES_MODEL")
     if purpose == "notify":
         return _get_setting("openai_responses_model_notify", "") or chat_model
+    if purpose == "memory":
+        return _get_setting("openai_responses_model_memory", "") or chat_model
     return chat_model
+
+
+def _resolve_max_output_tokens(purpose: str):
+    """記憶抽出だけは出力上限を広げる（JSON が途中で切れると全滅するため）。"""
+    configured = _cfg_val("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS")
+    if purpose == "memory":
+        if configured is None:
+            return _MEMORY_MAX_OUTPUT_TOKENS
+        return max(int(configured), _MEMORY_MAX_OUTPUT_TOKENS)
+    return configured
 
 
 class LLMBackend(Protocol):
@@ -211,7 +231,7 @@ class OpenAIResponsesBackend:
         OPENAI_RESPONSES_BASE_URL = _cfg_val("OPENAI_RESPONSES_BASE_URL")
         OPENAI_API_KEY = _cfg_val("OPENAI_API_KEY")
         OPENAI_RESPONSES_MODEL = _resolve_model(purpose)
-        OPENAI_RESPONSES_MAX_OUTPUT_TOKENS = _cfg_val("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS")
+        OPENAI_RESPONSES_MAX_OUTPUT_TOKENS = _resolve_max_output_tokens(purpose)
         OPENAI_RESPONSES_REASONING_EFFORT = _get_setting("openai_responses_reasoning_effort", "") or _cfg_val("OPENAI_RESPONSES_REASONING_EFFORT")
         OPENAI_RESPONSES_WEB_SEARCH = _cfg_val("OPENAI_RESPONSES_WEB_SEARCH")
         OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND = _cfg_val("OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND")

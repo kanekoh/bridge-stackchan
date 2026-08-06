@@ -100,6 +100,21 @@ _EDITABLE_SETTINGS = {
         "options": _LLM_MODEL_OPTIONS,
         "price_unit": "1Mトークン",
     },
+    "openai_responses_model_memory": {
+        "label": "記憶の抽出モデル（夜間バッチ）",
+        "description": (
+            "会話ログから記憶を抜き出すモデル。1日1回しか走らないため、"
+            "他より高いものを選んでも費用はほとんど変わりません（年間で数十円程度の差）。"
+            "「誰に内緒か」の判断を誤るとサプライズが本人に漏れるので、"
+            "ここは安さより確実さを優先してください。"
+            "gpt-4.1-nano は長い会話で JSON を組み立てきれず抽出に失敗するため非推奨です。"
+            "未設定なら会話モデルと同じものを使います。"
+        ),
+        "env_fallback": lambda: OPENAI_RESPONSES_MODEL,
+        "type": "model_select",
+        "options": _LLM_MODEL_OPTIONS,
+        "price_unit": "1Mトークン",
+    },
     "openai_responses_reasoning_effort": {
         "label": "推論の深さ（gpt-5 系のみ）",
         "description": (
