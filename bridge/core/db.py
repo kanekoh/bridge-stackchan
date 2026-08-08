@@ -142,6 +142,20 @@ def _init_db() -> None:
             _db_conn.execute(col_def)
         except sqlite3.OperationalError:
             pass  # already exists
+    # 以前は SQLite の datetime('now') で保存しており、UTC なのにオフセットを
+    # 持たないため読み出す側がどの時間か判断できなかった。値は変えずに
+    # 「UTC である」ことを明示する形（+00:00 付き）に正規化する。
+    # 表示側はここから設置場所のタイムゾーンへ変換する。
+    for table, col in (("earthquake_log", "notified_at"), ("tsunami_state", "updated_at")):
+        try:
+            _db_conn.execute(
+                f"UPDATE {table} SET {col} ="
+                f" replace({col}, ' ', 'T') || '+00:00'"
+                f" WHERE {col} IS NOT NULL AND {col} NOT LIKE '%+__:__'"
+                f"   AND {col} NOT LIKE '%Z'"
+            )
+        except sqlite3.OperationalError:
+            pass  # テーブル未作成（初回起動）
     _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS tsunami_state (
             area       TEXT PRIMARY KEY,

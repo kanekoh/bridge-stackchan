@@ -2,7 +2,10 @@ import logging
 from datetime import datetime
 
 from bridge.config import _JST
-from bridge.core.db import _get_setting, _get_all_family_members, _fetch_memories_for_speaker
+from bridge.core.db import (
+    _get_setting, _get_all_family_members, _fetch_memories_for_speaker,
+    _get_display_tz,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +32,22 @@ def _build_family_context() -> str:
 
 
 def _build_datetime_context() -> str:
-    """Return current JST datetime as a context string for the system prompt."""
-    now = datetime.now(_JST)
+    """現在の日時を、スタックちゃんが置かれている場所のタイムゾーンで返す。
+
+    設置場所を登録すると Open-Meteo からタイムゾーンを取得して location_timezone に
+    保存されるので、それを使う。日本以外に置かれた場合や旅行に持ち出した場合でも
+    その土地の日付・時刻で答えられる。未設定なら JST にフォールバックする。
+    """
+    tz = _get_display_tz()
+    now = datetime.now(tz)
     weekdays = ["月", "火", "水", "木", "金", "土", "日"]
     weekday = weekdays[now.weekday()]
-    return f"【現在の日時】{now.year}年{now.month}月{now.day}日（{weekday}）{now.hour:02d}:{now.minute:02d} JST"
+    tz_label = now.strftime("%Z") or str(tz)
+    return (
+        f"【現在の日時】{now.year}年{now.month}月{now.day}日（{weekday}）"
+        f"{now.hour:02d}:{now.minute:02d} {tz_label}\n"
+        "日付や時刻を聞かれたら、この場所の時間で答えること。"
+    )
 
 
 def _build_location_context() -> str:

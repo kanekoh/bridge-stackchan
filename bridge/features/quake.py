@@ -168,6 +168,11 @@ def _scale_to_str(scale: int) -> str:
     return _SCALE_MAP.get(scale, f"震度{scale}")
 
 
+def _display_tz():
+    """設置場所のタイムゾーン（未設定なら JST）。"""
+    return sys.modules["bridge.core.db"]._get_display_tz()
+
+
 def _eq_already_seen(earthquake_id: str) -> bool:
     row = sys.modules["bridge.core.db"]._db_conn.execute(
         "SELECT 1 FROM earthquake_log WHERE earthquake_id = ?", (earthquake_id,)
@@ -179,13 +184,19 @@ def _mark_eq_seen(
     earthquake_id: str, place: str, scale: int, magnitude: float,
     lat: float | None = None, lon: float | None = None, depth: float | None = None,
 ) -> None:
+    # _display_tz() は _get_setting() 経由で同じ _db_lock を取りにいく。
+    # _db_lock は再帰ロックではないため、ロックを取る前に確定させる。
+    now_iso = datetime.now(_display_tz()).isoformat()
     with sys.modules["bridge.core.db"]._db_lock:
         conn = sys.modules["bridge.core.db"]._db_conn
         conn.execute(
             "INSERT OR IGNORE INTO earthquake_log "
             "(earthquake_id, place, scale, magnitude, lat, lon, depth, notified_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
-            (earthquake_id, place, scale, magnitude, lat, lon, depth),
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            # SQLite の datetime('now') は UTC かつオフセットを持たないため、
+            # 読み出す側がどの時間か判断できなかった。設置場所の時刻で、
+            # オフセット付きの ISO 文字列として保存する。
+            (earthquake_id, place, scale, magnitude, lat, lon, depth, now_iso),
         )
         # 保存上限を超えた分は古い順に削除（ディスク枯渇防止）
         conn.execute(
@@ -205,11 +216,12 @@ def _get_tsunami_grade(area: str) -> str | None:
 
 
 def _save_tsunami_grade(area: str, grade: str) -> None:
+    now_iso = datetime.now(_display_tz()).isoformat()   # ロック外で確定（同上）
     with sys.modules["bridge.core.db"]._db_lock:
         sys.modules["bridge.core.db"]._db_conn.execute(
-            "INSERT INTO tsunami_state (area, grade, updated_at) VALUES (?, ?, datetime('now')) "
+            "INSERT INTO tsunami_state (area, grade, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(area) DO UPDATE SET grade=excluded.grade, updated_at=excluded.updated_at",
-            (area, grade),
+            (area, grade, now_iso),
         )
         sys.modules["bridge.core.db"]._db_conn.commit()
 

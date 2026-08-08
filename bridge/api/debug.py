@@ -53,6 +53,22 @@ _WMO_DESC: dict[int, str] = {
 }
 
 
+def _to_display_tz(ts: str | None) -> str | None:
+    """保存済みの ISO 文字列を設置場所のタイムゾーンに直す。
+
+    オフセットを持たない旧データ（SQLite の datetime('now')）は UTC として扱う。
+    """
+    if not ts:
+        return ts
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return ts
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_db_mod._get_display_tz()).strftime("%Y-%m-%d %H:%M")
+
+
 def _tcp_check(host: str, port: int, timeout: float = 3.0) -> str:
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -254,7 +270,8 @@ def api_debug_earthquake_map(limit: int = Query(default=20, le=200)):
         "events": [
             {
                 "id": r[0], "place": r[1], "scale": r[2], "magnitude": r[3],
-                "lat": r[4], "lon": r[5], "depth": r[6], "notified_at": r[7],
+                "lat": r[4], "lon": r[5], "depth": r[6],
+                "notified_at": _to_display_tz(r[7]),
             }
             for r in rows
         ],

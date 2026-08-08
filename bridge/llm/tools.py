@@ -8,7 +8,7 @@ import asyncio
 import json
 import logging
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from bridge.config import DISABLE_TOOLS, _JST
 
@@ -350,15 +350,30 @@ def _tool_get_recent_alerts(args: dict) -> dict:
     _scale_to_str = _main._scale_to_str
     _TSUNAMI_GRADE_LABEL = _main._TSUNAMI_GRADE_LABEL
 
+    from bridge.core.db import _get_display_tz
+    tz = _get_display_tz()
+
+    def _local(ts: str | None) -> str | None:
+        """保存済みの ISO 文字列を設置場所の時刻に直す（オフセットなしの旧データは UTC 扱い）。"""
+        if not ts:
+            return ts
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return ts
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+
     hours = min(max(int(args.get("hours", 24)), 1), 72)
 
     with _db_lock:
         eq_rows = _db_conn.execute(  # type: ignore[union-attr]
             """SELECT place, scale, magnitude, notified_at FROM earthquake_log
-               WHERE notified_at >= datetime('now', ?)
+               WHERE notified_at >= ?
                AND earthquake_id NOT LIKE '%:eew' AND earthquake_id NOT LIKE '%:cancelled'
                ORDER BY notified_at DESC LIMIT 10""",
-            (f"-{hours} hours",),
+            ((datetime.now(tz) - timedelta(hours=hours)).isoformat(),),
         ).fetchall()
         ts_rows = _db_conn.execute(  # type: ignore[union-attr]
             "SELECT area, grade, updated_at FROM tsunami_state ORDER BY updated_at DESC"
@@ -369,7 +384,7 @@ def _tool_get_recent_alerts(args: dict) -> dict:
             "place": r[0],
             "scale": _scale_to_str(r[1]),
             "magnitude": r[2],
-            "notified_at": r[3],
+            "notified_at": _local(r[3]),
         }
         for r in eq_rows
     ]
