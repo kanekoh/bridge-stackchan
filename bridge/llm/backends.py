@@ -80,6 +80,44 @@ def _resolve_max_output_tokens(purpose: str):
     return configured
 
 
+def build_instruction_parts(
+    *, speaker: str | None = None, purpose: str = "chat",
+    system_prompt_append: str = "", web_search_on_demand: bool = False,
+) -> list[tuple[str, str]]:
+    """LLM に渡す instructions を (名前, 本文) の並びで組み立てる。
+
+    デバッグ画面が実際に送っている内容とズレないよう、組み立てはここに集約し、
+    バックエンドもデバッグ用 API も同じ関数を通す。
+    """
+    parts: list[tuple[str, str]] = [
+        ("system_prompt", _STACKCHAN_SYSTEM_PROMPT),
+        ("datetime", _build_datetime_context()),
+    ]
+    fam = _build_family_context()
+    if fam:
+        parts.append(("family", fam))
+    # 通知の一言生成では記憶を持ち出さない（会話のときだけ）
+    if purpose != "notify":
+        mem = _build_memory_context(speaker)
+        if mem:
+            parts.append(("memory", mem))
+    loc = _build_location_context()
+    if loc:
+        parts.append(("location", loc))
+    bd = _build_birthday_context()
+    if bd:
+        parts.append(("birthday", bd))
+    if web_search_on_demand:
+        parts.append(("web_search_guide",
+            "Web検索ガイドライン:\n"
+            "- 雑談・感情表現・既に知っている内容ではWeb検索を使わない\n"
+            "- 「最新」「今日」「いま」「天気」「ニュース」など現在の情報が必要なときだけ "
+            "request_web_search を呼ぶ"))
+    if system_prompt_append:
+        parts.append(("system_prompt_append", system_prompt_append))
+    return parts
+
+
 class LLMBackend(Protocol):
     async def chat(
         self,
@@ -253,30 +291,11 @@ class OpenAIResponsesBackend:
         # _handle_function_calls から enable_web_search フラグを書き戻すため、ここで必ず辞書化する
         notify_ctx: dict = notify_context if notify_context is not None else {}
 
-        instructions_parts = [_STACKCHAN_SYSTEM_PROMPT, _build_datetime_context()]
-        fam_ctx = _build_family_context()
-        if fam_ctx:
-            instructions_parts.append(fam_ctx)
-        # 通知の一言生成では記憶を持ち出さない（会話のときだけ）
-        if purpose != "notify":
-            mem_ctx = _build_memory_context(speaker)
-            if mem_ctx:
-                instructions_parts.append(mem_ctx)
-        loc_ctx = _build_location_context()
-        if loc_ctx:
-            instructions_parts.append(loc_ctx)
-        birthday_ctx = _build_birthday_context()
-        if birthday_ctx:
-            instructions_parts.append(birthday_ctx)
-        if OPENAI_RESPONSES_WEB_SEARCH and OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND:
-            instructions_parts.append(
-                "Web検索ガイドライン:\n"
-                "- 雑談・感情表現・既に知っている内容ではWeb検索を使わない\n"
-                "- 「最新」「今日」「いま」「天気」「ニュース」など現在の情報が必要なときだけ "
-                "request_web_search を呼ぶ"
-            )
-        if system_prompt_append:
-            instructions_parts.append(system_prompt_append)
+        instructions_parts = [p for _, p in build_instruction_parts(
+            speaker=speaker, purpose=purpose,
+            system_prompt_append=system_prompt_append,
+            web_search_on_demand=bool(OPENAI_RESPONSES_WEB_SEARCH and OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND),
+        )]
 
         session = _get_session_data(session_key) if session_key else _SessionData(None, 0, 0, None)
         previous_response_id = session.response_id if not DISABLE_SESSION_HISTORY else None

@@ -35,7 +35,7 @@ from bridge.features.weather.notify import (
     _check_rain_notification,
     _fetch_iss_tle, _get_sunset_utc, _calc_iss_passes, _iss_speak,
 )
-from bridge.llm.backends import chat_with_llm
+from bridge.llm.backends import chat_with_llm, build_instruction_parts, _resolve_model
 import bridge.core.http as _http_mod
 
 router = APIRouter()
@@ -228,6 +228,51 @@ def api_debug_conversations(
 ):
     """保存済みの会話生ログを新しい順に返す（記憶抽出バッチ・確認用）。"""
     return {"conversations": _fetch_conversations(speaker=speaker or None, limit=limit)}
+
+
+@router.get("/api/debug/prompt")
+def api_debug_prompt(
+    speaker: str = Query(default="", description="話者（記憶の出し分けを確認するため）"),
+    session_key: str = Query(default=""),
+    purpose: str = Query(default="chat"),
+):
+    """LLM に実際に渡している instructions をそのまま返す。
+
+    「日付がずれる」「記憶が出ない」などを、推測せずに現物で確認するための窓口。
+    組み立てはバックエンドと同じ build_instruction_parts() を通しているので、
+    ここに出るものが実際に送られているものと一致する。
+    """
+    from bridge.core.db import _get_session_data, _get_display_tz
+    from bridge.config import OPENAI_RESPONSES_WEB_SEARCH, OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND
+
+    parts = build_instruction_parts(
+        speaker=speaker or None, purpose=purpose,
+        web_search_on_demand=bool(OPENAI_RESPONSES_WEB_SEARCH and OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND),
+    )
+    key = session_key or MQTT_DEVICE_ID
+    sess = _get_session_data(key)
+    tz = _get_display_tz()
+    now = datetime.now(tz)
+    return {
+        "model": _resolve_model(purpose),
+        "timezone": {
+            "setting": _get_setting("location_timezone", "(未設定→JSTにフォールバック)"),
+            "resolved": str(tz),
+            "now_local": now.strftime("%Y-%m-%d(%a) %H:%M %Z"),
+            "now_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d(%a) %H:%M"),
+        },
+        # 会話履歴は OpenAI 側に previous_response_id で保持されており、
+        # そこに過去ターンの古い日時が残っている点に注意（instructions とは別物）
+        "session": {
+            "session_key": key,
+            "previous_response_id": sess.response_id,
+            "char_count_in": sess.char_count_in,
+            "char_count_out": sess.char_count_out,
+            "summary": sess.summary,
+        },
+        "parts": [{"name": n, "text": t} for n, t in parts],
+        "instructions": "\n\n".join(t for _, t in parts),
+    }
 
 
 @router.get("/api/debug/memories")
