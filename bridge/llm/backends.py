@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import sys
+from datetime import datetime
 from typing import Protocol
 
 import bridge.config as _cfg
@@ -78,6 +79,21 @@ def _resolve_max_output_tokens(purpose: str):
             return _MEMORY_MAX_OUTPUT_TOKENS
         return max(int(configured), _MEMORY_MAX_OUTPUT_TOKENS)
     return configured
+
+
+def _is_stale_session(updated_at: str | None) -> bool:
+    """最後の更新が今日でなければ True（設置場所のタイムゾーンで判定）。"""
+    if not updated_at:
+        return False
+    from bridge.core.db import _get_display_tz
+    tz = _get_display_tz()
+    try:
+        last = datetime.fromisoformat(updated_at)
+    except ValueError:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=tz)
+    return last.astimezone(tz).date() != datetime.now(tz).date()
 
 
 def build_instruction_parts(
@@ -299,6 +315,19 @@ class OpenAIResponsesBackend:
 
         session = _get_session_data(session_key) if session_key else _SessionData(None, 0, 0, None)
         previous_response_id = session.response_id if not DISABLE_SESSION_HISTORY else None
+
+        # 日付が変わったら会話チェーンを切る。
+        # instructions は毎回作り直され、previous_response_id を使っても
+        # 古い instructions は引き継がれない。しかし会話の本文は残るため、
+        # 前日の「今日は土曜だよ」「今日は誕生日だね」といったやり取りが
+        # 生きたまま参照され、新しい【現在の日時】より優先されてしまう。
+        # 要約は previous_response_id が無いときに注入されるので文脈は残る。
+        if previous_response_id and _is_stale_session(session.updated_at):
+            logger.info(
+                "Session chain reset: date changed (session_key=%s last_updated=%s)",
+                session_key, session.updated_at,
+            )
+            previous_response_id = None
 
         # previous_response_id がない（新規 or リセット後）かつサマリがあれば過去の文脈として注入
         if not previous_response_id and session.summary:

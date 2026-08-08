@@ -648,12 +648,14 @@ class _SessionData:
     char_count_in: int
     char_count_out: int
     summary: str | None
+    updated_at: str | None = None
 
 
 def _get_session_data(session_key: str) -> "_SessionData":
     with _db_lock:
         row = _db_conn.execute(  # type: ignore[union-attr]
-            "SELECT response_id, char_count_in, char_count_out, summary FROM llm_sessions WHERE session_key = ?",
+            "SELECT response_id, char_count_in, char_count_out, summary, updated_at"
+            " FROM llm_sessions WHERE session_key = ?",
             (session_key,),
         ).fetchone()
         if row:
@@ -662,6 +664,7 @@ def _get_session_data(session_key: str) -> "_SessionData":
                 char_count_in=row[1] or 0,
                 char_count_out=row[2] or 0,
                 summary=row[3],
+                updated_at=row[4],
             )
         return _SessionData(response_id=None, char_count_in=0, char_count_out=0, summary=None)
 
