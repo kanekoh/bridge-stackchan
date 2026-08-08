@@ -46,6 +46,13 @@ async def _slack_handle_mention(event: dict, say) -> None:
         return
 
     _, clean_reply = sys.modules["main"]._parse_expression(reply)
+    # 音声会話と同じく、要約される前の生の会話を記憶のもとして残す。
+    # Slack は slack_user_id から家族名を確実に引けるため、音声の話者識別より
+    # 話者が正確に付く。
+    sys.modules["main"]._save_conversation(
+        session_key=session_key, speaker=sender_name or None,
+        user_text=text, reply_text=clean_reply, source="slack:mention",
+    )
     await say(clean_reply)
 
 
@@ -80,6 +87,10 @@ async def _slack_handle_dm(event: dict, say) -> None:
         return
 
     _, clean_reply = sys.modules["main"]._parse_expression(reply)
+    sys.modules["main"]._save_conversation(
+        session_key=session_key, speaker=sender_name or None,
+        user_text=text, reply_text=clean_reply, source="slack:dm",
+    )
     await say(clean_reply)
 
 
@@ -300,6 +311,12 @@ async def _slack_handle_speak(ack, body: dict, respond) -> None:
 
     expression, clean_reply = sys.modules["main"]._parse_expression(reply)
     speaker_id, stackchan_expr = sys.modules["main"]._resolve_expression(expression)
+    # /speak は家族から全員への連絡（「明日は運動会だよ」など）。応答ではないが
+    # 家族の出来事そのものなので記憶のもとに残す。
+    sys.modules["main"]._save_conversation(
+        session_key=session_key, speaker=sender_name or None,
+        user_text=text, reply_text=clean_reply, source="slack:speak",
+    )
     try:
         audio_url, streaming_url = await sys.modules["main"].resolve_audio_url(clean_reply, speaker_id)
         req_id = str(uuid.uuid4())
