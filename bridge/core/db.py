@@ -315,6 +315,51 @@ def _init_db() -> None:
             updated_at      TEXT NOT NULL
         )
     """)
+    # 発火の抑制（gatekeeper）。1回きり判定・クールダウン・深夜抑制の記録をまとめて持つ。
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS gate_log (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind     TEXT NOT NULL,
+            key      TEXT NOT NULL DEFAULT '',
+            fired_at TEXT NOT NULL
+        )
+    """)
+    _db_conn.execute("CREATE INDEX IF NOT EXISTS idx_gate_log_kind_key ON gate_log (kind, key)")
+    # スタックちゃんが作った歌。config/songs/*.yaml（手書き）と同じ楽譜を JSON で持つ。
+    # 作った歌をここに残しておくことで、次からは合成せずすぐ歌える。
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS songs (
+            id         TEXT PRIMARY KEY,
+            title      TEXT NOT NULL,
+            score_json TEXT NOT NULL,
+            mood       TEXT NOT NULL DEFAULT '',
+            theme      TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    # 歌った履歴。「この前歌ったばかりの曲を避ける」ためと、UI で見えるようにするため。
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS song_play_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            song_id     TEXT NOT NULL,
+            source      TEXT NOT NULL DEFAULT '',
+            trigger_key TEXT NOT NULL DEFAULT '',
+            played_at   TEXT NOT NULL
+        )
+    """)
+    # 予定ごとの移動時間・準備バッファの上書き（未登録の予定は app_settings の既定値を使う）
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS song_trigger_overrides (
+            item_id        TEXT PRIMARY KEY,
+            travel_minutes INTEGER,
+            prep_minutes   INTEGER,
+            song_id        TEXT,
+            enabled        BOOLEAN NOT NULL DEFAULT 1,
+            updated_at     TEXT NOT NULL
+        )
+    """)
     _now_iso = datetime.now(_JST).isoformat()
     for _seed in [
         ("リニア体験乗車",

@@ -17,7 +17,7 @@ if podman ps -aq -f name="$CONTAINER_NAME" | grep -q .; then
   podman rm "$CONTAINER_NAME"
 fi
 
-mkdir -p data secrets config
+mkdir -p data data/songs secrets config config/songs
 
 echo "Starting container: $CONTAINER_NAME"
 podman run -d \

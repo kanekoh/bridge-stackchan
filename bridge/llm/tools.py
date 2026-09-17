@@ -183,6 +183,84 @@ _MEMORY_TOOLS = [
 # ON_DEMAND モード時のみ Pass 1 のツール一覧に追加される。
 # LLM がこれを呼ぶと notify_context に enable_web_search フラグが立ち、
 # 次のループで本物の web_search_preview に差し替えられる。
+_SONG_TOOLS = [
+    {
+        "type": "function",
+        "name": "play_song",
+        "description": (
+            "スタックちゃんが歌を歌う（事前に用意した鼻歌を再生する）。"
+            "「急がなきゃ」「遅刻しそう」「間に合わない」など焦っている発言のとき、"
+            "または「歌って」「なにか歌ってよ」と頼まれたときに使う。"
+            "曲名が分かっているときは song_id、雰囲気だけ決まっているときは mood を渡す。"
+            "呼んだあとは、歌うことを一言そえて返事をすること（歌の内容は読み上げなくてよい）。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "song_id": {
+                    "type": "string",
+                    "description": "曲のID（list_songs で取得できるもの）。省略可",
+                },
+                "mood": {
+                    "type": "string",
+                    "description": "曲の雰囲気タグ（例: hurry, happy, calm）。song_id を省略したときに使う",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "list_songs",
+        "description": (
+            "歌える曲の一覧を返す。「どんな歌うたえるの？」「なにか歌える？」"
+            "「この前つくった歌なんだっけ？」などの質問に答えるために使う。"
+            "曲ごとに、作った歌かどうか・お題・誰のために作ったか・何回歌ったか・"
+            "最後に歌った日が分かるので、「そういえば前に○○の歌つくったよね」"
+            "のような思い出し方もできる。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "compose_song",
+        "description": (
+            "新しい歌をその場で作って歌う。「歌つくって」「○○の歌うたって」"
+            "「今の気分で1曲つくって」などと頼まれたときに使う。"
+            "作った歌は保存されるので、あとから同じ歌をまた歌える。"
+            "作るのに10〜30秒ほどかかるため、呼ぶ前に「ちょっと待ってね」と"
+            "一言そえるとよい。"
+            "すでにある曲で足りるなら、作らずに play_song を使うこと。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "theme": {
+                    "type": "string",
+                    "description": "歌のお題（例: おふろ、しおりの誕生日、雨の日）。省略可",
+                },
+                "mood": {
+                    "type": "string",
+                    "description": "曲の雰囲気（例: happy, calm, hurry, sleepy, silly）。省略可",
+                },
+                "requested_by": {
+                    "type": "string",
+                    "description": "誰のために作るか（話しかけてきた人の名前）。省略可",
+                },
+                "play": {
+                    "type": "boolean",
+                    "description": "作ったあとすぐ歌うか（省略時は true）",
+                },
+            },
+            "required": [],
+        },
+    },
+]
+
 _REQUEST_WEB_SEARCH_TOOL = {
     "type": "function",
     "name": "request_web_search",
@@ -432,6 +510,110 @@ async def _tool_recall(args: dict, notify_context: dict) -> dict:
     }
 
 
+async def _tool_play_song(args: dict) -> dict:
+    """歌を鳴らす。本人が頼んだ／焦っている場面なので、深夜帯でも応じる。
+
+    再生中の重複だけは gatekeeper が止める（同じ曲が二重に鳴らないように）。
+    """
+    from bridge.features.song import library, play as _play
+
+    song_id = (args.get("song_id") or "").strip()
+    mood = (args.get("mood") or "").strip()
+
+    score = library.get_score(song_id) if song_id else None
+    if score is None and mood:
+        score = library.pick_by_mood(mood)
+    if score is None:
+        scores = library.all_scores()
+        if not scores:
+            return {"status": "error", "message": "歌える曲がまだありません"}
+        if song_id or mood:
+            return {
+                "status": "error",
+                "message": f"その曲は見つかりませんでした（song_id={song_id!r} mood={mood!r}）",
+                "available": [{"song_id": s.id, "title": s.title, "mood": s.mood} for s in scores],
+            }
+        score = scores[0]
+
+    try:
+        result = await _play.play_song(
+            score, source="llm", respect_quiet=False, expression="happy",
+        )
+    except _play.SongNotAllowed as e:
+        logger.info("Function call play_song: 見送り reason=%s", e)
+        return {"status": "skipped", "message": str(e)}
+    except Exception as e:
+        logger.error("Function call play_song failed: song=%s error=%s", score.id, e)
+        return {"status": "error", "message": f"歌の再生に失敗しました: {e}"}
+
+    logger.info("Function call play_song: song=%s mood=%s", score.id, mood)
+    return {
+        "status": "ok",
+        "song_id": result["songId"],
+        "title": result["title"],
+        "duration_sec": result["durationSec"],
+    }
+
+
+def _tool_list_songs() -> dict:
+    from bridge.features.song import library
+
+    songs = library.describe_songs()
+    logger.info("Function call list_songs: count=%d", len(songs))
+    return {"status": "ok", "count": len(songs), "songs": songs}
+
+
+async def _tool_compose_song(args: dict, notify_context: dict) -> dict:
+    """その場で1曲つくる。作った歌は保存されるので次からはすぐ歌える。"""
+    from bridge.features.song import compose, play as _play
+    from bridge.features.song.score import ScoreError
+
+    theme = (args.get("theme") or "").strip()
+    mood = (args.get("mood") or "").strip()
+    requested_by = (args.get("requested_by") or notify_context.get("speaker") or "").strip()
+    should_play = args.get("play", True)
+
+    try:
+        score = await compose.compose_and_build(
+            theme=theme, mood=mood, requested_by=requested_by,
+        )
+    except ScoreError as e:
+        logger.warning("Function call compose_song: 楽譜を作れず: %s", e)
+        return {"status": "error", "message": f"うまく曲にできませんでした: {e}"}
+    except Exception as e:
+        logger.error("Function call compose_song failed: %s: %s", type(e).__name__, e)
+        return {"status": "error", "message": f"歌を作れませんでした: {e}"}
+
+    result: dict = {
+        "status": "ok",
+        "song_id": score.id,
+        "title": score.title,
+        "mood": score.mood,
+        "theme": theme,
+        "note_count": len(score.notes),
+        "played": False,
+    }
+    if should_play:
+        try:
+            # 本人が今まさに頼んだ歌なので、深夜でも歌う
+            played = await _play.play_song(
+                score, source="llm_compose", respect_quiet=False, expression="happy",
+            )
+            result["played"] = True
+            result["duration_sec"] = played["durationSec"]
+        except _play.SongNotAllowed as e:
+            result["played_skipped_reason"] = str(e)
+        except Exception as e:
+            logger.error("作った歌の再生に失敗: song=%s error=%s", score.id, e)
+            result["played_skipped_reason"] = str(e)
+
+    logger.info(
+        "Function call compose_song: song=%s title=%s theme=%s played=%s",
+        score.id, score.title, theme, result["played"],
+    )
+    return result
+
+
 async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
     """Execute a named tool and return the raw result dict (protocol-agnostic)."""
     _main = sys.modules["main"]
@@ -475,6 +657,12 @@ async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
             "message": "Web検索が有効になりました。次のターンで検索を実行して回答してください。",
             "query": query,
         }
+    if name == "play_song":
+        return await _tool_play_song(args)
+    if name == "list_songs":
+        return _tool_list_songs()
+    if name == "compose_song":
+        return await _tool_compose_song(args, notify_context)
     if name == "get_weather":
         return await _tool_get_weather(args)
     if name == "get_upcoming_items":

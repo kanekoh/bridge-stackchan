@@ -61,6 +61,8 @@ def _resolve_model(purpose: str) -> str:
     使わないため、会話用より安いモデルで足りる。
     purpose="memory" は会話ログからの記憶抽出。1日1回しか走らずコスト差が無視
     できる一方、hide_from の判断を誤るとサプライズが漏れるため安さより確実さを取る。
+    purpose="compose" は歌の作曲。長い JSON を破綻なく組み立てる必要があり、
+    安いモデルだと楽譜が通らず作り直しが増えるので会話用以上を推奨。
     いずれも未設定なら会話用にフォールバックする。
     """
     chat_model = _get_setting("openai_responses_model", "") or _cfg_val("OPENAI_RESPONSES_MODEL")
@@ -68,13 +70,15 @@ def _resolve_model(purpose: str) -> str:
         return _get_setting("openai_responses_model_notify", "") or chat_model
     if purpose == "memory":
         return _get_setting("openai_responses_model_memory", "") or chat_model
+    if purpose == "compose":
+        return _get_setting("openai_responses_model_compose", "") or chat_model
     return chat_model
 
 
 def _resolve_max_output_tokens(purpose: str):
-    """記憶抽出だけは出力上限を広げる（JSON が途中で切れると全滅するため）。"""
+    """記憶抽出と作曲は出力上限を広げる（JSON が途中で切れると全滅するため）。"""
     configured = _cfg_val("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS")
-    if purpose == "memory":
+    if purpose in ("memory", "compose"):
         if configured is None:
             return _MEMORY_MAX_OUTPUT_TOKENS
         return max(int(configured), _MEMORY_MAX_OUTPUT_TOKENS)
@@ -169,6 +173,7 @@ class OpenClawResponsesBackend:
         _MESSAGE_TOOLS = getattr(main_mod, "_MESSAGE_TOOLS", [])
         _ALERT_TOOLS = getattr(main_mod, "_ALERT_TOOLS", [])
         _MEMORY_TOOLS = getattr(main_mod, "_MEMORY_TOOLS", [])
+        _SONG_TOOLS = getattr(main_mod, "_SONG_TOOLS", [])
 
         OPENCLAW_BASE_URL = _cfg_val("OPENCLAW_BASE_URL")
         OPENCLAW_GATEWAY_TOKEN = _cfg_val("OPENCLAW_GATEWAY_TOKEN")
@@ -216,6 +221,8 @@ class OpenClawResponsesBackend:
             tools.extend(_MESSAGE_TOOLS)
         if use_functions:
             tools.extend(_MEMORY_TOOLS)
+        if use_functions:
+            tools.extend(_SONG_TOOLS)
         if use_functions and P2PQUAKE_ENABLED:
             tools.extend(_ALERT_TOOLS)
 
@@ -280,6 +287,7 @@ class OpenAIResponsesBackend:
         _MESSAGE_TOOLS = getattr(main_mod, "_MESSAGE_TOOLS", [])
         _ALERT_TOOLS = getattr(main_mod, "_ALERT_TOOLS", [])
         _MEMORY_TOOLS = getattr(main_mod, "_MEMORY_TOOLS", [])
+        _SONG_TOOLS = getattr(main_mod, "_SONG_TOOLS", [])
         _REQUEST_WEB_SEARCH_TOOL = getattr(main_mod, "_REQUEST_WEB_SEARCH_TOOL", None)
 
         OPENAI_RESPONSES_BASE_URL = _cfg_val("OPENAI_RESPONSES_BASE_URL")
@@ -344,6 +352,8 @@ class OpenAIResponsesBackend:
             tools.extend(_MESSAGE_TOOLS)
         if use_functions and not DISABLE_TOOLS:
             tools.extend(_MEMORY_TOOLS)
+        if use_functions and not DISABLE_TOOLS:
+            tools.extend(_SONG_TOOLS)
         if use_functions and P2PQUAKE_ENABLED and not DISABLE_TOOLS:
             tools.extend(_ALERT_TOOLS)
         # use_functions=False は「道具なしで一言返す」意味なので Web 検索も付けない。

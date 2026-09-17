@@ -1,0 +1,48 @@
+# うきうきギャロップ — 速い2拍子の陽気な鼻歌（カンカン風のオリジナル）。
+#
+# ※ オッフェンバック「天国と地獄」そのものではなく、あの雰囲気に寄せて
+#    書き下ろしたもの。本家の旋律を鳴らしたい場合はこのファイルを
+#    差し替えれば、他は何も変えずに動く。
+id: galop
+title: うきうきギャロップ
+bpm: 168
+transpose: 0
+mood: [happy, fun, hurry]
+default_lyric: "ん"
+style:
+  sing: 6000
+  frame_decode: 3003   # ずんだもん ノーマル
+credit: "VOICEVOX:ずんだもん"
+
+notes:
+  # 跳ねる前半
+  - {note: C5,   beats: 0.25}
+  - {note: C5,   beats: 0.25}
+  - {note: G4,   beats: 0.25}
+  - {note: G4,   beats: 0.25}
+  - {note: E5,   beats: 0.25}
+  - {note: E5,   beats: 0.25}
+  - {note: C5,   beats: 0.5}
+  - {note: D5,   beats: 0.25}
+  - {note: D5,   beats: 0.25}
+  - {note: B4,   beats: 0.25}
+  - {note: B4,   beats: 0.25}
+  - {note: G5,   beats: 0.25}
+  - {note: G5,   beats: 0.25}
+  - {note: E5,   beats: 0.5}
+  # 駆け下りて折り返す
+  - {note: F5,   beats: 0.25}
+  - {note: E5,   beats: 0.25}
+  - {note: D5,   beats: 0.25}
+  - {note: C5,   beats: 0.25}
+  - {note: B4,   beats: 0.25}
+  - {note: A4,   beats: 0.25}
+  - {note: G4,   beats: 0.5}
+  - {note: rest, beats: 0.25}
+  - {note: G4,   beats: 0.25}
+  - {note: A4,   beats: 0.25}
+  - {note: B4,   beats: 0.25}
+  - {note: C5,   beats: 0.5}
+  - {note: E5,   beats: 0.5}
+  - {note: C5,   beats: 1.0}
+  - {note: rest, beats: 0.5}

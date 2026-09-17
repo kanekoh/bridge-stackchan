@@ -139,6 +139,41 @@ CALENDAR_NOTIFY_GRACE_MINUTES = int(os.getenv("CALENDAR_NOTIFY_GRACE_MINUTES", "
 
 EXPRESSION_MAP_FILE = os.getenv("EXPRESSION_MAP_FILE", "config/expression_map.yaml")
 
+# ─── 歌（VOICEVOX ENGINE の歌声合成） ──────────────────────────────────────
+# 発話は Web 高速版（api.tts.quest）を使うが、そちらには歌唱 API がないため
+# 歌だけはローカルの VOICEVOX ENGINE 0.25.2 を使う。常駐していない場合は
+# 歌機能だけが無効になり、他の機能には影響しない。
+# コンテナから見たホストは slirp4netns の allow_host_loopback 経由（10.0.2.2）。
+VOICEVOX_SING_URL     = os.getenv("VOICEVOX_SING_URL", "http://127.0.0.1:50021")
+VOICEVOX_SING_TIMEOUT = float(os.getenv("VOICEVOX_SING_TIMEOUT", "180"))
+SONG_CONFIG_DIR       = os.getenv("SONG_CONFIG_DIR", "config/songs")   # 楽譜 YAML
+SONG_DIR              = os.getenv("SONG_DIR", "data/songs")            # 生成済み MP3
+# スタックちゃんから見た Bridge の URL。MQTT に載せる audioUrl の組み立てに使うため、
+# リクエストからは決められない（例: http://raspberrypi.local:8000）。
+SONG_PUBLIC_BASE_URL  = os.getenv("SONG_PUBLIC_BASE_URL", "")
+SONG_SAMPLE_RATE      = int(os.getenv("SONG_SAMPLE_RATE", "16000"))    # M5Stack 向け
+SONG_BITRATE          = os.getenv("SONG_BITRATE", "64k")
+SONG_PREBUILD_ON_START = os.getenv("SONG_PREBUILD_ON_START", "true").lower() == "true"
+FFMPEG_BIN            = os.getenv("FFMPEG_BIN", "ffmpeg")
+
+# 歌のトリガー（既定値。実運用の切り替えは UI（app_settings）で行う）
+SONG_TRIGGER_ENABLED         = os.getenv("SONG_TRIGGER_ENABLED", "false").lower() == "true"
+SONG_TRIGGER_CHECK_INTERVAL  = int(os.getenv("SONG_TRIGGER_CHECK_INTERVAL", "60"))
+SONG_TRIGGER_LEAD_MINUTES    = int(os.getenv("SONG_TRIGGER_LEAD_MINUTES", "10"))    # 出発リミットの何分前から
+SONG_TRIGGER_PREP_MINUTES    = int(os.getenv("SONG_TRIGGER_PREP_MINUTES", "10"))    # 準備バッファ
+SONG_TRIGGER_TRAVEL_MINUTES  = int(os.getenv("SONG_TRIGGER_TRAVEL_MINUTES", "15"))  # 移動時間の既定値
+SONG_QUIET_START             = os.getenv("SONG_QUIET_START", "22:00")
+SONG_QUIET_END               = os.getenv("SONG_QUIET_END", "07:00")
+SONG_COOLDOWN_MINUTES        = int(os.getenv("SONG_COOLDOWN_MINUTES", "30"))
+
+# 「ふと歌う」（時折ひとりで歌い出す）
+SONG_IDLE_ENABLED     = os.getenv("SONG_IDLE_ENABLED", "false").lower() == "true"
+SONG_IDLE_CHECK_INTERVAL = int(os.getenv("SONG_IDLE_CHECK_INTERVAL", "900"))  # 15分
+SONG_IDLE_MIN_HOURS   = float(os.getenv("SONG_IDLE_MIN_HOURS", "6"))   # 前に歌ってから最低これだけ空ける
+SONG_IDLE_CHANCE      = float(os.getenv("SONG_IDLE_CHANCE", "0.25"))   # 条件を満たした回ごとに歌う確率
+SONG_IDLE_START       = os.getenv("SONG_IDLE_START", "09:00")          # 歌い出してよい時間帯
+SONG_IDLE_END         = os.getenv("SONG_IDLE_END", "20:00")
+
 # Slack (Socket Mode — 両方設定されている場合のみ有効)
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN", "")
@@ -183,5 +218,13 @@ __all__ = [
     "CALENDAR_SYNC_DAYS_AHEAD", "CALENDAR_NOTIFY_CHECK_INTERVAL",
     "CALENDAR_NOTIFY_GRACE_MINUTES",
     "EXPRESSION_MAP_FILE", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN",
+    "VOICEVOX_SING_URL", "VOICEVOX_SING_TIMEOUT",
+    "SONG_CONFIG_DIR", "SONG_DIR", "SONG_PUBLIC_BASE_URL",
+    "SONG_SAMPLE_RATE", "SONG_BITRATE", "SONG_PREBUILD_ON_START", "FFMPEG_BIN",
+    "SONG_TRIGGER_ENABLED", "SONG_TRIGGER_CHECK_INTERVAL", "SONG_TRIGGER_LEAD_MINUTES",
+    "SONG_TRIGGER_PREP_MINUTES", "SONG_TRIGGER_TRAVEL_MINUTES",
+    "SONG_QUIET_START", "SONG_QUIET_END", "SONG_COOLDOWN_MINUTES",
+    "SONG_IDLE_ENABLED", "SONG_IDLE_CHECK_INTERVAL", "SONG_IDLE_MIN_HOURS",
+    "SONG_IDLE_CHANCE", "SONG_IDLE_START", "SONG_IDLE_END",
     "_JST", "_KNOWN_EXPRESSIONS",
 ]

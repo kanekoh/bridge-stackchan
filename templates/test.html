@@ -40,6 +40,28 @@
     <p id="speakResult" class="text-xs mt-2 text-gray-500"></p>
   </div>
 
+  <!-- 歌テスト -->
+  <div class="bg-white rounded-lg border border-gray-200 p-5">
+    <div class="flex items-center justify-between mb-1">
+      <h2 class="font-semibold text-gray-700">歌を鳴らす</h2>
+      <a href="/ui/songs" class="text-xs text-blue-500 hover:underline">曲の管理・作曲は歌ページへ →</a>
+    </div>
+    <p class="text-xs text-gray-400 mb-4">
+      事前生成した歌を鳴らします（gatekeeper は通しません）。その場で1曲つくることもできます。
+    </p>
+    <div class="flex gap-2 flex-wrap items-center">
+      <select id="songSelect" class="flex-1 min-w-[12rem] border border-gray-300 rounded px-3 py-2 text-sm">
+        <option>読み込み中…</option>
+      </select>
+      <button onclick="playTestSong()" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded whitespace-nowrap">▶ 鳴らす</button>
+    </div>
+    <div class="flex gap-2 flex-wrap items-center mt-2">
+      <input id="songTheme" placeholder="お題（例: おふろ、雨の日）" class="flex-1 min-w-[12rem] border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-400">
+      <button id="songComposeBtn" onclick="composeTestSong()" class="bg-emerald-500 hover:bg-emerald-600 text-white text-sm px-4 py-2 rounded whitespace-nowrap">つくって歌う</button>
+    </div>
+    <p id="songResult" class="text-xs mt-3 text-gray-500"></p>
+  </div>
+
   <!-- 天気通知テスト -->
   <div class="bg-white rounded-lg border border-gray-200 p-5">
     <h2 class="font-semibold text-gray-700 mb-1">天気通知テスト</h2>
@@ -121,6 +143,58 @@
 
 {% block scripts %}
 <script>
+// ── 歌 ───────────────────────────────────────────────────────────────────
+async function loadTestSongs() {
+  const sel = document.getElementById('songSelect');
+  try {
+    const data = await apiFetch('/api/songs');
+    sel.innerHTML = data.songs.length === 0
+      ? '<option value="">曲がありません</option>'
+      : data.songs.map(s =>
+          `<option value="${s.id}">${s.title}${s.cached ? '' : '（未生成）'}</option>`).join('');
+    if (!data.engine.available) {
+      document.getElementById('songResult').textContent =
+        'VOICEVOX ENGINE に接続できません: ' + data.engine.error;
+    }
+  } catch (e) {
+    sel.innerHTML = '<option value="">読み込めませんでした</option>';
+  }
+}
+
+async function playTestSong() {
+  const id = document.getElementById('songSelect').value;
+  const out = document.getElementById('songResult');
+  if (!id) { out.textContent = '曲を選んでください'; return; }
+  out.textContent = '送信中…';
+  try {
+    const r = await apiFetch(`/api/songs/${encodeURIComponent(id)}/play`, { method: 'POST' });
+    out.textContent = `「${r.title}」を鳴らしました（${r.durationSec}秒）`;
+  } catch (e) { out.textContent = '鳴らせませんでした: ' + e.message; }
+}
+
+async function composeTestSong() {
+  const btn = document.getElementById('songComposeBtn');
+  const out = document.getElementById('songResult');
+  btn.disabled = true; btn.classList.add('opacity-50');
+  out.textContent = 'つくっています…（10〜30秒かかります）';
+  try {
+    const r = await apiFetch('/api/songs/compose', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme: document.getElementById('songTheme').value, play: true }),
+    });
+    out.textContent = `「${r.title}」ができました（${r.noteCount}音・${r.bpm}BPM）`
+      + (r.played ? '。歌っています' : '');
+    document.getElementById('songTheme').value = '';
+    loadTestSongs();
+  } catch (e) {
+    out.textContent = 'つくれませんでした: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.classList.remove('opacity-50');
+  }
+}
+
+loadTestSongs();
+
   // ── 監視エリア情報 ──────────────────────────────────
   async function loadCoverage() {
     const el = document.getElementById('coverage');

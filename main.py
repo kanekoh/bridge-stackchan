@@ -41,6 +41,7 @@ from bridge.llm.backends import (
 from bridge.llm.tools import (
     _TIMER_TOOLS, _CALENDAR_TOOLS, _MESSAGE_TOOLS, _ALERT_TOOLS, _WEATHER_TOOLS,
     _MEMORY_TOOLS,
+    _SONG_TOOLS,
     _REQUEST_WEB_SEARCH_TOOL,
     _tool_get_weather, _tool_get_upcoming_items, _tool_get_recent_alerts,
     _execute_tool, _handle_function_calls,
@@ -84,6 +85,13 @@ from bridge.features.quake import (
     _handle_eew, _unknown_p2p_llm,
     _p2pquake_log_event, _p2pquake_ws_loop,
     _p2pquake_ws_status, _p2pquake_recent_events, _P2PQUAKE_EVENT_BUFFER,
+)
+
+from bridge.features.song import library as song_library
+from bridge.features.song import cache as song_cache
+from bridge.features.song import compose as song_compose
+from bridge.features.song.triggers import (
+    song_trigger_loop, check_departure_songs, song_idle_loop, check_idle_song,
 )
 
 # Slack アプリ参照（_setup_slack で設定、タイマー発火時の通知に使用）
@@ -137,6 +145,17 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(memory_extract_loop())
     logger.info("Memory extract loop started")
 
+    # 歌は起動時に事前生成してキャッシュする（リアルタイム合成はしない）。
+    # VOICEVOX ENGINE が落ちていても歌が無効になるだけで、他の機能には影響しない。
+    song_library.load_scores()
+    if SONG_PREBUILD_ON_START:
+        asyncio.create_task(song_cache.prebuild_all(song_library.all_scores()))
+        logger.info("Song prebuild started")
+    asyncio.create_task(song_trigger_loop())  # DB設定で後から有効化できるため常時起動
+    logger.info("Song trigger loop started")
+    asyncio.create_task(song_idle_loop())     # 同上（用事がなくてもたまに歌う）
+    logger.info("Song idle loop started")
+
     _mqtt_conn.start()
     logger.info("MQTT eager connect started")
 
@@ -154,11 +173,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Bridge API", version="0.1.0", lifespan=lifespan)
 
+# 事前生成した歌の配信。M5Stack は発話と同じく audioUrl を HTTP で取りに来るので、
+# ここで配信したものをそのまま MQTT に載せられる。
+os.makedirs(SONG_DIR, exist_ok=True)
+from fastapi.staticfiles import StaticFiles
+app.mount("/songs", StaticFiles(directory=SONG_DIR), name="songs")
+
 from bridge.api.ui import router as _ui_router
 app.include_router(_ui_router)
 
 from bridge.api.speak import router as _speak_router
 app.include_router(_speak_router)
+
+from bridge.api.songs import router as _songs_router
+app.include_router(_songs_router)
 
 from bridge.api.devices import router as _devices_router
 app.include_router(_devices_router)

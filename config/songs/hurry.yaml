@@ -1,0 +1,48 @@
+# いそげのうた — 出発リミットが近いときに鳴らす短い鼻歌。
+#
+# 楽譜の書き方:
+#   note   … 音名（C4 = middle C）。C4 / F#3 / Bb4 / rest
+#   beats  … 拍数（4分音符 = 1.0、8分音符 = 0.5、16分音符 = 0.25）
+#   lyric  … かな1モーラ。省略すると default_lyric。休符には付かない
+#   先頭の無音は書かない（変換時に lead_silence_beats ぶん自動で入る）
+#
+# style:
+#   sing         … 音程とタイミングを決める（0.25.2 では 6000 波音リツのみ）
+#   frame_decode … 声色を決める（3003 ずんだもんノーマル / 3001 あまあま
+#                  / 3007 ツンツン / 3076 なみだめ）
+id: hurry
+title: いそげのうた
+bpm: 152
+transpose: 0
+mood: [urgent, hurry]
+default_lyric: "ん"
+style:
+  sing: 6000
+  frame_decode: 3007   # ツンツン。急かす曲なので少しきつめの声色にする
+credit: "VOICEVOX:ずんだもん"
+
+notes:
+  # 「い-そ-いで」× 2 — 短い音を2つ置いてから伸ばす、急かす形
+  - {note: G4,   beats: 0.25}
+  - {note: G4,   beats: 0.25}
+  - {note: C5,   beats: 0.5}
+  - {note: G4,   beats: 0.25}
+  - {note: G4,   beats: 0.25}
+  - {note: C5,   beats: 0.5}
+  # 駆け上がって焦らせる
+  - {note: C5,   beats: 0.25}
+  - {note: D5,   beats: 0.25}
+  - {note: E5,   beats: 0.25}
+  - {note: D5,   beats: 0.25}
+  - {note: C5,   beats: 0.75}
+  - {note: rest, beats: 0.25}
+  # もう一度、今度は高いところから降りてくる
+  - {note: E5,   beats: 0.25}
+  - {note: E5,   beats: 0.25}
+  - {note: G5,   beats: 0.5}
+  - {note: E5,   beats: 0.25}
+  - {note: D5,   beats: 0.25}
+  - {note: C5,   beats: 0.5}
+  - {note: B4,   beats: 0.5}
+  - {note: C5,   beats: 1.0}
+  - {note: rest, beats: 0.5}

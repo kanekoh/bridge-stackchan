@@ -53,6 +53,11 @@ async def ui_memory(request: Request):
     return _templates.TemplateResponse(request=request, name="memory.html", context=_ui_context(request))
 
 
+@router.get("/ui/songs", response_class=HTMLResponse)
+async def ui_songs(request: Request):
+    return _templates.TemplateResponse(request=request, name="songs.html", context=_ui_context(request))
+
+
 @router.get("/ui/weather", response_class=HTMLResponse)
 async def ui_weather(request: Request):
     return _templates.TemplateResponse(request=request, name="weather.html", context=_ui_context(request))

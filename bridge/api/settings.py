@@ -115,6 +115,19 @@ _EDITABLE_SETTINGS = {
         "options": _LLM_MODEL_OPTIONS,
         "price_unit": "1Mトークン",
     },
+    "openai_responses_model_compose": {
+        "label": "作曲モデル（歌をつくる）",
+        "description": (
+            "歌の楽譜（JSON）を組み立てるモデル。呼ばれるのは歌を作るときだけなので"
+            "費用はほとんど増えません。安いモデルだと楽譜が形式どおりにならず"
+            "作り直しが増えるため、会話モデルと同等以上をおすすめします。"
+            "未設定なら会話モデルと同じものを使います。"
+        ),
+        "env_fallback": lambda: OPENAI_RESPONSES_MODEL,
+        "type": "model_select",
+        "options": _LLM_MODEL_OPTIONS,
+        "price_unit": "1Mトークン",
+    },
     "openai_responses_reasoning_effort": {
         "label": "推論の深さ（gpt-5 系のみ）",
         "description": (

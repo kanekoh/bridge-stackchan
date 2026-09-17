@@ -1,0 +1,465 @@
+{% extends "base.html" %}
+{% block title %}歌{% endblock %}
+{% block nav_songs %}font-semibold text-blue-600{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-4">
+  <h1 class="text-xl font-bold text-gray-800">歌</h1>
+  <div class="flex gap-3 text-xs">
+    <button onclick="reloadScores()" class="text-gray-400 hover:text-gray-600">↻ 楽譜を読み直す</button>
+    <button onclick="prebuild()" class="text-gray-400 hover:text-gray-600">⟳ 全曲を事前生成</button>
+  </div>
+</div>
+
+<!-- エンジン状態 -->
+<div id="engine" class="mb-4 text-sm"></div>
+
+<!-- 歌をつくる -->
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+  <h2 class="font-semibold text-gray-700 mb-1">歌をつくる</h2>
+  <p class="text-xs text-gray-500 mb-4">
+    スタックちゃんが楽譜を書いて、その場で1曲つくります。できた歌は保存されるので、
+    次からは合成せずすぐ歌えます。作るのに10〜30秒ほどかかります。
+  </p>
+  <div class="grid grid-cols-3 gap-3 text-sm">
+    <label class="block col-span-2">
+      <span class="text-xs text-gray-500">お題</span>
+      <input type="text" id="c_theme" placeholder="おふろ、雨の日、しおりの誕生日…"
+             class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">雰囲気</span>
+      <input type="text" id="c_mood" list="mood_list" placeholder="happy / calm / hurry…"
+             class="w-full border rounded px-2 py-1 mt-1">
+      <datalist id="mood_list"></datalist>
+    </label>
+    <label class="block col-span-2">
+      <span class="text-xs text-gray-500">誰のために（任意）</span>
+      <input type="text" id="c_by" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+    <label class="flex items-end gap-2 pb-1">
+      <input type="checkbox" id="c_play" class="rounded" checked>
+      <span class="text-xs text-gray-600">つくったら歌う</span>
+    </label>
+  </div>
+  <div class="mt-4 flex items-center gap-3">
+    <button id="c_btn" onclick="composeSong()"
+            class="bg-emerald-500 text-white text-sm px-4 py-1.5 rounded hover:bg-emerald-600">
+      つくる
+    </button>
+    <span id="c_msg" class="text-xs text-gray-500"></span>
+  </div>
+</div>
+
+<!-- 曲一覧 -->
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="font-semibold text-gray-700">曲</h2>
+    <div class="text-xs text-gray-400">
+      <label class="mr-3"><input type="radio" name="filt" value="all" checked onchange="renderSongs()"> すべて</label>
+      <label class="mr-3"><input type="radio" name="filt" value="builtin" onchange="renderSongs()"> 手書き</label>
+      <label><input type="radio" name="filt" value="composed" onchange="renderSongs()"> つくった歌</label>
+    </div>
+  </div>
+  <div id="songs" class="text-sm text-gray-400">読み込み中…</div>
+  <p class="text-[11px] text-gray-400 mt-4">歌声合成: VOICEVOX:ずんだもん</p>
+</div>
+
+<!-- 楽譜ビューア -->
+<div id="score_panel" class="bg-white rounded-lg border border-gray-200 p-5 mb-6 hidden">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="font-semibold text-gray-700">楽譜 <span id="score_title" class="text-sm text-gray-500"></span></h2>
+    <button onclick="document.getElementById('score_panel').classList.add('hidden')"
+            class="text-xs text-gray-400 hover:text-gray-600">閉じる</button>
+  </div>
+  <div id="score_meta" class="text-xs text-gray-500 mb-3"></div>
+  <div id="score_piano" class="mb-3 overflow-x-auto"></div>
+  <details>
+    <summary class="text-xs text-gray-400 cursor-pointer">楽譜 YAML／ENGINE に渡す notes を見る</summary>
+    <pre id="score_raw" class="text-[11px] bg-gray-50 border rounded p-3 mt-2 overflow-x-auto"></pre>
+  </details>
+</div>
+
+<!-- ふと歌う -->
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+  <h2 class="font-semibold text-gray-700 mb-1">ふと歌う</h2>
+  <p class="text-xs text-gray-500 mb-4">
+    用事がなくても、日中に在宅していてしばらく歌っていなければ、たまに勝手に歌い出します。
+    毎回同じ間隔だと機械らしくなるので、条件を満たした回ごとに確率で決めます。
+  </p>
+  <div class="grid grid-cols-2 gap-4 text-sm">
+    <label class="flex items-center gap-2 col-span-2">
+      <input type="checkbox" id="i_enabled" class="rounded">
+      <span>有効にする</span>
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">前に歌ってから最低何時間空けるか</span>
+      <input type="number" step="0.5" id="i_hours" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">歌い出す確率（0〜1／15分ごと判定）</span>
+      <input type="number" step="0.05" min="0" max="1" id="i_chance" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">歌ってよい時間帯（開始）</span>
+      <input type="text" id="i_start" placeholder="09:00" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">歌ってよい時間帯（終了）</span>
+      <input type="text" id="i_end" placeholder="20:00" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+    <label class="block col-span-2">
+      <span class="text-xs text-gray-500">曲を雰囲気で絞る（空ならすべての曲から選ぶ）</span>
+      <input type="text" id="i_mood" list="mood_list" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+  </div>
+  <div id="idle_state" class="mt-3 text-xs text-gray-500"></div>
+</div>
+
+<!-- 出発リミット -->
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+  <h2 class="font-semibold text-gray-700 mb-1">出発リミットで歌う</h2>
+  <p class="text-xs text-gray-500 mb-4">
+    予定の開始時刻 − 移動時間 − 準備バッファ を出発リミットとして、
+    残り時間を切ったら在宅時に1回だけ歌います。
+  </p>
+  <div class="grid grid-cols-2 gap-4 text-sm">
+    <label class="flex items-center gap-2 col-span-2">
+      <input type="checkbox" id="s_enabled" class="rounded">
+      <span>有効にする</span>
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">何分前から歌うか</span>
+      <input type="number" id="s_lead" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">準備バッファ（分）</span>
+      <input type="number" id="s_prep" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">移動時間の既定値（分）</span>
+      <input type="number" id="s_travel" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">鳴らす曲</span>
+      <select id="s_song" class="w-full border rounded px-2 py-1 mt-1"></select>
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">静かにする時間帯（開始）</span>
+      <input type="text" id="s_quiet_start" placeholder="22:00" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">静かにする時間帯（終了）</span>
+      <input type="text" id="s_quiet_end" placeholder="07:00" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+    <label class="block">
+      <span class="text-xs text-gray-500">クールダウン（分）</span>
+      <input type="number" id="s_cooldown" class="w-full border rounded px-2 py-1 mt-1">
+    </label>
+  </div>
+  <div id="gate" class="mt-3 text-xs text-gray-500"></div>
+</div>
+
+<div class="flex items-center gap-3 mb-6">
+  <button onclick="saveSettings()" class="bg-blue-500 text-white text-sm px-4 py-1.5 rounded hover:bg-blue-600">
+    設定を保存
+  </button>
+  <button onclick="clearGate()" class="text-xs text-gray-400 hover:text-gray-600">
+    発火済み記録を消す（もう一度鳴らせるようにする）
+  </button>
+  <span id="save_msg" class="text-xs text-gray-500"></span>
+</div>
+
+<!-- 直近の予定 -->
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="font-semibold text-gray-700">直近の予定と出発リミット</h2>
+    <button onclick="loadTriggers()" class="text-xs text-gray-400 hover:text-gray-600">↻ 更新</button>
+  </div>
+  <div id="triggers" class="text-sm text-gray-400">読み込み中…</div>
+</div>
+
+<!-- 履歴 -->
+<div class="bg-white rounded-lg border border-gray-200 p-5">
+  <h2 class="font-semibold text-gray-700 mb-3">歌った履歴</h2>
+  <div id="history" class="text-sm text-gray-400">読み込み中…</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SOURCE_LABEL = { builtin: '手書き', composed: 'つくった歌' };
+let SONGS = [];
+
+async function loadSongs() {
+  const data = await apiFetch('/api/songs');
+  SONGS = data.songs;
+
+  const e = data.engine;
+  let head = e.available
+    ? `<span class="text-green-600">● VOICEVOX ENGINE ${esc(e.version)}</span>
+       <span class="text-gray-400 text-xs ml-2">${esc(e.url)} / frame_rate ${esc(e.frameRate)}</span>`
+    : `<div class="bg-amber-50 border border-amber-200 rounded px-3 py-2 text-amber-800">
+         VOICEVOX ENGINE に接続できません（歌だけが無効になります）<br>
+         <span class="text-xs">${esc(e.error)}</span></div>`;
+  if (!data.publicBaseUrl) {
+    head += `<div class="bg-amber-50 border border-amber-200 rounded px-3 py-2 text-amber-800 mt-2 text-xs">
+         SONG_PUBLIC_BASE_URL が未設定です。スタックちゃんから見た Bridge の URL
+         （例: http://raspberrypi.local:8000）を .env に設定してください。</div>`;
+  }
+  document.getElementById('engine').innerHTML = head;
+
+  document.getElementById('mood_list').innerHTML =
+    (data.moods || []).map(m => `<option value="${esc(m)}">`).join('');
+
+  renderSongs(data.loadErrors);
+
+  const sel = document.getElementById('s_song');
+  sel.innerHTML = SONGS.map(s => `<option value="${esc(s.id)}">${esc(s.title)}</option>`).join('');
+
+  const st = data.settings;
+  document.getElementById('s_enabled').checked = st.song_trigger_enabled === 'true';
+  document.getElementById('s_lead').value = st.song_trigger_lead_minutes;
+  document.getElementById('s_prep').value = st.song_trigger_prep_minutes;
+  document.getElementById('s_travel').value = st.song_trigger_travel_minutes;
+  sel.value = st.song_trigger_song;
+  document.getElementById('s_quiet_start').value = st.song_quiet_start;
+  document.getElementById('s_quiet_end').value = st.song_quiet_end;
+  document.getElementById('s_cooldown').value = st.song_cooldown_minutes;
+  document.getElementById('i_enabled').checked = st.song_idle_enabled === 'true';
+  document.getElementById('i_hours').value = st.song_idle_min_hours;
+  document.getElementById('i_chance').value = st.song_idle_chance;
+  document.getElementById('i_start').value = st.song_idle_start;
+  document.getElementById('i_end').value = st.song_idle_end;
+  document.getElementById('i_mood').value = st.song_idle_mood;
+
+  document.getElementById('gate').innerHTML =
+    `いま鳴らせるか: <span class="${data.gate.allowed ? 'text-green-600' : 'text-gray-500'}">
+       ${data.gate.allowed ? 'はい' : 'いいえ（' + esc(data.gate.reason) + '）'}</span>
+     ／ 在宅判定: ${data.gate.atHome ? 'はい' : 'いいえ'}`;
+  document.getElementById('idle_state').innerHTML =
+    `いま条件を満たしているか: <span class="${data.idle.due ? 'text-green-600' : 'text-gray-500'}">
+       ${data.idle.due ? 'はい（あとは確率しだい）' : 'いいえ（' + esc(data.idle.reason) + '）'}</span>`;
+}
+
+function renderSongs(loadErrors) {
+  const filt = document.querySelector('input[name=filt]:checked').value;
+  const list = SONGS.filter(s => filt === 'all' || s.source === filt);
+  const errs = (loadErrors || []).map(x =>
+    `<div class="text-red-600 text-xs">${esc(x.file)}: ${esc(x.error)}</div>`).join('');
+
+  document.getElementById('songs').innerHTML = errs + (list.length === 0
+    ? '<div class="text-gray-400">該当する曲がありません</div>'
+    : list.map(s => `
+      <div class="flex items-start justify-between border-b border-gray-100 py-2 last:border-0">
+        <div class="min-w-0">
+          <div class="font-medium text-gray-800">
+            ${esc(s.title)}
+            <span class="text-[10px] px-1.5 py-0.5 rounded ml-1
+              ${s.source === 'composed' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500'}">
+              ${esc(SOURCE_LABEL[s.source] || s.source)}</span>
+            <span class="text-xs text-gray-400 ml-1">${esc(s.id)}</span>
+          </div>
+          <div class="text-xs text-gray-500">
+            ${esc(s.bpm)} BPM / ${esc(s.noteCount)}音 /
+            ${s.durationSec ? esc(s.durationSec) + '秒' : '長さ不明'} /
+            「${esc(s.defaultLyric)}」 / style ${esc(s.singStyleId)}→${esc(s.frameDecodeStyleId)}
+            ${s.mood.length ? ' / ' + s.mood.map(esc).join(', ') : ''}
+          </div>
+          ${s.source === 'composed' ? `<div class="text-xs text-emerald-700 mt-0.5">
+            ${s.theme ? 'お題: ' + esc(s.theme) : 'お題なし'}
+            ${s.createdBy ? ' ／ ' + esc(s.createdBy) + 'のために' : ''}
+            ${s.createdAt ? ' ／ ' + esc(s.createdAt.slice(0, 10)) + ' につくった' : ''}
+          </div>` : ''}
+          <div class="text-xs text-gray-400 mt-0.5">
+            ${s.playCount > 0
+              ? `${esc(s.playCount)}回歌った ／ 最後は ${esc((s.lastPlayedAt || '').slice(0, 16).replace('T', ' '))}`
+              : 'まだ歌っていません'}
+          </div>
+        </div>
+        <div class="flex items-center gap-2 shrink-0 ml-3">
+          <span class="text-xs ${s.cached ? 'text-green-600' : 'text-gray-400'}">
+            ${s.cached ? '生成済み' : '未生成'}</span>
+          <button onclick="showScore('${esc(s.id)}')" class="text-xs text-gray-400 hover:text-gray-600">楽譜</button>
+          <button onclick="playSong('${esc(s.id)}')"
+            class="text-xs bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600">▶ 試聴</button>
+          <button onclick="rebuildSong('${esc(s.id)}')" class="text-xs text-gray-400 hover:text-gray-600">⟳</button>
+          ${s.source === 'composed'
+            ? `<button onclick="deleteSong('${esc(s.id)}','${esc(s.title)}')"
+                 class="text-xs text-red-400 hover:text-red-600">削除</button>` : ''}
+        </div>
+      </div>`).join(''));
+}
+
+async function composeSong() {
+  const btn = document.getElementById('c_btn');
+  const msg = document.getElementById('c_msg');
+  btn.disabled = true;
+  btn.classList.add('opacity-50');
+  msg.textContent = 'つくっています…（10〜30秒かかります）';
+  try {
+    const r = await apiFetch('/api/songs/compose', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        theme: document.getElementById('c_theme').value,
+        mood:  document.getElementById('c_mood').value,
+        requested_by: document.getElementById('c_by').value,
+        play:  document.getElementById('c_play').checked,
+      }),
+    });
+    msg.textContent = `「${r.title}」ができました（${r.noteCount}音・${r.bpm}BPM）`
+      + (r.played ? '。歌っています' : '') + (r.playError ? `。再生は失敗: ${r.playError}` : '');
+    document.getElementById('c_theme').value = '';
+    await loadSongs();
+    loadHistory();
+    showScore(r.songId);
+  } catch (e) {
+    msg.textContent = 'つくれませんでした: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('opacity-50');
+  }
+}
+
+async function showScore(id) {
+  const d = await apiFetch(`/api/songs/${encodeURIComponent(id)}/score`);
+  document.getElementById('score_panel').classList.remove('hidden');
+  document.getElementById('score_title').textContent = `— ${d.title}`;
+  document.getElementById('score_meta').innerHTML =
+    `${esc(SOURCE_LABEL[d.source] || d.source)} ／ ${esc(d.score.bpm)} BPM ／ `
+    + `${esc(d.notes.length)}ノート（先頭の無音を含む） ／ ${esc(d.totalFrames)}フレーム ／ ${esc(d.durationSec)}秒`
+    + (d.theme ? ` ／ お題: ${esc(d.theme)}` : '');
+  document.getElementById('score_piano').innerHTML = renderPianoRoll(d.notes);
+  document.getElementById('score_raw').textContent =
+    JSON.stringify({ score: d.score, notes: d.notes }, null, 2);
+}
+
+function renderPianoRoll(notes) {
+  // 音の高さと長さをそのまま横棒で描く。休符は薄いグレー。
+  const pitched = notes.filter(n => n.key !== null).map(n => n.key);
+  if (pitched.length === 0) return '<div class="text-xs text-gray-400">音がありません</div>';
+  const lo = Math.min(...pitched), hi = Math.max(...pitched);
+  const rows = hi - lo + 1;
+  const total = notes.reduce((a, n) => a + n.frame_length, 0);
+  const H = 12, W = 640;
+  let x = 0;
+  const bars = notes.map(n => {
+    const w = Math.max(1, (n.frame_length / total) * W);
+    const bar = n.key === null
+      ? `<rect x="${x}" y="0" width="${w}" height="${rows * H}" fill="#f3f4f6"/>`
+      : `<rect x="${x}" y="${(hi - n.key) * H + 1}" width="${Math.max(2, w - 1)}" height="${H - 2}"
+               rx="2" fill="#3b82f6"><title>${esc(n.lyric || '')} key=${n.key}</title></rect>`;
+    x += w;
+    return bar;
+  }).join('');
+  return `<svg width="${W}" height="${rows * H}" viewBox="0 0 ${W} ${rows * H}"
+            class="border border-gray-100 rounded bg-white" style="min-width:${W}px">${bars}</svg>
+          <div class="text-[10px] text-gray-400 mt-1">MIDI ${lo}〜${hi}（縦=音の高さ、横=時間、グレー=休符）</div>`;
+}
+
+async function playSong(id) {
+  try {
+    const r = await apiFetch(`/api/songs/${encodeURIComponent(id)}/play`, { method: 'POST' });
+    document.getElementById('save_msg').textContent = `「${r.title}」を再生しました（${r.durationSec}秒）`;
+    loadHistory();
+    setTimeout(() => { document.getElementById('save_msg').textContent = ''; }, 4000);
+  } catch (e) { alert('再生できませんでした: ' + e.message); }
+}
+
+async function rebuildSong(id) {
+  try {
+    await apiFetch(`/api/songs/${encodeURIComponent(id)}/rebuild`, { method: 'POST' });
+    loadSongs();
+  } catch (e) { alert('再生成できませんでした: ' + e.message); }
+}
+
+async function deleteSong(id, title) {
+  if (!confirm(`「${title}」を消します。よろしいですか？`)) return;
+  try {
+    await apiFetch(`/api/songs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    loadSongs();
+  } catch (e) { alert('削除できませんでした: ' + e.message); }
+}
+
+async function reloadScores() { await apiFetch('/api/songs/reload', { method: 'POST' }); loadSongs(); }
+
+async function prebuild() {
+  const r = await apiFetch('/api/songs/prebuild', { method: 'POST' });
+  alert(`生成 ${r.built.length}件 / 既存 ${r.cached.length}件 / 失敗 ${r.failed.length}件`);
+  loadSongs();
+}
+
+async function clearGate() {
+  await apiFetch('/api/songs/gate', { method: 'DELETE' });
+  loadSongs();
+  loadTriggers();
+}
+
+async function saveSettings() {
+  const body = {
+    song_trigger_enabled:        document.getElementById('s_enabled').checked,
+    song_trigger_lead_minutes:   Number(document.getElementById('s_lead').value),
+    song_trigger_prep_minutes:   Number(document.getElementById('s_prep').value),
+    song_trigger_travel_minutes: Number(document.getElementById('s_travel').value),
+    song_trigger_song:           document.getElementById('s_song').value,
+    song_quiet_start:            document.getElementById('s_quiet_start').value,
+    song_quiet_end:              document.getElementById('s_quiet_end').value,
+    song_cooldown_minutes:       Number(document.getElementById('s_cooldown').value),
+    song_idle_enabled:           document.getElementById('i_enabled').checked,
+    song_idle_min_hours:         Number(document.getElementById('i_hours').value),
+    song_idle_chance:            Number(document.getElementById('i_chance').value),
+    song_idle_start:             document.getElementById('i_start').value,
+    song_idle_end:               document.getElementById('i_end').value,
+    song_idle_mood:              document.getElementById('i_mood').value,
+  };
+  const msg = document.getElementById('save_msg');
+  try {
+    await apiFetch('/api/songs/settings', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    msg.textContent = '保存しました';
+    loadSongs();
+    loadTriggers();
+  } catch (e) { msg.textContent = '保存できませんでした: ' + e.message; }
+  setTimeout(() => { msg.textContent = ''; }, 3000);
+}
+
+async function loadTriggers() {
+  const data = await apiFetch('/api/songs/triggers');
+  const rows = data.upcoming;
+  document.getElementById('triggers').innerHTML = rows.length === 0
+    ? '<div class="text-gray-400">6時間以内に時刻の決まった予定はありません</div>'
+    : rows.map(r => `
+      <div class="border-b border-gray-100 py-2 last:border-0">
+        <div class="flex items-center justify-between">
+          <div class="text-gray-800">${esc(r.person_name)}「${esc(r.title)}」</div>
+          <div class="text-xs ${r.minutes_to_limit <= 0 ? 'text-gray-400' : 'text-gray-600'}">
+            出発リミットまで ${esc(r.minutes_to_limit)}分</div>
+        </div>
+        <div class="text-xs text-gray-500">
+          開始 ${esc((r.start_at || '').slice(11, 16))} ／
+          リミット ${esc((r.depart_limit || '').slice(11, 16))}
+          （移動 ${esc(r.travel_minutes)}分 + 準備 ${esc(r.prep_minutes)}分
+          ${r.overridden ? '・この予定だけの設定' : ''}）
+          ${r.fired_at ? '／ <span class="text-green-600">歌った</span>' : ''}
+        </div>
+      </div>`).join('');
+}
+
+async function loadHistory() {
+  const data = await apiFetch('/api/songs/history?limit=20');
+  const titleOf = (id) => (SONGS.find(s => s.id === id) || {}).title || id;
+  document.getElementById('history').innerHTML = data.items.length === 0
+    ? '<div class="text-gray-400">まだ歌っていません</div>'
+    : data.items.map(h => `
+      <div class="flex justify-between border-b border-gray-100 py-1.5 last:border-0 text-xs">
+        <span class="text-gray-700">${esc(titleOf(h.song_id))}</span>
+        <span class="text-gray-400">${esc(h.source)} ／ ${esc(h.played_at.slice(0, 16).replace('T', ' '))}</span>
+      </div>`).join('');
+}
+
+loadSongs().then(loadHistory);
+loadTriggers();
+</script>
+{% endblock %}

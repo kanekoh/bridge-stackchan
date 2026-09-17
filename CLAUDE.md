@@ -27,6 +27,7 @@ uvicorn main:app --reload
 pytest                              # 全テスト
 pytest test_main.py                 # API テスト
 pytest test_calendar_sync.py        # カレンダー同期テスト
+pytest test_song.py                 # 楽譜変換・gatekeeper・出発リミット
 pytest -k "test_parse_expression"   # 単一テスト
 
 # 起動中サービスへの E2E インターフェーステスト
@@ -44,7 +45,9 @@ python calendar_sync.py --auth --key shiori
 - `main.py` — FastAPI アプリ本体（約 1900 行、すべての API ロジックを含む）
 - `calendar_sync.py` — Google Calendar / Tasks の同期ロジック（スレッドで実行）
 - `config/expression_map.yaml` — 感情ラベル → VOICEVOX 話者ID + Stack-chan 表情名のマッピング
-- `data/bridge.db` — SQLite DB（llm_sessions / items / notification_log / calendar_sources）
+- `config/songs/*.yaml` — 歌の楽譜（歌詞・音名・拍数・BPM・移調）
+- `data/bridge.db` — SQLite DB（llm_sessions / items / notification_log / calendar_sources / gate_log / song_play_log / song_trigger_overrides）
+- `data/songs/*.mp3` — 事前生成した歌（`/songs` で配信。キャッシュなので消してよい）
 - `secrets/` — Google OAuth トークンファイル（`token.json`, `token_{key}.json`）
 
 ### main.py の構造
@@ -88,6 +91,14 @@ paho-mqtt の永続接続クラス。`publish()` 呼び出し時に未接続な�
 - `GET /healthz` — ヘルスチェック
 - `GET /debug/connectivity` — MQTT/VOICEVOX への TCP 疎通確認
 - `POST /calendar-sources` など — カレンダーソース管理 CRUD
+- `GET /api/songs` — 曲一覧・キャッシュ状態・ENGINE 状態・設定
+- `POST /api/songs/{id}/play` — 試聴（gatekeeper を通さない）
+- `POST /api/songs/{id}/rebuild` / `POST /api/songs/prebuild` — 再生成
+- `POST /api/songs/compose` — その場で1曲つくる
+- `GET /api/songs/{id}/score` — 楽譜と ENGINE に渡す notes（UI のピアノロール用）
+- `DELETE /api/songs/{id}` — つくった歌を消す（手書きは消せない）
+- `GET /api/songs/triggers` — 直近の予定と出発リミットの計算結果
+- `GET /songs/{file}.mp3` — 事前生成した歌の配信（StaticFiles）
 
 **Slack 統合**
 Socket Mode（WebSocket）で動作。`SLACK_BOT_TOKEN` と `SLACK_APP_TOKEN` の両方が必要。
@@ -99,6 +110,21 @@ Socket Mode（WebSocket）で動作。`SLACK_BOT_TOKEN` と `SLACK_APP_TOKEN` �
 
 **カレンダー同期**
 `calendar_sync.py` がバックグラウンドスレッドで Google Calendar/Tasks を定期取得 → SQLite の `items` テーブルへ upsert。`main.py` の通知ループ（`_calendar_notify_loop`）が `notify_at` を監視して MQTT 発話を実行。複数人分のトークンを `token_{key}.json` で管理。
+
+**歌（`bridge/features/song/`）**
+発話（api.tts.quest）には歌唱 API がないため、歌だけはローカルの VOICEVOX ENGINE 0.25.2 を使う。
+- `score.py` — 楽譜 → ENGINE の notes 配列。**純関数のみ**（ENGINE にも DB にも触らない）。先頭無音の挿入と、累積フレームの差分によるテンポずれ防止がここの責務。ユニットテストの主対象（`test_song.py`）
+- `engine.py` — `/sing_frame_audio_query`（sing style_id で音程）→ `/frame_synthesis`（frame_decode style_id で声色）の2段階
+- `cache.py` — 起動時に事前生成 → ffmpeg で 16kHz mono MP3 → `data/songs/`。**リアルタイム合成はしない**。楽譜・style_id・ENGINE バージョン・出力フォーマットのハッシュがキャッシュキー
+- `library.py` — 曲を引く唯一の入口。`config/songs/*.yaml`（手書き＝builtin）と `songs` テーブル（つくった歌＝composed）の両方を読む。id 衝突時は YAML 優先。気分タグでの選曲・再生履歴・統計もここ
+- `compose.py` — LLM に楽譜 JSON を書かせる。**検証はプロンプトではなく `parse_score()` が担保**（手書きの楽譜と同じ関門）。不正なら理由を添えて1回だけ作り直させる。合成に失敗したら保存を取り消す
+- `play.py` — gatekeeper を通してから `publish_speak` で MQTT へ。**新トピックは作らず発話と同じ `stackchan/{deviceId}/speak` に audioUrl を載せる**（ファーム変更が要らない）
+- `triggers.py` — 出発リミット（予定の開始 − 移動時間 − 準備バッファ）の監視ループと、「ふと歌う」ループ（日中・在宅・前回から N 時間以上を満たした回ごとに確率で発火）
+
+ENGINE が起動していなければ歌だけが無効になる（他機能は無影響）。`SONG_PUBLIC_BASE_URL` 未設定だと audioUrl を組み立てられないため歌えない。
+
+**gatekeeper（`bridge/features/gatekeeper.py`）**
+発火の抑制を1か所にまとめた汎用モジュール。`allow(kind, key, ...)` → 実行 → `record(kind, key, busy_sec=...)` の順で使う。1回きり（once）・クールダウン・深夜抑制（設置場所のタイムゾーン基準）・再生中の重複防止。判定は**すべてルールベース**で LLM には問い合わせない。記録は `gate_log` テーブル。
 
 ## Stack-chan Personality
 
@@ -139,3 +165,6 @@ Stack-chan からの ACK（`stackchan/ack`）:
 - `CALENDAR_ENABLED` — `true` にするとカレンダー同期・通知が有効
 - `DISABLE_SESSION_HISTORY` / `DISABLE_TOOLS` — デバッグ・性能切り分け用フラグ
 - `OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND` — Web 検索を LLM の判断で行う2パス方式（実験的）
+- `VOICEVOX_SING_URL` — 歌声合成用の VOICEVOX ENGINE（コンテナからホストは `http://10.0.2.2:50021`）
+- `SONG_PUBLIC_BASE_URL` — Stack-chan から見た Bridge の URL。歌の audioUrl 組み立てに必須
+- `SONG_TRIGGER_ENABLED` — 出発リミットで歌うトリガー（実運用の切り替えは `/ui/songs`）

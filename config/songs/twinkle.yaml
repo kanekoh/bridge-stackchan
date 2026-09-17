@@ -1,0 +1,67 @@
+# きらきら星 — 誰でも旋律を知っている曲を1曲だけ置いておく。
+#
+# 楽譜→notes の変換（音程・テンポ・フレーム長）が正しいかどうかを、
+# 実機で鳴らして耳で確かめるための基準曲。おかしく聞こえたら
+# bridge/features/song/score.py 側を疑う。
+# 歌詞は「ら」にして、鼻歌よりも音程がはっきり分かるようにしている。
+id: twinkle
+title: きらきら星
+bpm: 120
+transpose: 0
+mood: [calm, sleepy, test]
+default_lyric: "ら"
+style:
+  sing: 6000
+  frame_decode: 3001   # あまあま
+credit: "VOICEVOX:ずんだもん"
+
+notes:
+  # きーらーきーらーひーかーるー
+  - {note: C4, beats: 1}
+  - {note: C4, beats: 1}
+  - {note: G4, beats: 1}
+  - {note: G4, beats: 1}
+  - {note: A4, beats: 1}
+  - {note: A4, beats: 1}
+  - {note: G4, beats: 2}
+  # おーそーらーのーほーしーよー
+  - {note: F4, beats: 1}
+  - {note: F4, beats: 1}
+  - {note: E4, beats: 1}
+  - {note: E4, beats: 1}
+  - {note: D4, beats: 1}
+  - {note: D4, beats: 1}
+  - {note: C4, beats: 2}
+  # まーばーたーきーしーてーはー
+  - {note: G4, beats: 1}
+  - {note: G4, beats: 1}
+  - {note: F4, beats: 1}
+  - {note: F4, beats: 1}
+  - {note: E4, beats: 1}
+  - {note: E4, beats: 1}
+  - {note: D4, beats: 2}
+  # みーんーなーをーみーてーるー
+  - {note: G4, beats: 1}
+  - {note: G4, beats: 1}
+  - {note: F4, beats: 1}
+  - {note: F4, beats: 1}
+  - {note: E4, beats: 1}
+  - {note: E4, beats: 1}
+  - {note: D4, beats: 2}
+  # きーらーきーらーひーかーるー
+  - {note: C4, beats: 1}
+  - {note: C4, beats: 1}
+  - {note: G4, beats: 1}
+  - {note: G4, beats: 1}
+  - {note: A4, beats: 1}
+  - {note: A4, beats: 1}
+  - {note: G4, beats: 2}
+  # おーそーらーのーほーしーよー
+  - {note: F4, beats: 1}
+  - {note: F4, beats: 1}
+  - {note: E4, beats: 1}
+  - {note: E4, beats: 1}
+  - {note: D4, beats: 1}
+  - {note: D4, beats: 1}
+  - {note: C4, beats: 2}
+  - {note: rest, beats: 1}
