@@ -151,7 +151,7 @@ SONG_DIR              = os.getenv("SONG_DIR", "data/songs")            # 生成�
 # スタックちゃんから見た Bridge の URL。MQTT に載せる audioUrl の組み立てに使うため、
 # リクエストからは決められない（例: http://raspberrypi.local:8000）。
 SONG_PUBLIC_BASE_URL  = os.getenv("SONG_PUBLIC_BASE_URL", "")
-SONG_SAMPLE_RATE      = int(os.getenv("SONG_SAMPLE_RATE", "16000"))    # M5Stack 向け
+SONG_SAMPLE_RATE      = int(os.getenv("SONG_SAMPLE_RATE", "24000"))    # 発話（VOICEVOX）と同じ。変えると無音になることがある
 SONG_BITRATE          = os.getenv("SONG_BITRATE", "64k")
 SONG_PREBUILD_ON_START = os.getenv("SONG_PREBUILD_ON_START", "true").lower() == "true"
 FFMPEG_BIN            = os.getenv("FFMPEG_BIN", "ffmpeg")

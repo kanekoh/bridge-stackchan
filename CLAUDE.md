@@ -115,7 +115,7 @@ Socket Mode（WebSocket）で動作。`SLACK_BOT_TOKEN` と `SLACK_APP_TOKEN` �
 発話（api.tts.quest）には歌唱 API がないため、歌だけはローカルの VOICEVOX ENGINE 0.25.2 を使う。
 - `score.py` — 楽譜 → ENGINE の notes 配列。**純関数のみ**（ENGINE にも DB にも触らない）。先頭無音の挿入と、累積フレームの差分によるテンポずれ防止がここの責務。ユニットテストの主対象（`test_song.py`）
 - `engine.py` — `/sing_frame_audio_query`（sing style_id で音程）→ `/frame_synthesis`（frame_decode style_id で声色）の2段階
-- `cache.py` — 起動時に事前生成 → ffmpeg で 16kHz mono MP3 → `data/songs/`。**リアルタイム合成はしない**。楽譜・style_id・ENGINE バージョン・出力フォーマットのハッシュがキャッシュキー
+- `cache.py` — 起動時に事前生成 → ffmpeg で **24kHz mono MP3**（発話の MP3 と同じ形式。16kHz にするとデバイスが無音になる）→ `data/songs/`。**リアルタイム合成はしない**。楽譜・style_id・ENGINE バージョン・出力フォーマットのハッシュがキャッシュキー
 - `library.py` — 曲を引く唯一の入口。`config/songs/*.yaml`（手書き＝builtin）と `songs` テーブル（つくった歌＝composed）の両方を読む。id 衝突時は YAML 優先。気分タグでの選曲・再生履歴・統計もここ
 - `compose.py` — LLM に楽譜 JSON を書かせる。**検証はプロンプトではなく `parse_score()` が担保**（手書きの楽譜と同じ関門）。不正なら理由を添えて1回だけ作り直させる。合成に失敗したら保存を取り消す
 - `play.py` — gatekeeper を通してから `publish_speak` で MQTT へ。**新トピックは作らず発話と同じ `stackchan/{deviceId}/speak` に audioUrl を載せる**（ファーム変更が要らない）

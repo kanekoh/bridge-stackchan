@@ -547,11 +547,18 @@ def song_cache_dir(tmp_path, monkeypatch):
 
 
 def _fake_ffmpeg(calls, out=b"ID3fake-mp3", returncode=0, stderr=b""):
-    """asyncio.create_subprocess_exec の差し替え。呼ばれた引数を calls に記録する。"""
+    """asyncio.create_subprocess_exec の差し替え。呼ばれた引数を calls に記録する。
+
+    本物の ffmpeg と同じく、出力はパイプではなくコマンド末尾の一時ファイルに書く
+    （パイプだと Xing ヘッダが欠落するため、実装がファイル出力になっている）。
+    """
     async def _exec(*cmd, **kwargs):
         calls.append(cmd)
+        if returncode == 0 and out:
+            with open(cmd[-1], "wb") as f:    # cmd[-1] が出力先のパス
+                f.write(out)
         proc = AsyncMock()
-        proc.communicate = AsyncMock(return_value=(out, stderr))
+        proc.communicate = AsyncMock(return_value=(b"", stderr))
         proc.returncode = returncode
         return proc
     return _exec
@@ -582,7 +589,7 @@ async def test_ensure_song_builds_then_reuses_cache(song_cache_dir):
 
 @pytest.mark.asyncio
 async def test_ensure_song_ffmpeg_arguments(song_cache_dir):
-    """M5Stack 向けの 16kHz mono MP3 に変換している。"""
+    """発話と同じ 24kHz mono MP3 に変換し、Xing ヘッダも書かせている。"""
     from bridge.features.song import cache
 
     calls = []
@@ -595,9 +602,13 @@ async def test_ensure_song_ffmpeg_arguments(song_cache_dir):
         await cache.ensure_song(_score())
 
     cmd = calls[0]
-    assert cmd[cmd.index("-ar") + 1] == "16000"
+    # 発話（VOICEVOX Web 版）の MP3 と同じ形式に揃える。ここがずれると無音になる
+    assert cmd[cmd.index("-ar") + 1] == "24000"
     assert cmd[cmd.index("-ac") + 1] == "1"
     assert "libmp3lame" in cmd
+    # Xing/Info ヘッダを書かせるため、出力はパイプではなくファイル
+    assert cmd[cmd.index("-write_xing") + 1] == "1"
+    assert cmd[-1].endswith(".mp3") and "pipe:" not in cmd[-1]
 
 
 @pytest.mark.asyncio

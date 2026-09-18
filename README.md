@@ -58,7 +58,7 @@ Slack /tell [宛名] <内容>
 config/songs/*.yaml（人が書いた楽譜）┐
 songs テーブル（つくった歌）        ┴→ 同じ Score
   → VOICEVOX ENGINE /sing_frame_audio_query → /frame_synthesis（WAV 24kHz）
-  → ffmpeg（MP3 16kHz mono）→ data/songs/ にキャッシュ
+  → ffmpeg（MP3 24kHz mono・発話と同じ形式）→ data/songs/ にキャッシュ
   → gatekeeper（1回きり・深夜抑制・重複防止）
   → MQTT publish（発話と同じ stackchan/{deviceId}/speak）
 ```
@@ -218,7 +218,7 @@ cp .env.example .env
 | `SONG_CONFIG_DIR` | `config/songs` | 楽譜 YAML の置き場 |
 | `SONG_DIR` | `data/songs` | 生成済み MP3 の置き場 |
 | `SONG_PUBLIC_BASE_URL` | *(空)* | **必須**。Stack-chan から見た Bridge の URL（例: `http://raspberrypi.local:8000`） |
-| `SONG_SAMPLE_RATE` | `16000` | 出力サンプリングレート（変更するとキャッシュを作り直す） |
+| `SONG_SAMPLE_RATE` | `24000` | 出力サンプリングレート。発話と同じ値。変えるとデバイスが無音になることがある |
 | `SONG_BITRATE` | `64k` | 出力ビットレート |
 | `SONG_PREBUILD_ON_START` | `true` | 起動時に全曲を事前生成する |
 | `FFMPEG_BIN` | `ffmpeg` | ffmpeg のパス |

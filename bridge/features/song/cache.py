@@ -11,6 +11,7 @@ import asyncio
 import glob
 import logging
 import os
+import tempfile
 
 from bridge.config import (
     FFMPEG_BIN, SONG_BITRATE, SONG_DIR, SONG_SAMPLE_RATE,
@@ -39,27 +40,44 @@ def path_for(score: Score, key: str) -> str:
 
 
 async def _to_mp3(wav: bytes) -> bytes:
-    """ENGINE の WAV を M5Stack 向け MP3（既定 16kHz mono）に変換する。"""
-    cmd = [
-        FFMPEG_BIN, "-hide_banner", "-loglevel", "error",
-        "-f", "wav", "-i", "pipe:0",
-        "-ar", str(SONG_SAMPLE_RATE), "-ac", "1",
-        "-codec:a", "libmp3lame", "-b:a", SONG_BITRATE,
-        "-f", "mp3", "pipe:1",
-    ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError as e:
-        raise SongBuildError(f"{FFMPEG_BIN} が見つかりません（FFMPEG_BIN を確認してください）") from e
-    stdout, stderr = await proc.communicate(wav)
-    if proc.returncode != 0 or not stdout:
-        raise SongBuildError(f"ffmpeg 変換に失敗しました: {stderr.decode('utf-8', 'replace')[:300]}")
-    return stdout
+    """ENGINE の WAV を M5Stack 向け MP3 に変換する。
+
+    出力は発話（VOICEVOX Web 版）の MP3 と同じ形式に揃える。デバイスはそちらしか
+    再生したことがなく、サンプルレートを変えると I2S やデコーダの設定が合わずに
+    無音になることがあるため。既定は 24kHz mono で、VOICEVOX ENGINE の出力
+    （24kHz）と同じなので再サンプリングも起きない。
+
+    出力先はパイプではなく一時ファイルにする。パイプはシークできず、ffmpeg が
+    先頭の Xing/Info フレームを書き戻せないため、発話の MP3 には付いている
+    ヘッダが欠落する。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = os.path.join(tmpdir, "out.mp3")
+        cmd = [
+            FFMPEG_BIN, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "wav", "-i", "pipe:0",
+            "-ar", str(SONG_SAMPLE_RATE), "-ac", "1",
+            "-codec:a", "libmp3lame", "-b:a", SONG_BITRATE,
+            "-write_xing", "1",
+            out_path,
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as e:
+            raise SongBuildError(f"{FFMPEG_BIN} が見つかりません（FFMPEG_BIN を確認してください）") from e
+        _stdout, stderr = await proc.communicate(wav)
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            raise SongBuildError(f"ffmpeg 変換に失敗しました: {stderr.decode('utf-8', 'replace')[:300]}")
+        with open(out_path, "rb") as f:
+            mp3 = f.read()
+    if not mp3:
+        raise SongBuildError("ffmpeg の出力が空でした")
+    return mp3
 
 
 def _purge_stale(score: Score, keep: str) -> None:
