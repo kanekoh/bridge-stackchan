@@ -26,9 +26,15 @@ class SongBuildError(RuntimeError):
     """合成または変換に失敗した。"""
 
 
+# 出力の作り方を変えたらこの値を上げる。サンプルレートやビットレートと違い、
+# ID3/Xing の有無のような「同じパラメータでも中身が変わる」変更はキャッシュキーに
+# 現れないため、明示的に印を付けないと古いファイルが使われ続ける。
+_AUDIO_FORMAT_REV = "2-noid3"
+
+
 def _audio_spec() -> str:
     """出力フォーマットの識別子。変えるとキャッシュキーが変わる。"""
-    return f"mp3-{SONG_SAMPLE_RATE}-{SONG_BITRATE}"
+    return f"mp3-{SONG_SAMPLE_RATE}-{SONG_BITRATE}-{_AUDIO_FORMAT_REV}"
 
 
 def filename_for(score: Score, key: str) -> str:

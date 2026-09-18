@@ -1026,3 +1026,27 @@ async def test_check_idle_song_uses_mood_filter(song_db):
         await triggers.check_idle_song()
 
     assert played == ["twinkle"]   # mood に sleepy を持つのは twinkle だけ
+
+
+def test_cache_key_changes_with_format_revision(song_cache_dir):
+    """ID3 の有無のように、同じパラメータでも中身が変わる修正では
+    _AUDIO_FORMAT_REV を上げないと古いキャッシュが使われ続ける。"""
+    from bridge.features.song import cache
+
+    before = _key(_score(), audio_spec=cache._audio_spec())
+    original = cache._AUDIO_FORMAT_REV
+    try:
+        cache._AUDIO_FORMAT_REV = original + "-x"
+        after = _key(_score(), audio_spec=cache._audio_spec())
+    finally:
+        cache._AUDIO_FORMAT_REV = original
+    assert before != after
+
+
+def test_audio_spec_includes_rate_bitrate_and_revision():
+    from bridge.features.song import cache
+
+    spec = cache._audio_spec()
+    assert str(cache.SONG_SAMPLE_RATE) in spec
+    assert cache.SONG_BITRATE in spec
+    assert cache._AUDIO_FORMAT_REV in spec
