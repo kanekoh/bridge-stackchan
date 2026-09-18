@@ -83,8 +83,12 @@ async def play_song(
     duration = score.duration_sec(info["frame_rate"])
 
     req_id = str(uuid.uuid4())
+    # audioStreamingUrl は発話と同じく必ず載せる。publish_speak は偽値のとき
+    # フィールドごと落とすため、None を渡すと発話とペイロードの形が変わり、
+    # デバイスは ACK を返すだけで取りに来ない（歌が無音になる原因だった）。
+    # 歌は静的ファイルで Range 取得もできるので、同じ URL をそのまま使う。
     publish_speak(
-        url, None,
+        url, url,
         f"♪{score.title}",   # 画面表示・ログ用。読み上げはされない（音源は歌そのもの）
         source, priority, req_id, expression,
     )

@@ -498,6 +498,9 @@ async def test_check_departure_songs_fires_once_per_event(song_db):
 
     assert len(published) == 1
     assert published[0][0] == "http://pi:8000/songs/hurry-abc.mp3"  # audioUrl
+    # audioStreamingUrl も必ず載せる（None だと publish_speak がフィールドごと
+    # 落とし、デバイスは ACK を返すだけで取りに来ない）
+    assert published[0][1] == "http://pi:8000/songs/hurry-abc.mp3"
     assert published[0][3] == "song_calendar"                        # source
 
 
