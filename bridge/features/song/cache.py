@@ -42,14 +42,16 @@ def path_for(score: Score, key: str) -> str:
 async def _to_mp3(wav: bytes) -> bytes:
     """ENGINE の WAV を M5Stack 向け MP3 に変換する。
 
-    出力は発話（VOICEVOX Web 版）の MP3 と同じ形式に揃える。デバイスはそちらしか
-    再生したことがなく、サンプルレートを変えると I2S やデコーダの設定が合わずに
-    無音になることがあるため。既定は 24kHz mono で、VOICEVOX ENGINE の出力
-    （24kHz）と同じなので再サンプリングも起きない。
+    デバイスは audioStreamingUrl を「MP3 フレームの生の列」として読み、受け取った
+    バイトをそのままデコーダへ流し込む。発話で使われている tts.quest の
+    ストリーミング配信（.mp3s）も、先頭からいきなり MP3 フレームで始まっている。
 
-    出力先はパイプではなく一時ファイルにする。パイプはシークできず、ffmpeg が
-    先頭の Xing/Info フレームを書き戻せないため、発話の MP3 には付いている
-    ヘッダが欠落する。
+    そのため ID3v2 タグと Xing/Info フレームは付けない。ID3 タグを先頭に置くと
+    デコーダが同期できず、HTTP の取得には成功するのにエラーも出さず無音になる
+    （実際にこれで鳴らなかった）。
+
+    サンプルレートも発話と同じ 24kHz に揃える。VOICEVOX ENGINE の出力が 24kHz
+    なので再サンプリングも起きない。
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         out_path = os.path.join(tmpdir, "out.mp3")
@@ -58,7 +60,8 @@ async def _to_mp3(wav: bytes) -> bytes:
             "-f", "wav", "-i", "pipe:0",
             "-ar", str(SONG_SAMPLE_RATE), "-ac", "1",
             "-codec:a", "libmp3lame", "-b:a", SONG_BITRATE,
-            "-write_xing", "1",
+            # 先頭を MP3 フレームで始める（デバイスのデコーダが同期できるように）
+            "-write_id3v2", "0", "-id3v2_version", "0", "-write_xing", "0",
             out_path,
         ]
         try:

@@ -589,7 +589,7 @@ async def test_ensure_song_builds_then_reuses_cache(song_cache_dir):
 
 @pytest.mark.asyncio
 async def test_ensure_song_ffmpeg_arguments(song_cache_dir):
-    """発話と同じ 24kHz mono MP3 に変換し、Xing ヘッダも書かせている。"""
+    """発話と同じ 24kHz mono MP3 に変換し、ID3/Xing を付けない。"""
     from bridge.features.song import cache
 
     calls = []
@@ -606,8 +606,10 @@ async def test_ensure_song_ffmpeg_arguments(song_cache_dir):
     assert cmd[cmd.index("-ar") + 1] == "24000"
     assert cmd[cmd.index("-ac") + 1] == "1"
     assert "libmp3lame" in cmd
-    # Xing/Info ヘッダを書かせるため、出力はパイプではなくファイル
-    assert cmd[cmd.index("-write_xing") + 1] == "1"
+    # 先頭が MP3 フレームで始まるよう、ID3 タグも Xing フレームも付けない。
+    # 付けるとデバイスのデコーダが同期できず、取得には成功するのに無音になる。
+    assert cmd[cmd.index("-write_id3v2") + 1] == "0"
+    assert cmd[cmd.index("-write_xing") + 1] == "0"
     assert cmd[-1].endswith(".mp3") and "pipe:" not in cmd[-1]
 
 
