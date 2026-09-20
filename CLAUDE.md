@@ -28,6 +28,8 @@ pytest                              # 全テスト
 pytest test_main.py                 # API テスト
 pytest test_calendar_sync.py        # カレンダー同期テスト
 pytest test_song.py                 # 楽譜変換・gatekeeper・出発リミット
+pytest test_capture.py              # 写真の一時保存と記憶の区別・掃除
+pytest test_device_wakeword.py      # ウェイクワード操作（HTTP優先・MQTT退避）
 pytest -k "test_parse_expression"   # 単一テスト
 
 # 起動中サービスへの E2E インターフェーステスト
@@ -46,8 +48,9 @@ python calendar_sync.py --auth --key shiori
 - `calendar_sync.py` — Google Calendar / Tasks の同期ロジック（スレッドで実行）
 - `config/expression_map.yaml` — 感情ラベル → VOICEVOX 話者ID + Stack-chan 表情名のマッピング
 - `config/songs/*.yaml` — 歌の楽譜（歌詞・音名・拍数・BPM・移調）
-- `data/bridge.db` — SQLite DB（llm_sessions / items / notification_log / calendar_sources / gate_log / song_play_log / song_trigger_overrides）
+- `data/bridge.db` — SQLite DB（llm_sessions / items / notification_log / calendar_sources / gate_log / song_play_log / song_trigger_overrides / captures）
 - `data/songs/*.mp3` — 事前生成した歌（`/songs` で配信。キャッシュなので消してよい）
+- `data/captures/YYYY-MM/*.jpg` — Stack-chan が撮った写真（**記憶に昇格したものは消してはいけない**）
 - `secrets/` — Google OAuth トークンファイル（`token.json`, `token_{key}.json`）
 
 ### main.py の構造
@@ -79,6 +82,9 @@ paho-mqtt の永続接続クラス。`publish()` 呼び出し時に未接続な�
 - 発行トピック: `stackchan/{MQTT_DEVICE_ID}/speak`
 - 購読トピック: `stackchan/ack`（Stack-chan からの受信確認）
 
+**ウェイクワード**
+`device/state`（30秒間隔）には `wakeWord` / `wakeWordRegistered` / `wakeWordThreshold` / `wakeWordLastDistance` が載る。距離（DTW）は**小さいほど似ている**で、しきい値以下なら反応する。距離は話すたびに動くため 30 秒間隔では調整できず、`/ui/device` の距離メーターは `GET /api/device/live`（デバイス本体への直接 HTTP）を 1.5 秒ごとに読む。ブラウザから直接デバイスを叩くと UI が HTTPS のとき混在コンテンツで止まるので、必ず Bridge が代理で取りに行く。
+
 **MQTT ACK 待機**
 - `_pending_acks: dict[str, asyncio.Event]` で requestId ごとにイベントを管理
 - `on_message`（MQTT スレッド）→ `call_soon_threadsafe(event.set)`（asyncio スレッドへ通知）
@@ -91,6 +97,8 @@ paho-mqtt の永続接続クラス。`publish()` 呼び出し時に未接続な�
 - `GET /healthz` — ヘルスチェック
 - `GET /debug/connectivity` — MQTT/VOICEVOX への TCP 疎通確認
 - `POST /calendar-sources` など — カレンダーソース管理 CRUD
+- `GET /api/device/live` — デバイス本体の `GET /device` を Bridge 経由で読む（ウェイクワードの距離調整用の短間隔ポーリング。届かなくても 200 + `available:false`）
+- `POST /api/device/wakeword` — ウェイクワードの ON/OFF・登録・しきい値。**HTTP を先に試し、駄目なら MQTT の `device/set` に回る**
 - `GET /api/songs` — 曲一覧・キャッシュ状態・ENGINE 状態・設定
 - `POST /api/songs/{id}/play` — 試聴（gatekeeper を通さない）
 - `POST /api/songs/{id}/rebuild` / `POST /api/songs/prebuild` — 再生成
@@ -99,6 +107,11 @@ paho-mqtt の永続接続クラス。`publish()` 呼び出し時に未接続な�
 - `DELETE /api/songs/{id}` — つくった歌を消す（手書きは消せない）
 - `GET /api/songs/triggers` — 直近の予定と出発リミットの計算結果
 - `GET /songs/{file}.mp3` — 事前生成した歌の配信（StaticFiles）
+- `POST /ingest-photo` — Stack-chan が撮った写真を受信（`retention=temp|permanent`）
+- `GET /api/captures` — 写真の一覧と統計（`keep=temp|permanent` で絞り込み）
+- `GET /api/captures/{id}/file` — 写真の実体を配信
+- `POST /api/captures/{id}/keep` / `unkeep` — 記憶への昇格・一時保存への降格
+- `DELETE /api/captures/{id}` — 削除（実体を消し、行には消した時刻を残す）
 
 **Slack 統合**
 Socket Mode（WebSocket）で動作。`SLACK_BOT_TOKEN` と `SLACK_APP_TOKEN` の両方が必要。
@@ -122,6 +135,13 @@ Socket Mode（WebSocket）で動作。`SLACK_BOT_TOKEN` と `SLACK_APP_TOKEN` �
 - `triggers.py` — 出発リミット（予定の開始 − 移動時間 − 準備バッファ）の監視ループと、「ふと歌う」ループ（日中・在宅・前回から N 時間以上を満たした回ごとに確率で発火）
 
 ENGINE が起動していなければ歌だけが無効になる（他機能は無影響）。`SONG_PUBLIC_BASE_URL` 未設定だと audioUrl を組み立てられないため歌えない。
+
+**キャプチャ（`bridge/features/capture/`）**
+Stack-chan（M5Stack CoreS3）が撮った写真を受け取って保存する。**一時保存（既定 7 日で自動削除）と記憶（ずっと残す）を分ける**のが要点で、区別は `captures.keep_until` だけで表す（**NULL なら記憶**、日付が入っていれば一時保存）。
+- `store.py` — ファイル（`data/captures/YYYY-MM/{id}.jpg`）と DB 行の保存・昇格・削除。保持期限を決めるのは `retention_deadline()` の1か所だけ
+- `cleanup.py` — 期限切れを消すループ。**記憶には絶対に触らない**（`_fetch_expired_captures` が `keep_until IS NOT NULL` で絞る）
+- 受け取り口は `POST /ingest-photo`（multipart、`/ingest-audio` と同じ形）。ファーム未対応でも curl で試せる
+- **実体の配信は `/api/captures/{id}/file` だけ**。家族の顔が写るため、歌のような認証なしの StaticFiles には置かない
 
 **gatekeeper（`bridge/features/gatekeeper.py`）**
 発火の抑制を1か所にまとめた汎用モジュール。`allow(kind, key, ...)` → 実行 → `record(kind, key, busy_sec=...)` の順で使う。1回きり（once）・クールダウン・深夜抑制（設置場所のタイムゾーン基準）・再生中の重複防止。判定は**すべてルールベース**で LLM には問い合わせない。記録は `gate_log` テーブル。
@@ -168,3 +188,5 @@ Stack-chan からの ACK（`stackchan/ack`）:
 - `VOICEVOX_SING_URL` — 歌声合成用の VOICEVOX ENGINE（コンテナからホストは `http://10.0.2.2:50021`）
 - `SONG_PUBLIC_BASE_URL` — Stack-chan から見た Bridge の URL。歌の audioUrl 組み立てに必須
 - `SONG_TRIGGER_ENABLED` — 出発リミットで歌うトリガー（実運用の切り替えは `/ui/songs`）
+- `CAPTURE_TEMP_DAYS` — 写真の一時保存の日数（既定 7。記憶に昇格したものは対象外）
+- `DEVICE_HTTP_URL` — デバイス本体の HTTP アドレス。ウェイクワードの距離メーターに必要（UI の `device_http_url` が優先）

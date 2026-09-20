@@ -360,6 +360,29 @@ def _init_db() -> None:
             updated_at     TEXT NOT NULL
         )
     """)
+    # スタックちゃんが撮った写真・録った音。
+    # keep_until が NULL なら「記憶」としてずっと残す。日付が入っていれば一時保存で、
+    # 掃除ループがその日を過ぎたら実体ごと消す。
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS captures (
+            id          TEXT PRIMARY KEY,
+            kind        TEXT NOT NULL DEFAULT 'photo',
+            device_id   TEXT NOT NULL DEFAULT '',
+            path        TEXT NOT NULL,
+            content_type TEXT NOT NULL DEFAULT 'image/jpeg',
+            bytes       INTEGER NOT NULL DEFAULT 0,
+            captured_at TEXT NOT NULL,
+            source      TEXT NOT NULL DEFAULT '',
+            request_id  TEXT NOT NULL DEFAULT '',
+            trigger     TEXT NOT NULL DEFAULT '',
+            caption     TEXT NOT NULL DEFAULT '',
+            keep_until  TEXT,
+            memory_id   INTEGER,
+            deleted_at  TEXT
+        )
+    """)
+    _db_conn.execute("CREATE INDEX IF NOT EXISTS idx_captures_keep_until ON captures (keep_until)")
+    _db_conn.execute("CREATE INDEX IF NOT EXISTS idx_captures_captured_at ON captures (captured_at)")
     _now_iso = datetime.now(_JST).isoformat()
     for _seed in [
         ("リニア体験乗車",
@@ -975,3 +998,139 @@ def _fetch_trips(limit: int = 50) -> list[dict]:
         }
         for r in rows
     ]
+
+
+# ─── キャプチャ（写真・音声） ──────────────────────────────────────────────
+
+_CAPTURE_COLS = (
+    "id, kind, device_id, path, content_type, bytes, captured_at, source,"
+    " request_id, trigger, caption, keep_until, memory_id, deleted_at"
+)
+
+
+def _capture_row(r) -> dict:
+    return {
+        "id": r[0], "kind": r[1], "device_id": r[2], "path": r[3],
+        "content_type": r[4], "bytes": r[5], "captured_at": r[6], "source": r[7],
+        "request_id": r[8], "trigger": r[9], "caption": r[10],
+        "keep_until": r[11], "memory_id": r[12], "deleted_at": r[13],
+    }
+
+
+def _save_capture(
+    *,
+    capture_id: str,
+    kind: str,
+    path: str,
+    content_type: str,
+    size_bytes: int,
+    captured_at: str,
+    device_id: str = "",
+    source: str = "",
+    request_id: str = "",
+    trigger: str = "",
+    keep_until: str | None = None,
+) -> None:
+    """撮ったものを1件記録する。keep_until が None なら記憶（ずっと残す）。"""
+    with _db_lock:
+        _db_conn.execute(  # type: ignore[union-attr]
+            f"INSERT INTO captures ({_CAPTURE_COLS})"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (capture_id, kind, device_id, path, content_type, size_bytes, captured_at,
+             source, request_id, trigger, "", keep_until, None, None),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+
+
+def _fetch_captures(
+    *, limit: int = 60, kind: str = "", keep: str = "", include_deleted: bool = False,
+) -> list[dict]:
+    """新しい順に返す。keep は "permanent"（記憶）か "temp"（一時保存）で絞る。"""
+    sql = f"SELECT {_CAPTURE_COLS} FROM captures WHERE 1=1"
+    params: list = []
+    if not include_deleted:
+        sql += " AND deleted_at IS NULL"
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    if keep == "permanent":
+        sql += " AND keep_until IS NULL"
+    elif keep == "temp":
+        sql += " AND keep_until IS NOT NULL"
+    sql += " ORDER BY captured_at DESC LIMIT ?"
+    params.append(limit)
+    with _db_lock:
+        rows = _db_conn.execute(sql, params).fetchall()  # type: ignore[union-attr]
+    return [_capture_row(r) for r in rows]
+
+
+def _get_capture(capture_id: str) -> dict | None:
+    with _db_lock:
+        row = _db_conn.execute(  # type: ignore[union-attr]
+            f"SELECT {_CAPTURE_COLS} FROM captures WHERE id = ?", (capture_id,),
+        ).fetchone()
+    return _capture_row(row) if row else None
+
+
+def _set_capture_keep_until(capture_id: str, keep_until: str | None) -> bool:
+    """保持期限を変える。None を渡すと記憶（ずっと残す）になる。"""
+    with _db_lock:
+        cur = _db_conn.execute(  # type: ignore[union-attr]
+            "UPDATE captures SET keep_until = ? WHERE id = ? AND deleted_at IS NULL",
+            (keep_until, capture_id),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+    return cur.rowcount > 0
+
+
+def _set_capture_caption(capture_id: str, caption: str) -> None:
+    with _db_lock:
+        _db_conn.execute(  # type: ignore[union-attr]
+            "UPDATE captures SET caption = ? WHERE id = ?", (caption, capture_id),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+
+
+def _link_capture_memory(capture_id: str, memory_id: int) -> None:
+    with _db_lock:
+        _db_conn.execute(  # type: ignore[union-attr]
+            "UPDATE captures SET memory_id = ? WHERE id = ?", (memory_id, capture_id),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+
+
+def _mark_capture_deleted(capture_id: str) -> None:
+    """実体を消したあとに呼ぶ。行は残して「いつ消えたか」を辿れるようにする。"""
+    with _db_lock:
+        _db_conn.execute(  # type: ignore[union-attr]
+            "UPDATE captures SET deleted_at = ? WHERE id = ?",
+            (datetime.now(_JST).isoformat(), capture_id),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+
+
+def _fetch_expired_captures(now_iso: str) -> list[dict]:
+    """保持期限を過ぎた一時保存。記憶（keep_until IS NULL）は必ず除く。"""
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            f"SELECT {_CAPTURE_COLS} FROM captures"
+            " WHERE deleted_at IS NULL AND keep_until IS NOT NULL AND keep_until <= ?",
+            (now_iso,),
+        ).fetchall()
+    return [_capture_row(r) for r in rows]
+
+
+def _count_captures() -> dict:
+    with _db_lock:
+        row = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT"
+            " SUM(deleted_at IS NULL),"
+            " SUM(deleted_at IS NULL AND keep_until IS NULL),"
+            " SUM(deleted_at IS NULL AND keep_until IS NOT NULL),"
+            " SUM(CASE WHEN deleted_at IS NULL THEN bytes ELSE 0 END)"
+            " FROM captures"
+        ).fetchone()
+    return {
+        "total": row[0] or 0, "permanent": row[1] or 0,
+        "temp": row[2] or 0, "bytes": row[3] or 0,
+    }

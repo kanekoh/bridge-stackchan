@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}写真{% endblock %}
+{% block nav_captures %}font-semibold text-blue-600{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-2">
+  <h1 class="text-xl font-bold text-gray-800">写真</h1>
+  <div class="flex gap-2">
+    <button onclick="loadCaptures('')" id="tab-all" class="text-sm px-3 py-1 rounded-full bg-blue-500 text-white">すべて</button>
+    <button onclick="loadCaptures('temp')" id="tab-temp" class="text-sm px-3 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200">一時保存</button>
+    <button onclick="loadCaptures('permanent')" id="tab-permanent" class="text-sm px-3 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200">記憶</button>
+  </div>
+</div>
+<p id="stats" class="text-xs text-gray-500 mb-6"></p>
+
+<div id="captureList" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4"></div>
+<p id="emptyMsg" class="text-center text-gray-400 py-12 hidden">写真がありません</p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let currentKeep = '';
+
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return d.toLocaleDateString('ja-JP') + ' ' + d.toLocaleTimeString('ja-JP', {hour:'2-digit', minute:'2-digit'});
+  }
+
+  function fmtSize(bytes) {
+    if (!bytes) return '';
+    return bytes < 1024 * 1024 ? Math.round(bytes / 1024) + ' KB' : (bytes / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  function daysLeft(keepUntil) {
+    const ms = new Date(keepUntil) - new Date();
+    const days = Math.ceil(ms / 86400000);
+    return days <= 0 ? 'まもなく消えます' : `あと${days}日で消えます`;
+  }
+
+  async function loadCaptures(keep) {
+    currentKeep = keep;
+    [['', 'all'], ['temp', 'temp'], ['permanent', 'permanent']].forEach(([value, id]) => {
+      const btn = document.getElementById('tab-' + id);
+      btn.className = value === keep
+        ? 'text-sm px-3 py-1 rounded-full bg-blue-500 text-white'
+        : 'text-sm px-3 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200';
+    });
+
+    const data = await apiFetch('/api/captures?limit=120&keep=' + encodeURIComponent(keep));
+    const stats = data.stats;
+    document.getElementById('stats').textContent =
+      `記憶 ${stats.permanent} 枚 / 一時保存 ${stats.temp} 枚（${data.tempDays}日で自動削除）・合計 ${fmtSize(stats.bytes)}`;
+
+    const list = document.getElementById('captureList');
+    const empty = document.getElementById('emptyMsg');
+    if (!data.captures.length) { list.innerHTML = ''; empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+
+    list.innerHTML = data.captures.map(c => {
+      const badge = c.keep === 'permanent'
+        ? '<span class="bg-amber-50 text-amber-700 text-xs px-2 py-0.5 rounded-full">記憶</span>'
+        : `<span class="bg-gray-100 text-gray-600 text-xs px-2 py-0.5 rounded-full">${esc(daysLeft(c.keepUntil))}</span>`;
+      const keepBtn = c.keep === 'permanent'
+        ? `<button onclick="unkeep('${c.id}')" class="text-xs text-gray-500 hover:text-gray-800">一時保存に戻す</button>`
+        : `<button onclick="keep('${c.id}')" class="text-xs text-amber-600 hover:text-amber-800">ずっと残す</button>`;
+      return `
+        <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+          <a href="${c.url}" target="_blank">
+            <img src="${c.url}" alt="" loading="lazy" class="w-full h-40 object-cover bg-gray-100">
+          </a>
+          <div class="p-3 space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs text-gray-500">${esc(fmtDate(c.capturedAt))}</span>
+              ${badge}
+            </div>
+            ${c.caption ? `<p class="text-xs text-gray-700">${esc(c.caption)}</p>` : ''}
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs text-gray-400">${esc(c.source || '-')} ・ ${fmtSize(c.bytes)}</span>
+              <div class="flex gap-3">
+                ${keepBtn}
+                <button onclick="del('${c.id}')" class="text-xs text-red-500 hover:text-red-700">削除</button>
+              </div>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  async function keep(id) {
+    await apiFetch('/api/captures/' + id + '/keep', { method: 'POST' });
+    loadCaptures(currentKeep);
+  }
+
+  async function unkeep(id) {
+    if (!confirm('一時保存に戻すと、期限が来たら自動で消えます。よろしいですか？')) return;
+    await apiFetch('/api/captures/' + id + '/unkeep', { method: 'POST' });
+    loadCaptures(currentKeep);
+  }
+
+  async function del(id) {
+    if (!confirm('この写真を消します。元には戻せません。')) return;
+    await apiFetch('/api/captures/' + id, { method: 'DELETE' });
+    loadCaptures(currentKeep);
+  }
+
+  loadCaptures('');
+</script>
+{% endblock %}

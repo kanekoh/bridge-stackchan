@@ -93,6 +93,7 @@ from bridge.features.song import compose as song_compose
 from bridge.features.song.triggers import (
     song_trigger_loop, check_departure_songs, song_idle_loop, check_idle_song,
 )
+from bridge.features.capture.cleanup import capture_cleanup_loop
 
 # Slack アプリ参照（_setup_slack で設定、タイマー発火時の通知に使用）
 _slack_app = None  # type: ignore
@@ -156,6 +157,10 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(song_idle_loop())     # 同上（用事がなくてもたまに歌う）
     logger.info("Song idle loop started")
 
+    # 写真の一時保存を期限で消す。記憶（keep_until が NULL）は対象外。
+    asyncio.create_task(capture_cleanup_loop())
+    logger.info("Capture cleanup loop started")
+
     _mqtt_conn.start()
     logger.info("MQTT eager connect started")
 
@@ -187,6 +192,9 @@ app.include_router(_speak_router)
 
 from bridge.api.songs import router as _songs_router
 app.include_router(_songs_router)
+
+from bridge.api.captures import router as _captures_router
+app.include_router(_captures_router)
 
 from bridge.api.devices import router as _devices_router
 app.include_router(_devices_router)

@@ -156,6 +156,23 @@ SONG_BITRATE          = os.getenv("SONG_BITRATE", "64k")
 SONG_PREBUILD_ON_START = os.getenv("SONG_PREBUILD_ON_START", "true").lower() == "true"
 FFMPEG_BIN            = os.getenv("FFMPEG_BIN", "ffmpeg")
 
+# ─── デバイスへの直接 HTTP ────────────────────────────────────────────────
+# device/state の publish は30秒間隔のため、ウェイクワードのしきい値調整のように
+# 「話すたびに変わる値」を見るには遅すぎる。そういう値だけ、デバイス本体の
+# HTTP（GET /device）を Bridge 経由で直接読む。UI から変えられるよう
+# app_settings の device_http_url が優先される。
+DEVICE_HTTP_URL     = os.getenv("DEVICE_HTTP_URL", "")          # 例: http://192.168.10.30
+DEVICE_HTTP_TIMEOUT = float(os.getenv("DEVICE_HTTP_TIMEOUT", "3"))
+
+# ─── キャプチャ（写真・音声） ──────────────────────────────────────────────
+# 一時保存（既定7日で自動削除）と記憶（keep_until が NULL＝ずっと残す）を分ける。
+# 家族の顔が写るため、配信は Access で保護されたホスト名側のエンドポイントだけにし、
+# 歌のような認証なしの静的配信には絶対に置かない。
+CAPTURE_DIR          = os.getenv("CAPTURE_DIR", "data/captures")
+CAPTURE_TEMP_DAYS    = int(os.getenv("CAPTURE_TEMP_DAYS", "7"))       # 一時保存の既定日数
+CAPTURE_MAX_BYTES    = int(os.getenv("CAPTURE_MAX_BYTES", str(8 * 1024 * 1024)))
+CAPTURE_CLEANUP_INTERVAL = int(os.getenv("CAPTURE_CLEANUP_INTERVAL", "3600"))
+
 # 歌のトリガー（既定値。実運用の切り替えは UI（app_settings）で行う）
 SONG_TRIGGER_ENABLED         = os.getenv("SONG_TRIGGER_ENABLED", "false").lower() == "true"
 SONG_TRIGGER_CHECK_INTERVAL  = int(os.getenv("SONG_TRIGGER_CHECK_INTERVAL", "60"))
@@ -226,5 +243,7 @@ __all__ = [
     "SONG_QUIET_START", "SONG_QUIET_END", "SONG_COOLDOWN_MINUTES",
     "SONG_IDLE_ENABLED", "SONG_IDLE_CHECK_INTERVAL", "SONG_IDLE_MIN_HOURS",
     "SONG_IDLE_CHANCE", "SONG_IDLE_START", "SONG_IDLE_END",
+    "CAPTURE_DIR", "CAPTURE_TEMP_DAYS", "CAPTURE_MAX_BYTES", "CAPTURE_CLEANUP_INTERVAL",
+    "DEVICE_HTTP_URL", "DEVICE_HTTP_TIMEOUT",
     "_JST", "_KNOWN_EXPRESSIONS",
 ]

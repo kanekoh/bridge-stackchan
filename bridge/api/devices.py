@@ -1,16 +1,20 @@
 """Device log, metrics, family members, and slack-seen-users endpoints."""
+import logging
 import re
 import sqlite3
 from datetime import datetime
 from typing import Literal
 
+import httpx
 from fastapi import APIRouter, Form, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from bridge.config import MQTT_DEVICE_ID, _JST
+from bridge.config import DEVICE_HTTP_TIMEOUT, DEVICE_HTTP_URL, MQTT_DEVICE_ID, _JST
 import bridge.core.db as _db_mod
 from bridge.core.db import _db_lock, _get_setting, _get_display_tz, _get_all_family_members
 from bridge.devices.mqtt import get_device_state, publish_device_set
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -27,6 +31,9 @@ class DeviceSettingsUpdate(BaseModel):
     restart: bool | None = None
     servoTest: Literal["x", "y", False] | None = None
     logLevel: Literal["error", "warn", "info", "debug", "trace"] | None = None
+    wakeWord: bool | None = None
+    wakeWordRegister: bool | None = None
+    wakeWordThreshold: int | None = Field(default=None, ge=10, le=2000)
 
 
 @router.get("/api/device/log")
@@ -77,6 +84,9 @@ def api_device_settings(req: DeviceSettingsUpdate):
     restart = True if req.restart else None  # False/未指定は送らない
 
     sent = {
+        "wakeWord": req.wakeWord,
+        "wakeWordRegister": True if req.wakeWordRegister else None,  # False は送らない
+        "wakeWordThreshold": req.wakeWordThreshold,
         "brightness": req.brightness,
         "volume": req.volume,
         "speakerId": req.speakerId,
@@ -93,6 +103,70 @@ def api_device_settings(req: DeviceSettingsUpdate):
 
     publish_device_set(MQTT_DEVICE_ID, **sent)
     return {"ok": True, "sent": sent}
+
+
+# ── デバイス本体への直接 HTTP ────────────────────────────────────────────────
+# MQTT の device/state は30秒間隔なので、ウェイクワードのしきい値調整のように
+# 「話すたびに動く値」を見るには遅すぎる。調整中だけデバイスの HTTP を直接読む。
+# ブラウザから直に叩くと、UI が HTTPS のときに混在コンテンツで止められるため、
+# Bridge が代わりに取りに行く。
+
+def _device_http_base() -> str:
+    """デバイスの HTTP アドレス。UI（app_settings）が環境変数より優先。"""
+    base = (_get_setting("device_http_url", "") or DEVICE_HTTP_URL).strip().rstrip("/")
+    if base and not base.startswith("http"):
+        base = "http://" + base
+    return base
+
+
+@router.get("/api/device/live")
+async def api_device_live():
+    """デバイスの GET /device をそのまま返す（しきい値調整用の短間隔ポーリング）。
+
+    アドレス未設定や届かないときも 200 で available=false を返す。
+    ポーリングのたびにエラーダイアログが出ると調整の邪魔になるため。
+    """
+    base = _device_http_base()
+    if not base:
+        return {"available": False, "reason": "デバイスの HTTP アドレスが未設定です"}
+    try:
+        async with httpx.AsyncClient(timeout=DEVICE_HTTP_TIMEOUT) as client:
+            res = await client.get(f"{base}/device")
+            res.raise_for_status()
+            return {"available": True, "url": base, "state": res.json()}
+    except Exception as e:
+        logger.debug("device live fetch failed: %s", e)
+        return {"available": False, "url": base, "reason": f"{type(e).__name__}: {e}"}
+
+
+@router.post("/api/device/wakeword")
+async def api_device_wakeword(req: DeviceSettingsUpdate):
+    """ウェイクワードの設定を送る。デバイスの HTTP を優先し、駄目なら MQTT に回す。
+
+    登録ボタンやしきい値は、押してすぐ結果を見たい操作なので、
+    30秒間隔の device/set より速い HTTP を先に試す。
+    """
+    sent = {
+        "wakeWord": req.wakeWord,
+        "wakeWordRegister": True if req.wakeWordRegister else None,
+        "wakeWordThreshold": req.wakeWordThreshold,
+    }
+    sent = {k: v for k, v in sent.items() if v is not None}
+    if not sent:
+        raise HTTPException(status_code=422, detail="送信する設定がありません")
+
+    base = _device_http_base()
+    if base:
+        try:
+            async with httpx.AsyncClient(timeout=DEVICE_HTTP_TIMEOUT) as client:
+                res = await client.post(f"{base}/device", json=sent)
+                res.raise_for_status()
+            return {"ok": True, "sent": sent, "transport": "http"}
+        except Exception as e:
+            logger.info("device HTTP 経由に失敗、MQTT に切り替えます: %s", e)
+
+    publish_device_set(MQTT_DEVICE_ID, **sent)
+    return {"ok": True, "sent": sent, "transport": "mqtt"}
 
 
 @router.get("/api/device/metrics")

@@ -72,6 +72,74 @@
   <p id="settingsMsg" class="text-sm"></p>
 </div>
 
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">ウェイクワード</h2>
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6 space-y-5">
+  <p class="text-xs text-gray-400">
+    名前を呼ぶだけで聞き取りを始める待受です。登録した声と聞こえた声の近さ（DTW 距離）が
+    しきい値より小さいと反応します。<span class="text-gray-500">距離は小さいほど似ています。</span>
+  </p>
+
+  <div class="flex items-center justify-between gap-4">
+    <div>
+      <div class="text-sm font-medium text-gray-800">待受</div>
+      <div id="wwStateLabel" class="text-xs text-gray-400">読み込み中...</div>
+    </div>
+    <button id="wwToggle" onclick="toggleWakeWord()"
+      class="text-sm px-4 py-2 rounded bg-gray-200 text-gray-600 hover:bg-gray-300">—</button>
+  </div>
+
+  <div class="flex items-center justify-between gap-4 border-t border-gray-100 pt-4">
+    <div>
+      <div class="text-sm font-medium text-gray-800">呼び名の登録</div>
+      <div id="wwRegisterLabel" class="text-xs text-gray-400">—</div>
+    </div>
+    <button onclick="registerWakeWord()"
+      class="text-sm px-4 py-2 rounded bg-blue-500 hover:bg-blue-600 text-white">登録する</button>
+  </div>
+
+  <div class="border-t border-gray-100 pt-4">
+    <div class="flex items-center justify-between mb-1">
+      <label class="text-sm font-medium text-gray-800">しきい値</label>
+      <span id="wwThresholdValue" class="text-sm text-gray-600 tabular-nums">—</span>
+    </div>
+    <input id="wwThreshold" type="range" min="50" max="400" step="5" value="150"
+      oninput="document.getElementById('wwThresholdValue').textContent = this.value"
+      onchange="sendThreshold(this.value)" class="w-full">
+    <p class="text-xs text-gray-400 mt-1">
+      大きくすると反応しやすく、誤反応も増えます。下のメーターで、呼んだときと雑談のときの距離を見比べて決めます。
+    </p>
+  </div>
+
+  <div class="border-t border-gray-100 pt-4">
+    <div class="flex items-center justify-between mb-2">
+      <div class="text-sm font-medium text-gray-800">距離メーター</div>
+      <label class="text-xs text-gray-500 flex items-center gap-1">
+        <input id="wwPolling" type="checkbox" onchange="togglePolling()"> 調整中（1.5秒ごとに見る）
+      </label>
+    </div>
+    <div class="flex items-end gap-1 h-28 bg-gray-50 rounded px-2 pt-2 relative" id="wwChart">
+      <p class="text-xs text-gray-400 absolute inset-0 flex items-center justify-center" id="wwChartEmpty">
+        「調整中」を入れて名前を呼ぶと、ここに距離が並びます
+      </p>
+    </div>
+    <p id="wwMeterMsg" class="text-xs text-gray-400 mt-2">—</p>
+  </div>
+
+  <div class="border-t border-gray-100 pt-4">
+    <label class="block text-xs text-gray-500 mb-1">スタックちゃんの HTTP アドレス</label>
+    <div class="flex gap-2">
+      <input id="wwDeviceUrl" type="text" placeholder="http://192.168.10.30"
+        class="flex-1 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
+      <button onclick="saveDeviceUrl()" class="bg-gray-600 hover:bg-gray-700 text-white text-sm px-4 py-2 rounded">保存</button>
+    </div>
+    <p class="text-xs text-gray-400 mt-1">
+      未設定でも操作は MQTT で届きますが、反映は最大30秒あとになり、距離メーターは動きません。
+    </p>
+  </div>
+
+  <p id="wwMsg" class="text-sm"></p>
+</div>
+
 <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">サーボテスト</h2>
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
   <p class="text-xs text-gray-400 mb-3">首振りサーボの動作確認モード。X軸・Y軸どちらかを開始するとデバイス側でテスト動作を続け、停止するまで解除されません。</p>
@@ -127,6 +195,14 @@ async function loadState() {
       ['起床時の挨拶', d.greeting || '—'],
       ['スリープ時間帯', (d.sleepStart || '—') + ' 〜 ' + (d.sleepEnd || '—')],
     ];
+    if (d.wakeWord != null) {
+      rows.push(['ウェイクワード待受', d.wakeWord ? 'ON' : 'OFF']);
+      rows.push(['呼び名の登録', d.wakeWordRegistered ? '登録済み' : '未登録']);
+      rows.push(['しきい値 / 直近の距離',
+        `${d.wakeWordThreshold ?? '—'} / ${d.wakeWordLastDistance ?? '—'}`]);
+      renderWakeWord(d);          // HTTP が未設定でも、ここまでは MQTT で分かる
+      pushDistance(d.wakeWordLastDistance);
+    }
     el.innerHTML = `
       <div class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
         ${rows.map(([label, value]) => `
@@ -215,6 +291,161 @@ async function restartDevice() {
     msg.className = 'text-sm text-red-500';
   }
 }
+
+
+// ── ウェイクワード ──────────────────────────────────────────────────────────
+// device/state（30秒間隔）では、話すたびに動く距離の追従に間に合わない。
+// 「調整中」の間だけ、デバイス本体の HTTP を Bridge 経由で短い間隔で読む。
+let wwPollTimer = null;
+let wwDistances = [];   // 直近の距離（最大10件）
+let wwThresholdNow = null;
+
+function wwSetMsg(text, ok = true) {
+  const msg = document.getElementById('wwMsg');
+  msg.textContent = text;
+  msg.className = 'text-sm ' + (ok ? 'text-green-600' : 'text-red-500');
+}
+
+function renderWakeWord(state) {
+  if (!state) return;
+  const on = state.wakeWord === true;
+  const btn = document.getElementById('wwToggle');
+  btn.textContent = on ? '待受を止める' : '待受を始める';
+  btn.className = 'text-sm px-4 py-2 rounded ' + (on
+    ? 'bg-blue-500 hover:bg-blue-600 text-white'
+    : 'bg-gray-200 hover:bg-gray-300 text-gray-700');
+  document.getElementById('wwStateLabel').textContent = on ? '待受中' : '停止中';
+
+  const reg = document.getElementById('wwRegisterLabel');
+  reg.textContent = state.wakeWordRegistered ? '登録済み' : '未登録（登録してから使います）';
+  reg.className = 'text-xs ' + (state.wakeWordRegistered ? 'text-green-600' : 'text-orange-500');
+
+  if (state.wakeWordThreshold != null) {
+    wwThresholdNow = Number(state.wakeWordThreshold);
+    document.getElementById('wwThreshold').value = wwThresholdNow;
+    document.getElementById('wwThresholdValue').textContent = wwThresholdNow;
+  }
+}
+
+function pushDistance(distance) {
+  if (distance == null) return;
+  const value = Number(distance);
+  if (!isFinite(value)) return;
+  if (wwDistances.length && wwDistances[wwDistances.length - 1] === value) return;  // 同じ値は数えない
+  wwDistances.push(value);
+  if (wwDistances.length > 10) wwDistances.shift();
+  renderChart();
+}
+
+function renderChart() {
+  const chart = document.getElementById('wwChart');
+  const empty = document.getElementById('wwChartEmpty');
+  if (!wwDistances.length) { empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+
+  const threshold = wwThresholdNow ?? 150;
+  const max = Math.max(threshold * 1.5, ...wwDistances);
+  const bars = wwDistances.map(d => {
+    const height = Math.max(4, Math.round((d / max) * 100));
+    const hit = d <= threshold;  // しきい値以下＝反応する
+    const color = hit ? 'bg-blue-500' : 'bg-gray-300';
+    return `<div class="flex-1 flex flex-col justify-end items-center gap-1" title="${d}">
+        <span class="text-[10px] ${hit ? 'text-blue-600' : 'text-gray-400'} tabular-nums">${Math.round(d)}</span>
+        <div class="${color} w-full rounded-t" style="height:${height}%"></div>
+      </div>`;
+  }).join('');
+  // しきい値の線。これより下（低い棒）が反応する側。
+  const linePos = Math.round((threshold / max) * 100);
+  chart.innerHTML = bars +
+    `<div class="absolute left-0 right-0 border-t-2 border-dashed border-red-400" style="bottom:${linePos}%">
+       <span class="absolute right-1 -top-4 text-[10px] text-red-500">しきい値 ${threshold}</span>
+     </div>`;
+
+  const last = wwDistances[wwDistances.length - 1];
+  const hits = wwDistances.filter(d => d <= threshold).length;
+  document.getElementById('wwMeterMsg').textContent =
+    `直近 ${last}（${last <= threshold ? '反応する' : '反応しない'}）・直近${wwDistances.length}件のうち ${hits} 件が反応する側`;
+}
+
+async function pollDevice() {
+  try {
+    const d = await apiFetch('/api/device/live');
+    if (!d.available) {
+      document.getElementById('wwMeterMsg').textContent = 'デバイスに届きません: ' + (d.reason || '');
+      return;
+    }
+    renderWakeWord(d.state);
+    pushDistance(d.state.wakeWordLastDistance);
+  } catch (e) {
+    document.getElementById('wwMeterMsg').textContent = '取得に失敗: ' + e.message;
+  }
+}
+
+function togglePolling() {
+  const on = document.getElementById('wwPolling').checked;
+  if (wwPollTimer) { clearInterval(wwPollTimer); wwPollTimer = null; }
+  if (on) { pollDevice(); wwPollTimer = setInterval(pollDevice, 1500); }
+}
+
+async function sendWakeWord(payload) {
+  try {
+    const res = await apiFetch('/api/device/wakeword', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    wwSetMsg(res.transport === 'http'
+      ? '✅ 送信しました'
+      : '✅ 送信しました（MQTT 経由なので反映まで最大30秒）');
+    return res;
+  } catch (e) {
+    wwSetMsg('❌ ' + e.message, false);
+    return null;
+  }
+}
+
+async function toggleWakeWord() {
+  const on = document.getElementById('wwToggle').textContent === '待受を止める';
+  if (await sendWakeWord({ wakeWord: !on })) setTimeout(pollDevice, 500);
+}
+
+async function registerWakeWord() {
+  if (await sendWakeWord({ wakeWordRegister: true })) {
+    const reg = document.getElementById('wwRegisterLabel');
+    reg.textContent = '話してください（次に聞こえた声を覚えます）';
+    reg.className = 'text-xs text-blue-600';
+    setTimeout(pollDevice, 1000);
+  }
+}
+
+async function sendThreshold(value) {
+  wwThresholdNow = Number(value);
+  renderChart();
+  await sendWakeWord({ wakeWordThreshold: Number(value) });
+}
+
+async function saveDeviceUrl() {
+  const url = document.getElementById('wwDeviceUrl').value.trim();
+  const body = new FormData();
+  body.append('value', url);
+  try {
+    await apiFetch('/api/settings/device_http_url', { method: 'PUT', body });
+    wwSetMsg('✅ アドレスを保存しました');
+    pollDevice();
+  } catch (e) {
+    wwSetMsg('❌ ' + e.message, false);
+  }
+}
+
+async function loadDeviceUrl() {
+  try {
+    const d = await apiFetch('/api/device/live');
+    if (d.url) document.getElementById('wwDeviceUrl').value = d.url;
+    if (d.available) renderWakeWord(d.state);
+  } catch (e) { /* アドレス未設定のときは何も出さない */ }
+}
+
+loadDeviceUrl();
 
 loadState();
 setInterval(loadState, 30000);
