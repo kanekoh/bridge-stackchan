@@ -11,6 +11,7 @@ from bridge.config import (
     WEATHER_NOTIFY_RAIN, ISS_NOTIFY_ENABLED,
     GOOGLE_GEOLOCATION_API_KEY,
     OPENAI_RESPONSES_MODEL, STT_MODEL, OPENAI_RESPONSES_REASONING_EFFORT,
+    DEVICE_HTTP_URL,
 )
 import bridge.core.db as _db_mod
 from bridge.core.db import (
@@ -75,6 +76,16 @@ _STT_MODEL_OPTIONS = [
 ]
 
 _EDITABLE_SETTINGS = {
+    "device_http_url": {
+        "label": "スタックちゃんの HTTP アドレス",
+        "description": (
+            "デバイス本体に直接つなぐときの宛先（例: http://192.168.10.30）。"
+            "device/state は30秒間隔のため、ウェイクワードのしきい値調整のように"
+            "話すたびに動く値はここを直接読みます。未設定でも操作は MQTT で届きますが、"
+            "反映は最大30秒あとになり、距離メーターは動きません。"
+        ),
+        "env_fallback": lambda: DEVICE_HTTP_URL,
+    },
     "openai_responses_model": {
         "label": "会話モデル（LLM）",
         "description": (

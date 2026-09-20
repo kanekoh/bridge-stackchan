@@ -177,6 +177,19 @@ def test_threshold_out_of_range_is_rejected(client, monkeypatch):
     assert client.post("/api/device/wakeword", json={"wakeWordThreshold": 5}).status_code == 422
 
 
+# ── 設定キーの登録 ───────────────────────────────────────────────────────────
+
+def test_device_http_url_is_an_editable_setting():
+    """UI のアドレス入力は /api/settings に保存する。
+
+    _EDITABLE_SETTINGS に無いキーは 404 で弾かれるため、登録を忘れると
+    「設定キー 'device_http_url' は存在しません」で保存できなくなる。
+    """
+    from bridge.api.settings import _EDITABLE_SETTINGS
+
+    assert "device_http_url" in _EDITABLE_SETTINGS
+
+
 # ── 既存の設定エンドポイント経由でも送れる ──────────────────────────────────
 
 def test_settings_endpoint_also_carries_wakeword(client, monkeypatch):
