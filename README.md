@@ -160,7 +160,7 @@ cp .env.example .env
 | `OPENCLAW_GATEWAY_TOKEN` | *(空)* | Bearer トークン |
 | `OPENCLAW_MAX_OUTPUT_TOKENS` | *(制限なし)* | 最大出力トークン数 |
 | `OPENAI_API_KEY` | *(空)* | OpenAI API キー |
-| `OPENAI_RESPONSES_MODEL` | `gpt-4o-mini` | モデル名 |
+| `OPENAI_RESPONSES_MODEL` | `gpt-6-luna` | モデル名 |
 | `OPENAI_RESPONSES_WEB_SEARCH` | `false` | Web 検索ツールを有効にする |
 | `OPENAI_RESPONSES_WEB_SEARCH_ON_DEMAND` | `false` | LLM が必要と判断したときだけ検索 |
 

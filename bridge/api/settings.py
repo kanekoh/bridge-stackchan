@@ -27,32 +27,24 @@ router = APIRouter()
 
 
 # 会話生成に使うモデル。低価格帯のみを選択肢にする。
-# latency_ms / tool_ms は実測値（Responses API・ツール定義込み・gpt-5 系は effort=none）。
-# 価格は 1M トークンあたりの USD。数値は目安で、OpenAI 側の改定で変わりうる。
+# latency_ms / tool_ms は実測値（Responses API・ツール定義込み・推論モデルは effort=none）。
+# 未計測なら None。価格は 1M トークンあたりの USD で、OpenAI 側の改定で変わりうる。
+#
+# 2026-10 の整理: gpt-4.1-nano（10/23 停止）・gpt-4o-mini・gpt-4.1-mini（ともに 2027-01-14 停止）
+# を落とし、廃止予定がなく最安の gpt-6-luna に寄せた。上位の gpt-6-sol（$2/$10）は
+# この用途には過剰なため載せない。
 _LLM_MODEL_OPTIONS = [
     {
-        "value": "gpt-4.1-nano", "label": "gpt-4.1-nano",
-        "price_in": 0.10, "price_out": 0.40,
-        "latency_ms": 1279, "tool_ms": 4307,
-        "note": "最安。ただし Web 検索に非対応。通知用に向く",
-    },
-    {
-        "value": "gpt-4o-mini", "label": "gpt-4o-mini",
-        "price_in": 0.15, "price_out": 0.60,
-        "latency_ms": 1955, "tool_ms": 2110,
-        "note": "安価で安定。ツール往復が速い",
+        "value": "gpt-6-luna", "label": "gpt-6-luna",
+        "price_in": 0.10, "price_out": 0.50,
+        "latency_ms": None, "tool_ms": None,
+        "note": "最安で最新世代。Web 検索も使える。基本はこれ",
     },
     {
         "value": "gpt-5.6-luna", "label": "gpt-5.6-luna",
         "price_in": 0.20, "price_out": 1.20,
         "latency_ms": 951, "tool_ms": 2544,
-        "note": "新しい世代。応答が速い。推論の深さは下の設定で調整",
-    },
-    {
-        "value": "gpt-4.1-mini", "label": "gpt-4.1-mini",
-        "price_in": 0.40, "price_out": 1.60,
-        "latency_ms": 1202, "tool_ms": 2812,
-        "note": "この中では高め。バランス型",
+        "note": "一つ前の世代。gpt-6-luna で不調なときの退避先",
     },
 ]
 
@@ -61,7 +53,7 @@ _STT_MODEL_OPTIONS = [
     {
         "value": "gpt-4o-mini-transcribe", "label": "gpt-4o-mini-transcribe",
         "price_min": 0.003, "latency_ms": 828,
-        "note": "最安。ただし実測のばらつきが大きい",
+        "note": "最安。ただし実測のばらつきが大きく、2027-02-26 に停止",
     },
     {
         "value": "gpt-transcribe", "label": "gpt-transcribe",
@@ -71,7 +63,7 @@ _STT_MODEL_OPTIONS = [
     {
         "value": "gpt-4o-transcribe", "label": "gpt-4o-transcribe",
         "price_min": 0.006, "latency_ms": 748,
-        "note": "従来の上位モデル",
+        "note": "従来の上位モデル。2027-02-26 に停止",
     },
 ]
 
@@ -91,8 +83,7 @@ _EDITABLE_SETTINGS = {
         "description": (
             "スタックちゃんの返答を生成するモデル。低価格帯のみを選択肢にしています。"
             "レイテンシは同一条件での実測値で、通信状況により上下します。"
-            "gpt-4.1-nano は Web 検索に対応していないため、会話モデルに選ぶと"
-            "Web 検索を有効にしていても使われません（通知モデルには問題ありません）。"
+            "どちらも Web 検索に対応しています。"
         ),
         "env_fallback": lambda: OPENAI_RESPONSES_MODEL,
         "type": "model_select",
@@ -118,7 +109,6 @@ _EDITABLE_SETTINGS = {
             "他より高いものを選んでも費用はほとんど変わりません（年間で数十円程度の差）。"
             "「誰に内緒か」の判断を誤るとサプライズが本人に漏れるので、"
             "ここは安さより確実さを優先してください。"
-            "gpt-4.1-nano は長い会話で JSON を組み立てきれず抽出に失敗するため非推奨です。"
             "未設定なら会話モデルと同じものを使います。"
         ),
         "env_fallback": lambda: OPENAI_RESPONSES_MODEL,
@@ -140,11 +130,11 @@ _EDITABLE_SETTINGS = {
         "price_unit": "1Mトークン",
     },
     "openai_responses_reasoning_effort": {
-        "label": "推論の深さ（gpt-5 系のみ）",
+        "label": "推論の深さ（gpt-5 / gpt-6 系のみ）",
         "description": (
-            "gpt-5 系モデルが返答前にどれだけ考えるか。深くするほど遅く、"
+            "gpt-5 / gpt-6 系モデルが返答前にどれだけ考えるか。深くするほど遅く、"
             "隠れた推論トークンのぶん課金も増えます。会話用途では none で十分です。"
-            "gpt-4 系を選んでいる場合この設定は送信されません。"
+            "対応していないモデルを選んでいる場合、この設定は送信されません。"
         ),
         "env_fallback": lambda: OPENAI_RESPONSES_REASONING_EFFORT,
         "type": "select",

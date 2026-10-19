@@ -32,7 +32,10 @@ def _cfg_val(name: str):
     return getattr(_cfg, name)
 
 
-_REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+# reasoning.effort を受け付けるモデルの接頭辞。
+# ここに載っていないと effort を送らず API 側の既定（medium）で動くため、
+# 新しい世代を足したときは必ず追加する（遅くなり、隠れ推論トークンの分だけ高くなる）。
+_REASONING_MODEL_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
 
 
 def _supports_reasoning_effort(model: str) -> bool:
@@ -42,7 +45,9 @@ def _supports_reasoning_effort(model: str) -> bool:
 
 # ホスト型ツール web_search_preview に対応しないモデル。
 # 付けたまま送ると 400 になるため、送信前に落とす。
-_NO_WEB_SEARCH_MODELS = ("gpt-4.1-nano",)
+# 2026-10 現在、選択肢に残したモデル（gpt-6-luna / gpt-5.6-luna）はどちらも対応するため空。
+# 非対応モデルを選べるようにするときはここに足す。
+_NO_WEB_SEARCH_MODELS: tuple[str, ...] = ()
 
 
 def _supports_web_search(model: str) -> bool:

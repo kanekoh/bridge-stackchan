@@ -74,7 +74,12 @@
     // 一番安いもの・一番速いものにしるしを付ける
     const cheapest = s.options.reduce((a, b) =>
       (isStt ? a.price_min <= b.price_min : a.price_in <= b.price_in) ? a : b);
-    const fastest = s.options.reduce((a, b) => a.latency_ms <= b.latency_ms ? a : b);
+    // 未計測（latency_ms が null）のものは「最速」の判定から外す。
+    // null は数値比較で 0 とみなされ、計測前のモデルが最速になってしまう。
+    const measured = s.options.filter(o => o.latency_ms != null);
+    const fastest = measured.length
+      ? measured.reduce((a, b) => a.latency_ms <= b.latency_ms ? a : b)
+      : null;
     const badge = o => [
       o === cheapest ? '<span class="ml-1 px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700">最安</span>' : '',
       o === fastest  ? '<span class="ml-1 px-1.5 py-0.5 rounded text-xs bg-blue-50 text-blue-700">最速</span>' : '',
@@ -92,7 +97,7 @@
           <div class="text-xs text-gray-400 mt-0.5">${esc(o.note || '')}</div>
         </td>
         ${priceCell(o)}
-        <td class="py-2 pr-3 text-right whitespace-nowrap text-gray-600">${o.latency_ms}ms</td>
+        <td class="py-2 pr-3 text-right whitespace-nowrap text-gray-600">${o.latency_ms != null ? o.latency_ms + 'ms' : '—'}</td>
         <td class="py-2 text-right whitespace-nowrap text-gray-500">${o.tool_ms ? o.tool_ms + 'ms' : '—'}</td>
       </tr>`).join('');
 
