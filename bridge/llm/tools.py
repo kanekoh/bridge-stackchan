@@ -513,6 +513,8 @@ async def _tool_recall(args: dict, notify_context: dict) -> dict:
 async def _tool_play_song(args: dict) -> dict:
     """歌を鳴らす。本人が頼んだ／焦っている場面なので、深夜帯でも応じる。
 
+    クールダウン（既定30分）も見ない。あれは勝手に歌い出す側がうるさく
+    ならないための仕組みで、「歌って」と頼まれた2回目を断る理由にはならない。
     再生中の重複だけは gatekeeper が止める（同じ曲が二重に鳴らないように）。
     """
     from bridge.features.song import library, play as _play
@@ -537,7 +539,8 @@ async def _tool_play_song(args: dict) -> dict:
 
     try:
         result = await _play.play_song(
-            score, source="llm", respect_quiet=False, expression="happy",
+            score, source="llm", respect_quiet=False, respect_cooldown=False,
+            expression="happy",
         )
     except _play.SongNotAllowed as e:
         logger.info("Function call play_song: 見送り reason=%s", e)

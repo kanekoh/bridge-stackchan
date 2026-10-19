@@ -459,6 +459,59 @@ def test_due_departures_respects_disabled_override(song_db):
     assert due_departures(now) == []
 
 
+def test_cooldown_blocks_automatic_songs(song_db):
+    """自動で歌う側はクールダウンに従う（続けて鳴るとうるさい）。"""
+    from bridge.core.db import _set_setting
+    from bridge.features import gatekeeper
+    from bridge.features.song import play
+
+    _set_setting("song_quiet_start", "")
+    _set_setting("song_quiet_end", "")
+    _set_setting("song_cooldown_minutes", "30")
+    gatekeeper.record(play.GATE_KIND, "")
+
+    ok, reason = play.check_allowed()
+    assert ok is False
+    assert "クールダウン" in reason
+
+
+def test_requested_song_ignores_cooldown(song_db):
+    """頼まれた歌はクールダウンで断らない。
+
+    「きらきら星歌って」を続けて頼むと「まだクールダウン中だよ」と返される
+    実機の不具合（2026-09-20）に対する回帰テスト。
+    """
+    from bridge.core.db import _set_setting
+    from bridge.features import gatekeeper
+    from bridge.features.song import play
+
+    _set_setting("song_quiet_start", "")
+    _set_setting("song_quiet_end", "")
+    _set_setting("song_cooldown_minutes", "30")
+    gatekeeper.record(play.GATE_KIND, "")
+
+    ok, reason = play.check_allowed(respect_cooldown=False)
+    assert ok is True, reason
+
+
+def test_requested_song_still_waits_for_the_current_one(song_db):
+    """頼まれても、鳴っている最中には重ねない（二重再生の防止だけは残す）。"""
+    from bridge.core.db import _set_setting
+    from bridge.features import gatekeeper
+    from bridge.features.song import play
+
+    _set_setting("song_quiet_start", "")
+    _set_setting("song_quiet_end", "")
+    _set_setting("song_cooldown_minutes", "0")
+    gatekeeper.record(play.GATE_KIND, "", busy_sec=30)
+    try:
+        ok, reason = play.check_allowed(respect_cooldown=False, respect_quiet=False)
+        assert ok is False
+        assert "再生中" in reason
+    finally:
+        gatekeeper._busy_until.clear()
+
+
 @pytest.mark.asyncio
 async def test_check_departure_songs_fires_once_per_event(song_db):
     """同じ予定では2回鳴らさない（gatekeeper の once）。

@@ -42,12 +42,18 @@ def song_url(filename: str) -> str:
     return f"{_public_base_url()}/songs/{filename}"
 
 
-def check_allowed(*, trigger_key: str = "", once: bool = False, respect_quiet: bool = True) -> tuple[bool, str]:
-    """今この瞬間に歌ってよいかを返す。再生はしない（UI の状態表示にも使う）。"""
+def check_allowed(*, trigger_key: str = "", once: bool = False, respect_quiet: bool = True,
+                  respect_cooldown: bool = True) -> tuple[bool, str]:
+    """今この瞬間に歌ってよいかを返す。再生はしない（UI の状態表示にも使う）。
+
+    respect_cooldown=False は「本人がいま頼んだ」とき用。間隔を空ける仕組みは
+    勝手に歌い出す側（出発リミット・ふと歌う）がうるさくならないためのもので、
+    頼まれた歌まで断る理由にはならない。重複再生の防止だけは効いたままにする。
+    """
     return gatekeeper.allow(
         GATE_KIND,
         trigger_key,
-        cooldown_sec=settings.get_int("song_cooldown_minutes") * 60,
+        cooldown_sec=settings.get_int("song_cooldown_minutes") * 60 if respect_cooldown else 0,
         once=once,
         quiet_start=settings.get_str("song_quiet_start"),
         quiet_end=settings.get_str("song_quiet_end"),
@@ -62,6 +68,7 @@ async def play_song(
     trigger_key: str = "",
     once: bool = False,
     respect_quiet: bool = True,
+    respect_cooldown: bool = True,
     bypass_gate: bool = False,
     expression: str = "happy",
     priority: str = "normal",
@@ -70,9 +77,12 @@ async def play_song(
 
     - bypass_gate: UI の試聴など、人が今まさに押した操作のときだけ True
     - respect_quiet: 本人が声で頼んだ場合は深夜でも応じる（False）
+    - respect_cooldown: 同上。頼まれた歌は「さっき歌ったから」で断らない（False）
     """
     if not bypass_gate:
-        ok, reason = check_allowed(trigger_key=trigger_key, once=once, respect_quiet=respect_quiet)
+        ok, reason = check_allowed(trigger_key=trigger_key, once=once,
+                                   respect_quiet=respect_quiet,
+                                   respect_cooldown=respect_cooldown)
         if not ok:
             logger.info("歌を見送りました: song=%s source=%s reason=%s", score.id, source, reason)
             raise SongNotAllowed(reason)
