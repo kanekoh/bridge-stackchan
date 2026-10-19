@@ -31,6 +31,7 @@ pytest test_song.py                 # 楽譜変換・gatekeeper・出発リミ�
 pytest test_capture.py              # 写真の一時保存と記憶の区別・掃除
 pytest test_device_wakeword.py      # ウェイクワード操作（HTTP優先・MQTT退避）
 pytest test_iss.py                  # ISS の軌道暦の解析・座標変換・通過探索
+pytest test_ui_maps.py              # 地図タイルが鍵なしで使える配信元か
 pytest -k "test_parse_expression"   # 単一テスト
 
 # 起動中サービスへの E2E インターフェーステスト

@@ -201,8 +201,10 @@
 
     if (!_rainMap) {
       _rainMap = L.map('rainMap').setView([tLat, tLon], 8);
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/">CARTO</a>',
+      // 地理院タイル（淡色）。鍵が要らず、出典表示だけでよい。
+      // CARTO は 2026-10 から鍵が必要になり、地図が「API KEY REQUIRED」に差し替わった。
+      L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
+        attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル</a>',
         maxZoom: 13,
       }).addTo(_rainMap);
     }
