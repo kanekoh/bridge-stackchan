@@ -14,7 +14,7 @@ from bridge.config import (
     OPENCLAW_BASE_URL, OPENCLAW_MODEL, SPEAKER_ID_URL,
     MQTT_BROKER, MQTT_PORT, VOICEVOX_URL,
     P2PQUAKE_ENABLED, P2PQUAKE_MIN_SCALE, P2PQUAKE_TSUNAMI_TARGET_AREAS,
-    ISS_MIN_ELEVATION, SESSION_SUMMARY_THRESHOLD, LLM_BACKEND, MQTT_DEVICE_ID,
+    ISS_MIN_ELEVATION, ISS_NOTIFY_ENABLED, SESSION_SUMMARY_THRESHOLD, LLM_BACKEND, MQTT_DEVICE_ID,
 )
 import bridge.core.db as _db_mod
 from bridge.core.db import (
@@ -574,19 +574,22 @@ async def api_debug_iss():
     """現在位置をもとに ISS の次の通過情報と日没時刻を返す（テスト用）。"""
     lat = _get_setting("location_lat", "")
     lon = _get_setting("location_lon", "")
+    enabled = _get_setting("iss_notify_enabled", str(ISS_NOTIFY_ENABLED)).lower() == "true"
     if not lat or not lon:
-        return {"ok": False, "detail": "位置情報未設定"}
+        return {"ok": False, "enabled": enabled, "detail": "位置情報未設定"}
     from bridge.features.iss import fetch as _iss_fetch
 
     eph = await _fetch_iss_ephemeris()
     if eph is None:
-        return {"ok": False, "detail": "軌道暦を取得できず、保存もありません",
+        return {"ok": False, "enabled": enabled,
+                "detail": "軌道暦を取得できず、保存もありません",
                 "ephemeris": _iss_fetch.status()}
     passes = _calc_iss_passes(float(lat), float(lon), eph, hours=24, min_el=10.0)
     sunset_utc = _get_sunset_utc(float(lat), float(lon))
     sunset_jst = sunset_utc.astimezone(_JST).strftime("%H:%M") if sunset_utc else None
     return {
         "ok": True,
+        "enabled": enabled,
         "sunset_jst": sunset_jst,
         # 取得先が落ちている間も、どのくらい古い暦で計算しているかが分かるようにする
         "ephemeris": _iss_fetch.status(),

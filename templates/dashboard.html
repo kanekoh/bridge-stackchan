@@ -178,7 +178,48 @@ async function loadDisaster() {
     cards.push(tile('津波警報', badge('good', '発令なし'), coverage.tsunami.areas.length ? `監視対象: ${coverage.tsunami.areas.join('、')}` : '監視エリア未設定'));
   }
 
+  cards.push(await issCard());
+
   el.innerHTML = cards.join('');
+}
+
+// ISS は軌道暦（15日分）を取り置きして計算する。取得先が落ちていても通知は続くが、
+// 気づかないまま古い暦を使い続けるのは避けたいので、鮮度をここに出す。
+async function issCard() {
+  let d;
+  try {
+    d = await apiFetch('/api/debug/iss');
+  } catch (e) {
+    return tile('ISS 通過通知', badge('critical', '取得失敗'), esc(e.message));
+  }
+  if (d.enabled === false) {
+    return tile('ISS 通過通知', badge('neutral', 'OFF'),
+      `<a href="/ui/settings" class="text-blue-500 hover:underline">設定画面で有効にできます</a>`);
+  }
+  if (!d.ok) {
+    const err = d.ephemeris && d.ephemeris.lastError;
+    return tile('ISS 通過通知', badge('critical', esc(d.detail || '計算できません')),
+      err ? `最後のエラー: ${esc(err)}` : '');
+  }
+
+  const eph = d.ephemeris || {};
+  const info = eph.ephemeris || {};
+  const next = (d.passes || []).find(p => p.visible) || (d.passes || [])[0];
+  const value = next
+    ? `${esc(next.rise_jst.slice(5).replace('-', '/'))} ${esc(next.direction)}の空`
+    : badge('neutral', '24時間以内になし');
+
+  // 暦の残りが1日を切る／取得に失敗している間は、見て分かるようにする
+  const remaining = Math.round((info.remainingDays ?? 0) * 10) / 10;
+  let state = badge('good', `暦 残り${remaining}日`);
+  if (eph.lastError) state = badge('warning', `取得失敗・保存分で継続（残り${remaining}日）`);
+  else if (info.stale) state = badge('warning', `暦が残りわずか（${remaining}日）`);
+
+  const detail = next
+    ? `最大仰角 ${next.max_el_deg}°（${next.max_jst}ごろ）・${next.visible ? `通知対象（${d.min_elevation}°以上）` : '通知対象外'}`
+    : `通知は最大仰角 ${d.min_elevation}° 以上のときだけ`;
+  const age = info.ageDays != null ? `・暦は${Math.round(info.ageDays * 10) / 10}日前に作られたもの` : '';
+  return tile('ISS 次の通過', value, `${state}<br>${detail}${age}`);
 }
 
 // ── 家族・生活 ────────────────────────────────────────

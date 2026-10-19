@@ -226,3 +226,30 @@ def test_stale_flag_follows_remaining_time():
     )
     assert oem.describe(full, start)["stale"] is False
     assert oem.describe(full, end - timedelta(hours=23))["stale"] is True
+
+
+# ── 取得の状態表示 ───────────────────────────────────────────────────────────
+
+def test_status_reports_absence_without_crashing():
+    """暦を1度も取れていなくても、ダッシュボードが読める形を返すこと。"""
+    from bridge.features.iss import fetch
+
+    fetch.reset_for_test()
+    st = fetch.status()
+    assert st["available"] is False
+    assert st["lastError"] == ""
+    assert st["lastAttempt"] is None
+    assert "ephemeris" not in st        # 無いものを空で見せない
+
+
+def test_status_includes_freshness_when_loaded(eph, monkeypatch):
+    """暦があるときは鮮度（作成日時・残り日数）を返すこと。"""
+    from bridge.features.iss import fetch
+
+    fetch.reset_for_test()
+    monkeypatch.setattr(fetch, "_cache", eph)
+    st = fetch.status()
+    assert st["available"] is True
+    assert st["ephemeris"]["points"] == 167
+    assert "createdAt" in st["ephemeris"]
+    fetch.reset_for_test()
