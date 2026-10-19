@@ -127,7 +127,16 @@ EARTHQUAKE_LOG_MAX_ROWS = int(os.getenv("EARTHQUAKE_LOG_MAX_ROWS", "1000"))
 ISS_NOTIFY_ENABLED  = os.getenv("ISS_NOTIFY_ENABLED", "false").lower() == "true"
 ISS_MIN_ELEVATION   = float(os.getenv("ISS_MIN_ELEVATION", "30"))   # 最大仰角が何度以上のパスを通知するか
 ISS_NOTIFY_AHEAD    = int(os.getenv("ISS_NOTIFY_AHEAD", "5"))       # 何分前に通知するか
-ISS_TLE_URL         = "https://celestrak.org/NORAD/elements/gp.php?NAME=ISS%20(ZARYA)&FORMAT=TLE"
+# ISS の軌道データ。NASA/JSC の TOPO が出す OEM（軌道暦）を使う。
+# 1ファイルに15日分が入っているので、取得先が数日落ちても通知は続く。
+# 以前は CelesTrak の TLE（1日分）だけに頼っていて、2026-10-17 からの障害で
+# 通知が完全に止まった。
+ISS_OEM_URL   = os.getenv(
+    "ISS_OEM_URL",
+    "https://nasa-public-data.s3.amazonaws.com/iss-coords/current/ISS_OEM/ISS.OEM_J2K_EPH.txt",
+)
+ISS_OEM_CACHE_FILE    = os.getenv("ISS_OEM_CACHE_FILE", "data/iss/ISS_OEM.txt")
+ISS_OEM_REFRESH_HOURS = float(os.getenv("ISS_OEM_REFRESH_HOURS", "6"))  # 失敗後に再挑戦するまでの間隔
 
 GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "secrets/credentials.json")
 GOOGLE_TOKEN_DIR = os.getenv("GOOGLE_TOKEN_DIR", "secrets")
@@ -229,7 +238,8 @@ __all__ = [
     "_NOWCAST_ZOOM", "_NOWCAST_COLOR_MAP",
     "P2PQUAKE_ENABLED", "P2PQUAKE_WS_URL", "P2PQUAKE_MIN_SCALE",
     "P2PQUAKE_TSUNAMI_TARGET_AREAS", "EARTHQUAKE_LOG_MAX_ROWS",
-    "ISS_NOTIFY_ENABLED", "ISS_MIN_ELEVATION", "ISS_NOTIFY_AHEAD", "ISS_TLE_URL",
+    "ISS_NOTIFY_ENABLED", "ISS_MIN_ELEVATION", "ISS_NOTIFY_AHEAD",
+    "ISS_OEM_URL", "ISS_OEM_CACHE_FILE", "ISS_OEM_REFRESH_HOURS",
     "GOOGLE_CREDENTIALS_FILE", "GOOGLE_TOKEN_DIR",
     "CALENDAR_SYNC_INTERVAL_MINUTES", "CALENDAR_DEFAULT_NOTIFY_MINUTES",
     "CALENDAR_SYNC_DAYS_AHEAD", "CALENDAR_NOTIFY_CHECK_INTERVAL",

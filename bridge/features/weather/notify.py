@@ -13,6 +13,8 @@ from datetime import datetime, timezone, timedelta
 from html.parser import HTMLParser
 
 import ephem
+
+from bridge.features.iss import fetch as _iss_fetch, passes as _iss_passes
 from PIL import Image
 
 from bridge.config import (
@@ -20,14 +22,13 @@ from bridge.config import (
     WEATHER_CHECK_INTERVAL, WEATHER_NOTIFY_RAIN,
     WEATHER_RAIN_THRESHOLD, WEATHER_RAIN_SUDDEN_MUL,
     _NOWCAST_ZOOM, _NOWCAST_COLOR_MAP,
-    ISS_NOTIFY_ENABLED, ISS_MIN_ELEVATION, ISS_NOTIFY_AHEAD, ISS_TLE_URL,
+    ISS_NOTIFY_ENABLED, ISS_MIN_ELEVATION, ISS_NOTIFY_AHEAD,
     MQTT_DEVICE_ID,
 )
 
 logger = logging.getLogger(__name__)
 
 # ISS state (mutable module-level cache)
-_iss_tle_cache: dict = {}
 _iss_notified_passes: set = set()
 
 
@@ -641,23 +642,12 @@ async def _fetch_sky_condition(lat: float, lon: float, at_utc: datetime | None =
             "summary": summary, "is_visible": is_visible}
 
 
-async def _fetch_iss_tle() -> tuple[str, str] | None:
-    """CelesTrak から ISS TLE を取得。当日キャッシュあれば再利用。"""
-    today = datetime.now(_JST).strftime("%Y-%m-%d")
-    if _iss_tle_cache.get("date") == today:
-        return _iss_tle_cache["line1"], _iss_tle_cache["line2"]
-    try:
-        resp = await sys.modules["main"]._http_client.get(ISS_TLE_URL, timeout=10)
-        resp.raise_for_status()
-        lines = [l.strip() for l in resp.text.strip().splitlines() if l.strip()]
-        if len(lines) < 3:
-            raise ValueError("TLE に3行以上必要")
-        _iss_tle_cache.update({"date": today, "line1": lines[1], "line2": lines[2]})
-        logger.info("ISS TLE 更新: %s", lines[0])
-        return lines[1], lines[2]
-    except Exception:
-        logger.exception("ISS TLE 取得失敗")
-        return None
+async def _fetch_iss_ephemeris():
+    """ISS の軌道暦を返す。取りに行けなければ、保存してある古いものを返す。
+
+    中身の管理（取得・保存・鮮度）は bridge/features/iss/fetch.py が持つ。
+    """
+    return await _iss_fetch.get_ephemeris()
 
 
 def _az_to_direction(az_rad: float) -> str:
@@ -684,42 +674,28 @@ def _get_sunset_utc(lat: float, lon: float) -> datetime | None:
         return None
 
 
-def _calc_iss_passes(lat: float, lon: float, tle1: str, tle2: str,
+def _calc_iss_passes(lat: float, lon: float, eph,
                      hours: int = 18, min_el: float = 10.0) -> list[dict]:
-    """指定時間内の ISS 通過リストを返す。min_el 以上の最大仰角のパスのみ含む。"""
-    obs = ephem.Observer()
-    obs.lat       = str(lat)
-    obs.lon       = str(lon)
-    obs.elevation = 10
-    obs.horizon   = "10"
-    obs.pressure  = 0
-    iss = ephem.readtle("ISS", tle1, tle2)
+    """指定時間内の ISS 通過リストを返す。min_el 以上の最大仰角のパスのみ含む。
 
-    now_utc  = datetime.now(timezone.utc)
-    end_ephem = ephem.Date(ephem.now() + hours / 24.0)
-    obs.date  = ephem.Date(now_utc.replace(tzinfo=None))
-
-    passes = []
-    while True:
-        try:
-            rise_t, rise_az, max_t, max_el, set_t, _ = obs.next_pass(iss)
-        except Exception:
-            break
-        if rise_t > end_ephem:
-            break
-        max_el_deg = math.degrees(max_el)
-        if max_el_deg >= min_el:
-            rise_utc = ephem.Date(rise_t).datetime().replace(tzinfo=timezone.utc)
-            max_utc  = ephem.Date(max_t).datetime().replace(tzinfo=timezone.utc)
-            passes.append({
-                "rise_jst":    rise_utc.astimezone(_JST),
-                "max_jst":     max_utc.astimezone(_JST),
-                "max_el_deg":  max_el_deg,
-                "direction":   _az_to_direction(float(rise_az)),
-                "pass_key":    rise_utc.astimezone(_JST).strftime("%Y%m%d%H%M"),
-            })
-        obs.date = ephem.Date(set_t) + ephem.minute
-    return passes
+    以前は TLE を ephem(SGP4) に渡していた。いまは NASA の軌道暦を補間して
+    自前で方位・仰角を出す（bridge/features/iss/passes.py）。返す形は同じ。
+    """
+    if eph is None:
+        return []
+    found = _iss_passes.find_passes(
+        eph, lat, lon, hours=hours, min_elevation=min_el,
+    )
+    return [
+        {
+            "rise_jst":   p["rise_utc"].astimezone(_JST),
+            "max_jst":    p["max_utc"].astimezone(_JST),
+            "max_el_deg": p["max_el_deg"],
+            "direction":  _az_to_direction(math.radians(p["rise_az_deg"])),
+            "pass_key":   p["rise_utc"].astimezone(_JST).strftime("%Y%m%d%H%M"),
+        }
+        for p in found
+    ]
 
 
 async def _iss_speak(prompt: str, source: str) -> None:
@@ -754,10 +730,9 @@ async def _iss_notify_loop() -> None:
             if not lat or not lon:
                 continue
 
-            tle = await _fetch_iss_tle()
-            if not tle:
+            eph = await _fetch_iss_ephemeris()
+            if eph is None:
                 continue
-            tle1, tle2 = tle
 
             now_jst  = datetime.now(_JST)
             today_str = now_jst.strftime("%Y-%m-%d")
@@ -768,7 +743,7 @@ async def _iss_notify_loop() -> None:
                     # 日没時刻を取得して日没後のパスに絞る
                     sunset_utc = _get_sunset_utc(float(lat), float(lon))
                     all_passes = _calc_iss_passes(
-                        float(lat), float(lon), tle1, tle2,
+                        float(lat), float(lon), eph,
                         hours=20, min_el=ISS_MIN_ELEVATION
                     )
                     if sunset_utc:
@@ -822,7 +797,7 @@ async def _iss_notify_loop() -> None:
 
             # ── ② 直前通知（ISS_NOTIFY_AHEAD 分以内に通過開始） ─────────
             passes = _calc_iss_passes(
-                float(lat), float(lon), tle1, tle2,
+                float(lat), float(lon), eph,
                 hours=1, min_el=ISS_MIN_ELEVATION
             )
             notify_window = ISS_NOTIFY_AHEAD * 60

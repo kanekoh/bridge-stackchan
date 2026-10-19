@@ -30,6 +30,7 @@ pytest test_calendar_sync.py        # カレンダー同期テスト
 pytest test_song.py                 # 楽譜変換・gatekeeper・出発リミット
 pytest test_capture.py              # 写真の一時保存と記憶の区別・掃除
 pytest test_device_wakeword.py      # ウェイクワード操作（HTTP優先・MQTT退避）
+pytest test_iss.py                  # ISS の軌道暦の解析・座標変換・通過探索
 pytest -k "test_parse_expression"   # 単一テスト
 
 # 起動中サービスへの E2E インターフェーステスト
@@ -51,6 +52,8 @@ python calendar_sync.py --auth --key shiori
 - `data/bridge.db` — SQLite DB（llm_sessions / items / notification_log / calendar_sources / gate_log / song_play_log / song_trigger_overrides / captures）
 - `data/songs/*.mp3` — 事前生成した歌（`/songs` で配信。キャッシュなので消してよい）
 - `data/captures/YYYY-MM/*.jpg` — Stack-chan が撮った写真（**記憶に昇格したものは消してはいけない**）
+- `data/iss/ISS_OEM.txt` — NASA の ISS 軌道暦（15日分）。取得先が落ちている間はこれで通知を続ける
+- `testdata/iss_oem_sample.txt` — 上記の抜粋（11時間分）。`test_iss.py` が使う
 - `secrets/` — Google OAuth トークンファイル（`token.json`, `token_{key}.json`）
 
 ### main.py の構造
@@ -142,6 +145,14 @@ Stack-chan（M5Stack CoreS3）が撮った写真を受け取って保存する�
 - `cleanup.py` — 期限切れを消すループ。**記憶には絶対に触らない**（`_fetch_expired_captures` が `keep_until IS NOT NULL` で絞る）
 - 受け取り口は `POST /ingest-photo`（multipart、`/ingest-audio` と同じ形）。ファーム未対応でも curl で試せる
 - **実体の配信は `/api/captures/{id}/file` だけ**。家族の顔が写るため、歌のような認証なしの StaticFiles には置かない
+
+**ISS 通過通知（`bridge/features/iss/`）**
+軌道データは **NASA/JSC の OEM（軌道暦）**を使う。1ファイルに15日分の位置・速度が4分間隔で入っているため、取得先が数日落ちても通知は続く（以前は CelesTrak の TLE を1日分メモリに持つだけで、2026-10-17 からの障害で通知が完全に止まった）。
+- `oem.py` — OEM の解析と**エルミート補間**（速度を使うので4分間隔でも軌道の曲がりを再現できる）。純関数のみ
+- `passes.py` — EME2000 → 歳差 → GMST で地球固定 → ENU → 方位・仰角。通過は30秒刻みで探し、地平線の交差と最大仰角を二分法・黄金分割で詰める。**歳差を省くと地上で約40kmずれる**ので入れてある（章動と極運動は省略、仰角への影響は0.01度未満）
+- `fetch.py` — 取得・ファイル保存（`data/iss/ISS_OEM.txt`）・鮮度の管理。**取りに行けなければ保存してある暦を使い続ける**。失敗後は `ISS_OEM_REFRESH_HOURS` 空けて再挑戦する
+- 精度は ephem(SGP4)+最新 TLE との比較で、出現時刻の差 3〜8秒・最大仰角の差 2度以内（2026-10-19 実測）
+- `GET /api/debug/iss` に暦の鮮度（作成日時・残り日数・最後の取得エラー）が出る
 
 **gatekeeper（`bridge/features/gatekeeper.py`）**
 発火の抑制を1か所にまとめた汎用モジュール。`allow(kind, key, ...)` → 実行 → `record(kind, key, busy_sec=...)` の順で使う。1回きり（once）・クールダウン・深夜抑制（設置場所のタイムゾーン基準）・再生中の重複防止。判定は**すべてルールベース**で LLM には問い合わせない。記録は `gate_log` テーブル。

@@ -33,7 +33,7 @@ from bridge.features.quake import (
 from bridge.features.weather.notify import (
     _fetch_openmeteo_rain_data, _fetch_nowcast_rain_data, _fetch_amedas_openmeteo_rain_data,
     _check_rain_notification,
-    _fetch_iss_tle, _get_sunset_utc, _calc_iss_passes, _iss_speak,
+    _fetch_iss_ephemeris, _get_sunset_utc, _calc_iss_passes, _iss_speak,
 )
 from bridge.llm.backends import chat_with_llm, build_instruction_parts, _resolve_model
 import bridge.core.http as _http_mod
@@ -576,16 +576,20 @@ async def api_debug_iss():
     lon = _get_setting("location_lon", "")
     if not lat or not lon:
         return {"ok": False, "detail": "位置情報未設定"}
-    tle = await _fetch_iss_tle()
-    if not tle:
-        return {"ok": False, "detail": "TLE 取得失敗"}
-    tle1, tle2 = tle
-    passes = _calc_iss_passes(float(lat), float(lon), tle1, tle2, hours=24, min_el=10.0)
+    from bridge.features.iss import fetch as _iss_fetch
+
+    eph = await _fetch_iss_ephemeris()
+    if eph is None:
+        return {"ok": False, "detail": "軌道暦を取得できず、保存もありません",
+                "ephemeris": _iss_fetch.status()}
+    passes = _calc_iss_passes(float(lat), float(lon), eph, hours=24, min_el=10.0)
     sunset_utc = _get_sunset_utc(float(lat), float(lon))
     sunset_jst = sunset_utc.astimezone(_JST).strftime("%H:%M") if sunset_utc else None
     return {
         "ok": True,
         "sunset_jst": sunset_jst,
+        # 取得先が落ちている間も、どのくらい古い暦で計算しているかが分かるようにする
+        "ephemeris": _iss_fetch.status(),
         "min_elevation": ISS_MIN_ELEVATION,
         "passes": [
             {
@@ -607,12 +611,11 @@ async def api_debug_iss_morning_preview():
     lon = _get_setting("location_lon", "")
     if not lat or not lon:
         raise HTTPException(400, "位置情報未設定")
-    tle = await _fetch_iss_tle()
-    if not tle:
-        raise HTTPException(503, "TLE 取得失敗")
-    tle1, tle2 = tle
+    eph = await _fetch_iss_ephemeris()
+    if eph is None:
+        raise HTTPException(503, "軌道暦を取得できず、保存もありません")
     sunset_utc = _get_sunset_utc(float(lat), float(lon))
-    all_passes = _calc_iss_passes(float(lat), float(lon), tle1, tle2,
+    all_passes = _calc_iss_passes(float(lat), float(lon), eph,
                                    hours=24, min_el=ISS_MIN_ELEVATION)
     if sunset_utc:
         sunset_jst = sunset_utc.astimezone(_JST)
@@ -652,11 +655,10 @@ async def api_debug_iss_immediate():
     lon = _get_setting("location_lon", "")
     if not lat or not lon:
         raise HTTPException(400, "位置情報未設定")
-    tle = await _fetch_iss_tle()
-    if not tle:
-        raise HTTPException(503, "TLE 取得失敗")
-    tle1, tle2 = tle
-    passes = _calc_iss_passes(float(lat), float(lon), tle1, tle2,
+    eph = await _fetch_iss_ephemeris()
+    if eph is None:
+        raise HTTPException(503, "軌道暦を取得できず、保存もありません")
+    passes = _calc_iss_passes(float(lat), float(lon), eph,
                                hours=24, min_el=ISS_MIN_ELEVATION)
     if not passes:
         return {"ok": False, "detail": "24時間以内に見えるパスがありません"}

@@ -62,9 +62,9 @@ from bridge.features.weather.notify import (
     _load_amedas_station_table, _fetch_amedas_snapshots, _estimate_rain_movement,
     _fetch_amedas_openmeteo_rain_data, _check_rain_notification, _rain_llm_comment,
     _fetch_sky_condition, _weather_notify_loop,
-    _fetch_iss_tle, _az_to_direction, _get_sunset_utc, _calc_iss_passes,
+    _fetch_iss_ephemeris, _az_to_direction, _get_sunset_utc, _calc_iss_passes,
     _iss_speak, _iss_notify_loop,
-    _iss_tle_cache, _iss_notified_passes,
+    _iss_notified_passes,
     _HtmlTextExtractor, _expand_url_template, _run_web_check, _web_check_notify_loop,
 )
 
