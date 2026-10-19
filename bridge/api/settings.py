@@ -31,8 +31,10 @@ router = APIRouter()
 # 未計測なら None。価格は 1M トークンあたりの USD で、OpenAI 側の改定で変わりうる。
 #
 # 2026-10 の整理: gpt-4.1-nano（10/23 停止）・gpt-4o-mini・gpt-4.1-mini（ともに 2027-01-14 停止）
-# を落とし、廃止予定がなく最安の gpt-6-luna に寄せた。上位の gpt-6-sol（$2/$10）は
-# この用途には過剰なため載せない。
+# を落とし、廃止予定がなく最安の gpt-6-luna に寄せた。
+# gpt-6-sol は benchmark_compose.py で gpt-6-luna と比べたところ、形式（2/2 一発）も
+# 旋律の一致（歓喜の歌 match=1.00）も差が出なかったため既定にはしない。
+# ただし用途ごとに選べる価値はあるので選択肢には残す（1曲あたり 0.09円 対 1.6円）。
 _LLM_MODEL_OPTIONS = [
     {
         "value": "gpt-6-luna", "label": "gpt-6-luna",
@@ -45,6 +47,12 @@ _LLM_MODEL_OPTIONS = [
         "price_in": 0.20, "price_out": 1.20,
         "latency_ms": 951, "tool_ms": 2544,
         "note": "一つ前の世代。gpt-6-luna で不調なときの退避先",
+    },
+    {
+        "value": "gpt-6-sol", "label": "gpt-6-sol",
+        "price_in": 2.00, "price_out": 10.00,
+        "latency_ms": None, "tool_ms": None,
+        "note": "上位。gpt-6-luna の約18倍。作曲や記憶の抽出で質が要るときだけ",
     },
 ]
 

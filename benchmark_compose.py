@@ -55,17 +55,17 @@ OUT_DIR = os.getenv("BENCH_OUT_DIR", "data/benchmark_songs")
 
 # 1Mトークンあたりの USD（bridge/api/settings.py の _LLM_MODEL_OPTIONS と同じ値）
 PRICES = {
-    "gpt-4.1-nano": (0.10, 0.40),
-    "gpt-4o-mini":  (0.15, 0.60),
+    "gpt-6-luna":   (0.10, 0.50),
     "gpt-5.6-luna": (0.20, 1.20),
-    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-6-sol":    (2.00, 10.00),
 }
 
 DEFAULT_MODELS = list(PRICES)
 
-# gpt-5 系だけ reasoning effort を受け付ける。作曲は「フレーズを組み立てる」仕事なので
+# gpt-5 / gpt-6 系が reasoning effort を受け付ける。作曲は「フレーズを組み立てる」仕事なので
 # 効き目があるはず、という仮説を確かめるために効果の違いも測る。
-EFFORT_VARIANTS = {"gpt-5.6-luna": ["none", "low", "medium"]}
+# 既定は本番と同じ none（空文字はモデル既定に委ねる意味なので使わない）。
+EFFORT_VARIANTS = {"gpt-6-luna": ["none"], "gpt-5.6-luna": ["none"], "gpt-6-sol": ["none"]}
 
 
 @dataclass
