@@ -31,22 +31,24 @@ router = APIRouter()
 # 未計測なら None。価格は 1M トークンあたりの USD で、OpenAI 側の改定で変わりうる。
 #
 # 2026-10 の整理: gpt-4.1-nano（10/23 停止）・gpt-4o-mini・gpt-4.1-mini（ともに 2027-01-14 停止）
-# を落とし、廃止予定がなく最安の gpt-6-luna に寄せた。
+# を落とした。gpt-6-luna は最安だが、同条件（effort=none・出力17トークン）で5回ずつ
+# 交互に測ると中央値 3006ms 対 1469ms で gpt-5.6-luna の2倍遅い（2026-10-20 実測）。
+# 会話は速さが効くので gpt-5.6-luna、待たされても困らない用途は gpt-6-luna を既定にする。
 # gpt-6-sol は benchmark_compose.py で gpt-6-luna と比べたところ、形式（2/2 一発）も
 # 旋律の一致（歓喜の歌 match=1.00）も差が出なかったため既定にはしない。
 # ただし用途ごとに選べる価値はあるので選択肢には残す（1曲あたり 0.09円 対 1.6円）。
 _LLM_MODEL_OPTIONS = [
     {
-        "value": "gpt-6-luna", "label": "gpt-6-luna",
-        "price_in": 0.10, "price_out": 0.50,
-        "latency_ms": None, "tool_ms": None,
-        "note": "最安で最新世代。Web 検索も使える。基本はこれ",
-    },
-    {
         "value": "gpt-5.6-luna", "label": "gpt-5.6-luna",
         "price_in": 0.20, "price_out": 1.20,
-        "latency_ms": 951, "tool_ms": 2544,
-        "note": "一つ前の世代。gpt-6-luna で不調なときの退避先",
+        "latency_ms": 1469, "tool_ms": 2544,
+        "note": "いちばん速い。会話はこれ（gpt-6-luna の半分の時間で返る）",
+    },
+    {
+        "value": "gpt-6-luna", "label": "gpt-6-luna",
+        "price_in": 0.10, "price_out": 0.50,
+        "latency_ms": 3006, "tool_ms": None,
+        "note": "最安だが gpt-5.6-luna の2倍遅い。通知・記憶・作曲など待たない用途に",
     },
     {
         "value": "gpt-6-sol", "label": "gpt-6-sol",
@@ -91,7 +93,8 @@ _EDITABLE_SETTINGS = {
         "description": (
             "スタックちゃんの返答を生成するモデル。低価格帯のみを選択肢にしています。"
             "レイテンシは同一条件での実測値で、通信状況により上下します。"
-            "どちらも Web 検索に対応しています。"
+            "声でやり取りするときは、この1〜2秒の差がそのまま待ち時間になります。"
+            "どれも Web 検索に対応しています。"
         ),
         "env_fallback": lambda: OPENAI_RESPONSES_MODEL,
         "type": "model_select",

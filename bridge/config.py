@@ -63,7 +63,7 @@ STT_MODEL = os.getenv("STT_MODEL", "whisper-1")
 # LLM バックエンド切り替え
 LLM_BACKEND = os.getenv("LLM_BACKEND", "openai")  # "openclaw" or "openai"
 OPENAI_RESPONSES_BASE_URL = os.getenv("OPENAI_RESPONSES_BASE_URL", "https://api.openai.com/v1")
-OPENAI_RESPONSES_MODEL = os.getenv("OPENAI_RESPONSES_MODEL", "gpt-6-luna")
+OPENAI_RESPONSES_MODEL = os.getenv("OPENAI_RESPONSES_MODEL", "gpt-5.6-luna")
 _raw_or = os.getenv("OPENAI_RESPONSES_MAX_OUTPUT_TOKENS", "")
 OPENAI_RESPONSES_MAX_OUTPUT_TOKENS: int | None = int(_raw_or) if _raw_or.strip() else None
 # gpt-5.x / gpt-6 系（推論モデル）の reasoning effort。none/low/medium/high/xhigh/max。

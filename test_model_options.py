@@ -52,10 +52,23 @@ def test_options_have_prices_and_notes():
         assert "latency_ms" in option and "tool_ms" in option
 
 
-def test_cheapest_option_is_the_default():
-    """既定が最安でなくなったら、意図した入れ替えか確認する。"""
-    cheapest = min(_LLM_MODEL_OPTIONS, key=lambda o: (o["price_in"], o["price_out"]))
-    assert cheapest["value"] == OPENAI_RESPONSES_MODEL
+def test_default_is_the_fastest_measured_option():
+    """会話の既定は「計測した中でいちばん速いもの」。
+
+    費用ではなく速さで選ぶ。声のやり取りでは1〜2秒の差がそのまま待ち時間になり、
+    会話の費用はもともと月数十円の規模だから（2026-10-20 の実測で方針を決めた）。
+    """
+    measured = [o for o in _LLM_MODEL_OPTIONS if o["latency_ms"] is not None]
+    assert measured, "レイテンシを計測した選択肢が無い"
+    fastest = min(measured, key=lambda o: o["latency_ms"])
+    assert fastest["value"] == OPENAI_RESPONSES_MODEL
+
+
+def test_a_cheaper_option_exists_for_background_work():
+    """通知・記憶・作曲に回せる、会話の既定より安い選択肢を残しておく。"""
+    default = next(o for o in _LLM_MODEL_OPTIONS if o["value"] == OPENAI_RESPONSES_MODEL)
+    cheaper = [o for o in _LLM_MODEL_OPTIONS if o["price_out"] < default["price_out"]]
+    assert cheaper, "安いほうの選択肢が無くなっている"
 
 
 def test_stt_options_have_prices():

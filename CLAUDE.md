@@ -193,6 +193,7 @@ Stack-chan からの ACK（`stackchan/ack`）:
 
 主要な設定（`.env.example` に全量あり）:
 - `LLM_BACKEND` — `openclaw`（デフォルト）or `openai`
+- `OPENAI_RESPONSES_MODEL` — 会話モデル。既定は `gpt-5.6-luna`。**gpt-6-luna は半額だが2倍遅い**（同条件5回ずつで中央値 1469ms 対 3006ms、2026-10-20 実測）ため、会話は速さ優先、通知・記憶・作曲は `gpt-6-luna` に分けている
 - `MQTT_ACK_TIMEOUT` — ACK タイムアウト秒数（デフォルト 15.0）
 - `CALENDAR_ENABLED` — `true` にするとカレンダー同期・通知が有効
 - `DISABLE_SESSION_HISTORY` / `DISABLE_TOOLS` — デバッグ・性能切り分け用フラグ
