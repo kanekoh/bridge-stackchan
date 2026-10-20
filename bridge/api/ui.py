@@ -63,6 +63,11 @@ async def ui_captures(request: Request):
     return _templates.TemplateResponse(request=request, name="captures.html", context=_ui_context(request))
 
 
+@router.get("/ui/speaker-id", response_class=HTMLResponse)
+async def ui_speaker_id(request: Request):
+    return _templates.TemplateResponse(request=request, name="speaker_id.html", context=_ui_context(request))
+
+
 @router.get("/ui/weather", response_class=HTMLResponse)
 async def ui_weather(request: Request):
     return _templates.TemplateResponse(request=request, name="weather.html", context=_ui_context(request))

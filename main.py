@@ -196,6 +196,9 @@ app.include_router(_songs_router)
 from bridge.api.captures import router as _captures_router
 app.include_router(_captures_router)
 
+from bridge.api.speaker_id import router as _speaker_id_router
+app.include_router(_speaker_id_router)
+
 from bridge.api.devices import router as _devices_router
 app.include_router(_devices_router)
 
@@ -295,7 +298,7 @@ async def _process_ingest_audio(
     try:
         transcript, speaker = await asyncio.gather(
             _timed("stt", transcribe_audio(audio_bytes, filename)),
-            _timed("speaker_id", identify_speaker(audio_bytes)),
+            _timed("speaker_id", identify_speaker(audio_bytes, request_id=req_id)),
         )
     except Exception as e:
         logger.error("STT error: %s", e)

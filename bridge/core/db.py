@@ -360,6 +360,30 @@ def _init_db() -> None:
             updated_at     TEXT NOT NULL
         )
     """)
+    # 話者識別の記録。しきい値を決め直すための材料で、判定自体には使わない。
+    # スコアはこれまでログに出すだけで捨てていたため、「0.75 が妥当か」を
+    # 後から検討できなかった。2位との差（margin）も残す。
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS speaker_id_log (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id       TEXT NOT NULL DEFAULT '',
+            created_at       TEXT NOT NULL,
+            candidate        TEXT,
+            score            REAL,
+            second_name      TEXT,
+            second_score     REAL,
+            margin           REAL,
+            accepted         BOOLEAN NOT NULL DEFAULT 0,
+            threshold_bridge REAL,
+            threshold_service REAL,
+            speech_sec       REAL,
+            elapsed_ms       INTEGER,
+            reason           TEXT,
+            scores_json      TEXT,
+            actual_speaker   TEXT
+        )
+    """)
+    _db_conn.execute("CREATE INDEX IF NOT EXISTS idx_speaker_id_log_created ON speaker_id_log (created_at)")
     # スタックちゃんが撮った写真・録った音。
     # keep_until が NULL なら「記憶」としてずっと残す。日付が入っていれば一時保存で、
     # 掃除ループがその日を過ぎたら実体ごと消す。
@@ -1134,3 +1158,72 @@ def _count_captures() -> dict:
         "total": row[0] or 0, "permanent": row[1] or 0,
         "temp": row[2] or 0, "bytes": row[3] or 0,
     }
+
+
+# ─── 話者識別の記録 ──────────────────────────────────────────────────────────
+
+_SPEAKER_LOG_COLS = (
+    "id, request_id, created_at, candidate, score, second_name, second_score, margin,"
+    " accepted, threshold_bridge, threshold_service, speech_sec, elapsed_ms, reason,"
+    " scores_json, actual_speaker"
+)
+
+
+def _save_speaker_id_log(
+    *,
+    request_id: str = "",
+    candidate: str | None,
+    score: float | None,
+    second_name: str | None = None,
+    second_score: float | None = None,
+    accepted: bool,
+    threshold_bridge: float | None = None,
+    threshold_service: float | None = None,
+    speech_sec: float | None = None,
+    elapsed_ms: int | None = None,
+    reason: str | None = None,
+    scores_json: str | None = None,
+) -> None:
+    """識別の結果を1件記録する。失敗しても呼び出し元を巻き込まない。"""
+    margin = None
+    if score is not None and second_score is not None:
+        margin = round(score - second_score, 4)
+    try:
+        with _db_lock:
+            _db_conn.execute(  # type: ignore[union-attr]
+                f"INSERT INTO speaker_id_log ({_SPEAKER_LOG_COLS.replace('id, ', '', 1)})"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (request_id, datetime.now(_JST).isoformat(), candidate, score,
+                 second_name, second_score, margin, accepted, threshold_bridge,
+                 threshold_service, speech_sec, elapsed_ms, reason, scores_json, None),
+            )
+            _db_conn.execute(
+                "DELETE FROM speaker_id_log WHERE id NOT IN"
+                " (SELECT id FROM speaker_id_log ORDER BY id DESC LIMIT 5000)"
+            )
+            _db_conn.commit()  # type: ignore[union-attr]
+    except Exception as e:
+        logger.warning("話者識別の記録に失敗（判定には影響しません）: %s", e)
+
+
+def _fetch_speaker_id_log(days: int = 30, limit: int = 1000) -> list[dict]:
+    since = (datetime.now(_JST) - timedelta(days=days)).isoformat()
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            f"SELECT {_SPEAKER_LOG_COLS} FROM speaker_id_log"
+            " WHERE created_at >= ? ORDER BY id DESC LIMIT ?",
+            (since, limit),
+        ).fetchall()
+    keys = [k.strip() for k in _SPEAKER_LOG_COLS.split(",")]
+    return [dict(zip(keys, r)) for r in rows]
+
+
+def _set_speaker_id_actual(log_id: int, actual_speaker: str | None) -> bool:
+    """「実際は誰だったか」を後から付ける（しきい値を評価するための正解ラベル）。"""
+    with _db_lock:
+        cur = _db_conn.execute(  # type: ignore[union-attr]
+            "UPDATE speaker_id_log SET actual_speaker = ? WHERE id = ?",
+            (actual_speaker, log_id),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+    return cur.rowcount > 0

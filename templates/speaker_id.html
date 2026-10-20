@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% block title %}話者識別{% endblock %}
+{% block nav_speaker_id %}font-semibold text-blue-600{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-2">
+  <h1 class="text-xl font-bold text-gray-800">話者識別</h1>
+  <select id="rangeSelect" onchange="load()" class="border border-gray-300 rounded px-3 py-1 text-sm bg-white">
+    <option value="7">直近7日</option>
+    <option value="30" selected>直近30日</option>
+    <option value="90">直近90日</option>
+  </select>
+</div>
+<p class="text-sm text-gray-500 mb-6">
+  判定に使っているしきい値は変えていません。ここは記録を見るだけの画面です。
+  <span class="text-gray-400">スコアは登録した声との近さ（1.0 が最も近い）。</span>
+</p>
+
+<div id="summary" class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6"></div>
+
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">スコアの推移</h2>
+<div class="bg-white rounded-lg border border-gray-200 p-4 mb-6">
+  <canvas id="scatter" height="110"></canvas>
+  <p class="text-xs text-gray-400 mt-2">
+    点は1回の識別。赤い線が現在のしきい値です。線より下は「不明」として扱われます。
+  </p>
+</div>
+
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">しきい値を変えたら何件通るか</h2>
+<div class="bg-white rounded-lg border border-gray-200 p-4 mb-6">
+  <canvas id="sweep" height="100"></canvas>
+  <p class="text-xs text-gray-400 mt-2">
+    正誤は「実際は誰か」を記録した分だけ数えられます。下の一覧で選んでください。
+  </p>
+</div>
+
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">記録</h2>
+<div class="bg-white rounded-lg border border-gray-200 overflow-x-auto">
+  <table class="w-full text-sm">
+    <thead class="text-xs text-gray-400 border-b border-gray-100">
+      <tr>
+        <th class="text-left py-2 px-3">日時</th>
+        <th class="text-left py-2 px-3">候補</th>
+        <th class="text-right py-2 px-3">スコア</th>
+        <th class="text-right py-2 px-3">2位との差</th>
+        <th class="text-right py-2 px-3">発話秒</th>
+        <th class="text-left py-2 px-3">採否</th>
+        <th class="text-left py-2 px-3">実際は誰？</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+<p id="emptyMsg" class="text-center text-gray-400 py-12 hidden">まだ記録がありません（音声で話しかけると貯まります）</p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let _charts = {};
+  let _people = [];
+
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  const COLORS = ['#3b82f6', '#f97316', '#10b981', '#a855f7', '#ef4444', '#64748b'];
+
+  function tile(label, value, sub) {
+    return `<div class="bg-white rounded-xl shadow-sm p-4">
+      <p class="text-xs text-gray-400">${esc(label)}</p>
+      <p class="text-lg font-semibold text-gray-800 mt-0.5">${esc(value)}</p>
+      ${sub ? `<p class="text-xs text-gray-500 mt-1">${esc(sub)}</p>` : ''}</div>`;
+  }
+
+  function fmtTime(iso) {
+    const d = new Date(iso);
+    return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  }
+
+  function renderSummary(d) {
+    const accepted = d.stats.accepted, total = d.stats.total;
+    const rate = total ? Math.round(accepted / total * 100) : 0;
+    const scored = d.entries.filter(e => e.score != null).map(e => e.score).sort((a, b) => a - b);
+    const median = scored.length ? scored[Math.floor(scored.length / 2)].toFixed(3) : '—';
+    const margins = d.entries.filter(e => e.margin != null).map(e => e.margin).sort((a, b) => a - b);
+    const medMargin = margins.length ? margins[Math.floor(margins.length / 2)].toFixed(3) : '—';
+    document.getElementById('summary').innerHTML =
+      tile('記録した回数', `${total}回`, `うち確定 ${accepted}回（${rate}%）`) +
+      tile('スコアの中央値', median, `しきい値 ${d.thresholdBridge}`) +
+      tile('2位との差（中央値）', medMargin, '小さいほど迷っている') +
+      tile('正解を付けた数', `${d.stats.labeled}件`, '正誤の判定に必要');
+  }
+
+  function renderScatter(d) {
+    if (_charts.scatter) _charts.scatter.destroy();
+    const byPerson = {};
+    for (const e of d.entries) {
+      if (e.score == null) continue;
+      const key = e.candidate || '(候補なし)';
+      (byPerson[key] = byPerson[key] || []).push({ x: new Date(e.createdAt).getTime(), y: e.score, e });
+    }
+    const datasets = Object.entries(byPerson).map(([name, points], i) => ({
+      label: name,
+      data: points,
+      backgroundColor: COLORS[i % COLORS.length],
+      pointRadius: 4,
+    }));
+    _charts.scatter = new Chart(document.getElementById('scatter'), {
+      type: 'scatter',
+      data: { datasets },
+      options: {
+        animation: false,
+        plugins: {
+          legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } },
+          tooltip: { callbacks: { label: c => {
+            const e = c.raw.e;
+            return `${e.candidate}: ${e.score}（2位 ${e.secondName ?? '—'} ${e.secondScore ?? '—'}・${e.speechSec ?? '—'}秒・${e.accepted ? '確定' : '不明'}）`;
+          } } },
+          annotation: undefined,
+        },
+        scales: {
+          x: { ticks: { font: { size: 10 }, callback: v => fmtTime(new Date(v)) } },
+          y: { min: 0, max: 1, ticks: { font: { size: 10 } } },
+        },
+      },
+      plugins: [{
+        // しきい値の線。Chart.js の注釈プラグインを足さずに自前で引く
+        id: 'thresholdLine',
+        afterDraw(chart) {
+          const y = chart.scales.y.getPixelForValue(d.thresholdBridge);
+          const { left, right } = chart.chartArea;
+          const ctx = chart.ctx;
+          ctx.save();
+          ctx.strokeStyle = '#ef4444';
+          ctx.setLineDash([6, 4]);
+          ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
+          ctx.restore();
+        },
+      }],
+    });
+  }
+
+  function renderSweep(d) {
+    if (_charts.sweep) _charts.sweep.destroy();
+    _charts.sweep = new Chart(document.getElementById('sweep'), {
+      type: 'line',
+      data: {
+        labels: d.sweep.map(s => s.threshold.toFixed(2)),
+        datasets: [
+          { label: '確定する割合(%)', data: d.sweep.map(s => s.acceptedRate), borderColor: '#3b82f6', tension: 0.3 },
+          { label: '取り違え(件)', data: d.sweep.map(s => s.wrong), borderColor: '#ef4444', tension: 0.3 },
+          { label: '取りこぼし(件)', data: d.sweep.map(s => s.missed), borderColor: '#f97316', tension: 0.3 },
+        ],
+      },
+      options: {
+        animation: false,
+        plugins: { legend: { position: 'top', labels: { boxWidth: 12, font: { size: 11 } } } },
+        scales: { x: { ticks: { font: { size: 10 } } }, y: { beginAtZero: true, ticks: { font: { size: 10 } } } },
+      },
+    });
+  }
+
+  function renderRows(d) {
+    const tbody = document.getElementById('rows');
+    const empty = document.getElementById('emptyMsg');
+    if (!d.entries.length) { tbody.innerHTML = ''; empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+    tbody.innerHTML = d.entries.map(e => {
+      const options = ['<option value="">—</option>']
+        .concat(_people.map(p => `<option value="${esc(p)}" ${e.actualSpeaker === p ? 'selected' : ''}>${esc(p)}</option>`))
+        .concat([`<option value="その他" ${e.actualSpeaker === 'その他' ? 'selected' : ''}>その他・誰でもない</option>`]).join('');
+      return `<tr class="border-b border-gray-50">
+        <td class="py-2 px-3 text-gray-500 whitespace-nowrap">${esc(fmtTime(e.createdAt))}</td>
+        <td class="py-2 px-3">${esc(e.candidate || '—')}</td>
+        <td class="py-2 px-3 text-right tabular-nums ${e.accepted ? 'text-gray-800' : 'text-gray-400'}">${e.score ?? '—'}</td>
+        <td class="py-2 px-3 text-right tabular-nums text-gray-500">${e.margin ?? '—'}</td>
+        <td class="py-2 px-3 text-right tabular-nums text-gray-500">${e.speechSec ?? '—'}</td>
+        <td class="py-2 px-3">${e.accepted
+          ? '<span class="text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700">確定</span>'
+          : '<span class="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">不明</span>'}</td>
+        <td class="py-2 px-3">
+          <select onchange="setActual(${e.id}, this.value)" class="border border-gray-200 rounded px-2 py-1 text-xs bg-white">${options}</select>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function setActual(id, value) {
+    await apiFetch('/api/speaker-id/log/' + id + '/actual', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actual_speaker: value || null }),
+    });
+    load();
+  }
+
+  async function load() {
+    const days = document.getElementById('rangeSelect').value;
+    const d = await apiFetch('/api/speaker-id/log?days=' + days);
+    _people = d.people;
+    renderSummary(d);
+    renderScatter(d);
+    renderSweep(d);
+    renderRows(d);
+  }
+
+  load();
+</script>
+{% endblock %}

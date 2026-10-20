@@ -1,4 +1,6 @@
 import io
+import json
+import time
 import logging
 import sys
 import httpx
@@ -36,10 +38,14 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
     return result.text
 
 
-async def identify_speaker(audio_bytes: bytes) -> str | None:
+async def identify_speaker(audio_bytes: bytes, request_id: str = "") -> str | None:
     """Identify speaker via speaker-id service. Returns display name or None.
 
     Non-fatal: returns None on any error or when SPEAKER_ID_URL is not configured.
+
+    判定そのものは従来どおり（Bridge 側のしきい値で採否を決める）。
+    加えて、スコアと候補を speaker_id_log に残す。しきい値を勘ではなく
+    データで決められるようにするためで、記録は判定に一切影響しない。
     """
     from bridge.config import SPEAKER_ID_URL as _DEFAULT_URL, SPEAKER_ID_API_KEY as _DEFAULT_KEY, SPEAKER_ID_THRESHOLD as _DEFAULT_THRESHOLD
     speaker_id_url = _get_main_attr("SPEAKER_ID_URL", _DEFAULT_URL)
@@ -48,6 +54,7 @@ async def identify_speaker(audio_bytes: bytes) -> str | None:
 
     if not speaker_id_url:
         return None
+    started = time.monotonic()
     try:
         http_client = _get_main_attr("_http_client")
         headers = {}
@@ -63,8 +70,14 @@ async def identify_speaker(audio_bytes: bytes) -> str | None:
         resp.raise_for_status()
         data = resp.json()
         score = float(data.get("score", 0))
-        if score >= speaker_id_threshold:
-            name = data.get("kana") or data.get("name")
+        accepted = score >= speaker_id_threshold
+        name = (data.get("kana") or data.get("name")) if accepted else None
+        _record_identification(
+            data, score=score, accepted=accepted, request_id=request_id,
+            threshold_bridge=speaker_id_threshold,
+            elapsed_ms=round((time.monotonic() - started) * 1000),
+        )
+        if accepted:
             logger.info("Speaker identified: name=%s score=%.3f", name, score)
             return name
         logger.info("Speaker below threshold: score=%.3f threshold=%.3f", score, speaker_id_threshold)
@@ -72,3 +85,32 @@ async def identify_speaker(audio_bytes: bytes) -> str | None:
     except Exception as e:
         logger.warning("Speaker identification failed (non-fatal): %s", e)
         return None
+
+
+def _record_identification(
+    data: dict, *, score: float, accepted: bool, request_id: str,
+    threshold_bridge: float, elapsed_ms: int,
+) -> None:
+    """識別サービスの応答を speaker_id_log に残す。
+
+    サービスは全候補のスコアを降順で返すので、2位との差（margin）も取れる。
+    僅差で確定しているものが多ければ、しきい値ではなく差で判断する手が見えてくる。
+    """
+    from bridge.core.db import _save_speaker_id_log
+
+    scores = data.get("scores") or []
+    second = scores[1] if len(scores) > 1 else {}
+    _save_speaker_id_log(
+        request_id=request_id,
+        candidate=data.get("candidate") or data.get("name"),
+        score=score,
+        second_name=second.get("kana") or second.get("name"),
+        second_score=second.get("score"),
+        accepted=accepted,
+        threshold_bridge=threshold_bridge,
+        threshold_service=data.get("threshold"),
+        speech_sec=data.get("speech_sec"),
+        elapsed_ms=elapsed_ms,
+        reason=data.get("reason") if not accepted else None,
+        scores_json=json.dumps(scores, ensure_ascii=False) if scores else None,
+    )
