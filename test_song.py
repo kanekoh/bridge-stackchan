@@ -342,6 +342,76 @@ def test_quiet_hours_disabled_when_unset():
     assert in_quiet_hours("", "") is False
 
 
+# ── 長音符（ー） ─────────────────────────────────────────────────────────────
+# ENGINE は 1 ノート 1 モーラを前提にしていて「ー」だけ受け付けない
+# （HTTP 400 lyricが不正です: ー）。2026-10-22 に「ハッピーバースデーを歌詞付きで」で
+# 作曲が落ちた。人が書く自然な表記なので、弾かずに母音へ開く。
+
+def test_long_vowel_opens_to_the_previous_vowel():
+    score = parse_score({
+        "id": "hb", "title": "ハッピーバースデー", "bpm": 100,
+        "notes": [
+            {"note": "C4", "beats": 0.5, "lyric": "ハ"},
+            {"note": "C4", "beats": 0.5, "lyric": "ッ"},
+            {"note": "D4", "beats": 1, "lyric": "ピ"},
+            {"note": "C4", "beats": 1, "lyric": "ー"},
+            {"note": "F4", "beats": 1, "lyric": "バ"},
+            {"note": "E4", "beats": 2, "lyric": "ー"},
+            {"note": "D4", "beats": 1, "lyric": "デ"},
+            {"note": "C4", "beats": 2, "lyric": "ー"},
+        ],
+    })
+    assert [n.lyric for n in score.notes] == ["ハ", "ッ", "ピ", "い", "バ", "あ", "デ", "え"]
+
+
+@pytest.mark.parametrize("kana,vowel", [
+    ("か", "あ"), ("し", "い"), ("ぬ", "う"), ("せ", "え"), ("ぽ", "お"),
+    ("キ", "い"), ("ヴ", "う"), ("きゃ", "あ"), ("しょ", "お"),
+])
+def test_long_vowel_mapping(kana, vowel):
+    from bridge.features.song.score import resolve_long_vowel
+    assert resolve_long_vowel("ー", kana) == vowel
+
+
+def test_long_vowel_at_the_head_is_an_error():
+    """伸ばす元が無い。理由を添えて弾く（LLM はこれを読んで書き直す）。"""
+    with pytest.raises(ScoreError, match="先頭"):
+        parse_score({"id": "x", "title": "x", "bpm": 100,
+                     "notes": [{"note": "C4", "beats": 1, "lyric": "ー"}]})
+
+
+@pytest.mark.parametrize("previous", ["ん", "ッ", "っ", "ン"])
+def test_long_vowel_after_a_non_vowel_is_an_error(previous):
+    """「ん」「っ」は母音を持たないので開けない。黙って通すと ENGINE で 400 になる。"""
+    with pytest.raises(ScoreError, match="母音に開けません"):
+        parse_score({"id": "x", "title": "x", "bpm": 100, "notes": [
+            {"note": "C4", "beats": 1, "lyric": previous},
+            {"note": "C4", "beats": 1, "lyric": "ー"},
+        ]})
+
+
+def test_long_vowel_is_never_passed_to_the_engine():
+    """ENGINE に渡す notes に「ー」が残らないこと（これが 400 の直接の原因だった）。"""
+    score = parse_score({"id": "x", "title": "x", "bpm": 100, "notes": [
+        {"note": "C4", "beats": 1, "lyric": "ば"},
+        {"note": "C4", "beats": 1, "lyric": "ー"},
+        {"note": "rest", "beats": 1},
+        {"note": "C4", "beats": 1, "lyric": "で"},
+        {"note": "C4", "beats": 1, "lyric": "ー"},
+    ]})
+    assert all(n["lyric"] != "ー" for n in build_notes(score))
+
+
+def test_long_vowel_carries_over_a_rest():
+    """休符をはさんでも、直前の「音」の母音を引き継ぐ。"""
+    score = parse_score({"id": "x", "title": "x", "bpm": 100, "notes": [
+        {"note": "C4", "beats": 1, "lyric": "こ"},
+        {"note": "rest", "beats": 1},
+        {"note": "C4", "beats": 1, "lyric": "ー"},
+    ]})
+    assert [n.lyric for n in score.notes] == ["こ", "", "お"]
+
+
 # ── 出発リミットの計算 ───────────────────────────────────────────────────────
 
 @pytest.fixture

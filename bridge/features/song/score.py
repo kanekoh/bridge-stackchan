@@ -65,6 +65,40 @@ def note_to_midi(name: str) -> int | None:
     return midi
 
 
+# 長音符「ー」を母音に開くための対応表。
+# ENGINE は 1 ノート 1 モーラを前提にしており、「ー」だけは受け付けない
+# （HTTP 400 lyricが不正です: ー）。人が「ハッピーバースデー」と書くのは自然なので、
+# 弾かずに「ぴ→い」「ば→あ」「で→え」と母音に開いて渡す。
+_VOWEL_OF = {}
+for _vowel, _kana in {
+    "あ": "あかさたなはまやらわがざだばぱゃぁゎアカサタナハマヤラワガザダバパャァヮ",
+    "い": "いきしちにひみりぎじぢびぴぃイキシチニヒミリギジヂビピィ",
+    "う": "うくすつぬふむゆるぐずづぶぷゅぅゥウクスツヌフムユルグズヅブプュヴ",
+    "え": "えけせてねへめれげぜでべぺぇエケセテネヘメレゲゼデベペェ",
+    "お": "おこそとのほもよろをごぞどぼぽょぉオコソトノホモヨロヲゴゾドボポョォ",
+}.items():
+    for _ch in _kana:
+        _VOWEL_OF[_ch] = _vowel
+
+
+def resolve_long_vowel(lyric: str, previous: str) -> str:
+    """「ー」を直前の音の母音に置き換える。それ以外はそのまま返す。
+
+    直前が休符・「ん」・「っ」のときは開きようがないので、呼び出し側で弾く。
+    """
+    if lyric != "ー":
+        return lyric
+    if not previous:
+        raise ScoreError("先頭の音に「ー」は使えません（伸ばす元の音がありません）")
+    vowel = _VOWEL_OF.get(previous[-1])
+    if vowel is None:
+        raise ScoreError(
+            f"「ー」の前が {previous!r} なので母音に開けません"
+            "（伸ばしたい音は「ばあ」「でえ」のように母音で書いてください）"
+        )
+    return vowel
+
+
 def is_single_mora(lyric: str) -> bool:
     """歌詞が「ひらがな・カタカナ1モーラ」かどうか。
 
@@ -142,6 +176,7 @@ def parse_score(data: dict, *, song_id: str | None = None) -> Score:
         raise ScoreError("notes に1音以上必要です")
 
     notes: list[NoteSpec] = []
+    _previous_lyric = ""      # 「ー」を母音に開くために直前の音を覚えておく
     for i, raw in enumerate(raw_notes):
         if not isinstance(raw, dict):
             raise ScoreError(f"notes[{i}] はマッピングである必要があります: {raw!r}")
@@ -153,13 +188,20 @@ def parse_score(data: dict, *, song_id: str | None = None) -> Score:
         if beats <= 0:
             raise ScoreError(f"notes[{i}].beats は正の数である必要があります: {beats}")
         midi = note_to_midi(name)  # ここで音名の妥当性も検証される
-        lyric = str(raw.get("lyric", "") or "")
+        lyric = str(raw.get("lyric", "") or "").strip()
         if midi is None:
             lyric = ""  # 休符に歌詞は乗らない
         else:
             lyric = lyric or default_lyric
+            # 「ー」は ENGINE が受け付けないので、ここで母音に開く。
+            # 検証より前に行うのは、開いた結果（母音1文字）を検証したいため。
+            try:
+                lyric = resolve_long_vowel(lyric, _previous_lyric)
+            except ScoreError as e:
+                raise ScoreError(f"notes[{i}].lyric {e}")
             if not is_single_mora(lyric):
                 raise ScoreError(f"notes[{i}].lyric はかな1モーラで指定してください: {lyric!r}")
+            _previous_lyric = lyric
         notes.append(NoteSpec(note=name, beats=beats, lyric=lyric))
 
     style = data.get("style") or {}

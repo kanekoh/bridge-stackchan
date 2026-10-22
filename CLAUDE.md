@@ -153,6 +153,7 @@ Socket Mode（WebSocket）で動作。`SLACK_BOT_TOKEN` と `SLACK_APP_TOKEN` �
 **歌（`bridge/features/song/`）**
 発話（api.tts.quest）には歌唱 API がないため、歌だけはローカルの VOICEVOX ENGINE 0.25.2 を使う。
 - `score.py` — 楽譜 → ENGINE の notes 配列。**純関数のみ**（ENGINE にも DB にも触らない）。先頭無音の挿入と、累積フレームの差分によるテンポずれ防止がここの責務。ユニットテストの主対象（`test_song.py`）
+  - **長音符「ー」は母音に開いてから ENGINE に渡す**（`resolve_long_vowel`）。ENGINE は 1 ノート 1 モーラ前提で「ー」だけ 400 を返す（`ッ` `ん` は通る）。「ハッピーバースデー」のような自然な表記で落ちていたため。先頭や「ん」「っ」の直後は開けないので理由を添えて弾く
 - `engine.py` — `/sing_frame_audio_query`（sing style_id で音程）→ `/frame_synthesis`（frame_decode style_id で声色）の2段階
 - `cache.py` — 起動時に事前生成 → ffmpeg で **24kHz mono MP3、ID3/Xing なし**（デバイスは audioStreamingUrl を生の MP3 フレーム列として読むため、先頭にタグがあると同期できず無音になる）→ `data/songs/`。**リアルタイム合成はしない**。楽譜・style_id・ENGINE バージョン・出力フォーマットのハッシュがキャッシュキー
 - `library.py` — 曲を引く唯一の入口。`config/songs/*.yaml`（手書き＝builtin）と `songs` テーブル（つくった歌＝composed）の両方を読む。id 衝突時は YAML 優先。気分タグでの選曲・再生履歴・統計もここ
