@@ -113,6 +113,7 @@ paho-mqtt の永続接続クラス。`publish()` 呼び出し時に未接続な�
 - `GET /api/songs/triggers` — 直近の予定と出発リミットの計算結果
 - `GET /songs/{file}.mp3` — 事前生成した歌の配信（StaticFiles）
 - `POST /ingest-photo` — Stack-chan が撮った写真を受信（`retention=temp|permanent`）
+- `POST /api/captures/request` — MQTT で「いま撮って」と依頼し、写真が届くまで待つ
 - `GET /api/captures` — 写真の一覧と統計（`keep=temp|permanent` で絞り込み）
 - `GET /api/captures/{id}/file` — 写真の実体を配信
 - `POST /api/captures/{id}/keep` / `unkeep` — 記憶への昇格・一時保存への降格
@@ -158,6 +159,8 @@ Stack-chan（M5Stack CoreS3）が撮った写真を受け取って保存する�
 - `store.py` — ファイル（`data/captures/YYYY-MM/{id}.jpg`）と DB 行の保存・昇格・削除。保持期限を決めるのは `retention_deadline()` の1か所だけ
 - `cleanup.py` — 期限切れを消すループ。**記憶には絶対に触らない**（`_fetch_expired_captures` が `keep_until IS NOT NULL` で絞る）
 - 受け取り口は `POST /ingest-photo`（multipart、`/ingest-audio` と同じ形）。ファーム未対応でも curl で試せる
+- `requests.py` — 「いま撮って」の依頼。**依頼は MQTT（`stackchan/{deviceId}/capture` に `{type, requestId, reason}`）、写真は HTTP** で返る。経路が分かれるので `requestId` で突き合わせ、`/ingest-photo` の到着で待機を解除する。ACK は「依頼を受け取った」ことしか示さないため、ACK 待ちとは別に到着を待つ。応答なし（`no_ack`）と、ACK 後に写真が来ない（`timeout`）を区別して返す
+- **MQTT に画像は載せない**（ペイロード上限とデバイスのメモリの制約）。種類ごとにトピックを分けず 1 本に `type` を載せる
 - **実体の配信は `/api/captures/{id}/file` だけ**。家族の顔が写るため、歌のような認証なしの StaticFiles には置かない
 
 **ISS 通過通知（`bridge/features/iss/`）**
@@ -196,6 +199,12 @@ LLM に渡すシステムプロンプト（`_STACKCHAN_SYSTEM_PROMPT`）のル�
   "expression": "happy"
 }
 ```
+
+撮影・録音の依頼 `stackchan/{deviceId}/capture`:
+```json
+{ "type": "photo", "requestId": "uuid", "reason": "ui" }
+```
+写真そのものはここを通らない。デバイスは撮ったものを `POST /ingest-photo` に `request_id` 付きで送り返す。
 
 Stack-chan からの ACK（`stackchan/ack`）:
 ```json

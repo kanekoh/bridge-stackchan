@@ -5,13 +5,17 @@
 {% block content %}
 <div class="flex items-center justify-between mb-2">
   <h1 class="text-xl font-bold text-gray-800">写真</h1>
-  <div class="flex gap-2">
+  <div class="flex gap-2 items-center">
+    <button onclick="requestCapture()" id="shootBtn"
+      class="text-sm px-3 py-1 rounded bg-blue-500 hover:bg-blue-600 text-white">いま撮って</button>
+    <span class="w-px h-5 bg-gray-200"></span>
     <button onclick="loadCaptures('')" id="tab-all" class="text-sm px-3 py-1 rounded-full bg-blue-500 text-white">すべて</button>
     <button onclick="loadCaptures('temp')" id="tab-temp" class="text-sm px-3 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200">一時保存</button>
     <button onclick="loadCaptures('permanent')" id="tab-permanent" class="text-sm px-3 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200">記憶</button>
   </div>
 </div>
-<p id="stats" class="text-xs text-gray-500 mb-6"></p>
+<p id="stats" class="text-xs text-gray-500 mb-1"></p>
+<p id="shootMsg" class="text-xs mb-6">&nbsp;</p>
 
 <div id="captureList" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4"></div>
 <p id="emptyMsg" class="text-center text-gray-400 py-12 hidden">写真がありません</p>
@@ -87,6 +91,31 @@
           </div>
         </div>`;
     }).join('');
+  }
+
+  async function requestCapture() {
+    const btn = document.getElementById('shootBtn');
+    const msg = document.getElementById('shootMsg');
+    btn.disabled = true;
+    btn.textContent = '撮っています...';
+    msg.textContent = 'スタックちゃんに依頼を送りました（撮影して送り返すまで少しかかります）';
+    msg.className = 'text-xs text-gray-500 mb-6';
+    try {
+      await apiFetch('/api/captures/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'photo', reason: 'ui' }),
+      });
+      msg.textContent = '✅ 届きました';
+      msg.className = 'text-xs text-green-600 mb-6';
+      loadCaptures(currentKeep);
+    } catch (e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.className = 'text-xs text-red-500 mb-6';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'いま撮って';
+    }
   }
 
   async function keep(id) {

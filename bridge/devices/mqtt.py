@@ -248,6 +248,32 @@ def publish_speak(
     _mqtt_conn.publish(topic, payload)
 
 
+def publish_capture(
+    *,
+    request_id: str,
+    kind: str = "photo",
+    reason: str = "",
+    device_id: str = "",
+    params: dict | None = None,
+) -> str:
+    """stackchan/{device_id}/capture へ撮影・録音の依頼を publish する。
+
+    写真そのものはここを通らない。デバイスは撮ったものを HTTP（/ingest-photo）で
+    送り返し、requestId で依頼と結びつける。MQTT に画像を載せないのは、
+    ペイロード上限とデバイスのメモリの制約があるため。
+
+    種類ごとにトピックを分けず、1本に type を載せる（将来 audio などを足しやすい）。
+    """
+    topic = f"stackchan/{device_id or MQTT_DEVICE_ID}/capture"
+    msg: dict = {"type": kind, "requestId": request_id}
+    if reason:
+        msg["reason"] = reason
+    if params:
+        msg["params"] = params
+    _mqtt_conn.publish(topic, json.dumps(msg, ensure_ascii=False))
+    return topic
+
+
 def get_device_state(device_id: str) -> dict | None:
     """直近30秒間隔で受信した device/state（未受信なら None）。"""
     return _device_state.get(device_id)

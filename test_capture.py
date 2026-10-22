@@ -7,6 +7,8 @@
 Run:
     pytest test_capture.py -v
 """
+import asyncio
+import json
 import os
 import sqlite3
 from datetime import datetime, timedelta
@@ -230,3 +232,131 @@ def test_keep_endpoints_round_trip(client):
     assert client.post(f"/api/captures/{body['id']}/keep").json()["keep"] == "permanent"
     assert client.post(f"/api/captures/{body['id']}/unkeep").json()["keep"] == "temp"
     assert client.post("/api/captures/nosuchid/keep").status_code == 404
+
+
+# ── 撮影の依頼（MQTT → HTTP の往復） ─────────────────────────────────────────
+
+@pytest.fixture
+def mqtt_capture(monkeypatch):
+    """MQTT の publish を差し替えて、送ったペイロードを覗けるようにする。"""
+    import bridge.devices.mqtt as _mqtt
+
+    sent = []
+
+    class _Conn:
+        def publish(self, topic, payload):
+            sent.append((topic, json.loads(payload)))
+
+    monkeypatch.setattr(_mqtt, "_mqtt_conn", _Conn())
+    return sent
+
+
+def test_publish_capture_payload(mqtt_capture):
+    """依頼は1本のトピックに type を載せる（種類ごとに分けない）。"""
+    from bridge.devices.mqtt import publish_capture
+
+    topic = publish_capture(request_id="req-1", kind="photo", reason="llm")
+    assert topic.endswith("/capture")
+    sent_topic, msg = mqtt_capture[0]
+    assert sent_topic == topic
+    assert msg == {"type": "photo", "requestId": "req-1", "reason": "llm"}
+    assert "audioUrl" not in msg and "image" not in msg   # 画像は MQTT に載せない
+
+
+@pytest.mark.asyncio
+async def test_request_capture_returns_the_arrived_photo(capture_env, mqtt_capture, monkeypatch):
+    """依頼 → ACK → /ingest-photo の到着、までを結びつけられること。"""
+    from bridge.features.capture import requests as capture_requests
+
+    async def _ack(request_id, timeout=15.0):
+        return True
+    monkeypatch.setattr(capture_requests, "wait_for_ack", _ack)
+
+    async def _deliver():
+        await asyncio.sleep(0.05)
+        request_id = mqtt_capture[0][1]["requestId"]
+        capture_requests.notify_arrival(request_id, {"id": "abc", "keep": "temp"})
+
+    task = asyncio.create_task(_deliver())
+    result = await capture_requests.request_capture(reason="test", timeout=2.0)
+    await task
+    assert result["status"] == "ok"
+    assert result["capture"]["id"] == "abc"
+    assert capture_requests.pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_request_capture_reports_no_ack(capture_env, mqtt_capture, monkeypatch):
+    """応答が無いときは「届いていない」と分かる形で返す。"""
+    from bridge.features.capture import requests as capture_requests
+
+    async def _no_ack(request_id, timeout=15.0):
+        return False
+    monkeypatch.setattr(capture_requests, "wait_for_ack", _no_ack)
+
+    result = await capture_requests.request_capture(timeout=0.2)
+    assert result["status"] == "no_ack"
+
+
+@pytest.mark.asyncio
+async def test_request_capture_reports_timeout_after_ack(capture_env, mqtt_capture, monkeypatch):
+    """ACK は来たのに写真が来ない＝撮影か送信の失敗。no_ack と区別する。"""
+    from bridge.features.capture import requests as capture_requests
+
+    async def _ack(request_id, timeout=15.0):
+        return True
+    monkeypatch.setattr(capture_requests, "wait_for_ack", _ack)
+
+    result = await capture_requests.request_capture(timeout=0.2)
+    assert result["status"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_photo_arriving_before_ack_is_not_lost(capture_env, mqtt_capture, monkeypatch):
+    """写真が ACK より先に届いても取りこぼさない（ACK 待ちで踏んだ失敗の再発防止）。"""
+    from bridge.features.capture import requests as capture_requests
+
+    async def _slow_ack(request_id, timeout=15.0):
+        await asyncio.sleep(0.1)       # ACK は遅れて来る
+        return True
+
+    monkeypatch.setattr(capture_requests, "wait_for_ack", _slow_ack)
+
+    async def _deliver_early():
+        await asyncio.sleep(0.01)      # 先に写真が届く
+        capture_requests.notify_arrival(mqtt_capture[0][1]["requestId"], {"id": "early"})
+
+    task = asyncio.create_task(_deliver_early())
+    result = await capture_requests.request_capture(timeout=2.0)
+    await task
+    assert result["status"] == "ok"
+    assert result["capture"]["id"] == "early"
+
+
+def test_notify_arrival_without_waiter_is_harmless():
+    """デバイス起点のアップロード（誰も待っていない）でも落ちないこと。"""
+    from bridge.features.capture import requests as capture_requests
+
+    capture_requests.notify_arrival("nobody-waits", {"id": "x"})
+
+
+def test_ingest_photo_wakes_the_waiter(client, capture_env, monkeypatch):
+    """/ingest-photo が request_id つきで来たら、待っている依頼に結びつける。"""
+    from bridge.features.capture import requests as capture_requests
+
+    arrived = []
+    monkeypatch.setattr(capture_requests, "notify_arrival",
+                        lambda rid, cap: arrived.append((rid, cap)))
+    client.post("/ingest-photo", files={"file": ("a.jpg", _JPEG, "image/jpeg")},
+                data={"request_id": "req-42"})
+    assert arrived and arrived[0][0] == "req-42"
+
+
+def test_ingest_photo_without_request_id_does_not_notify(client, capture_env, monkeypatch):
+    from bridge.features.capture import requests as capture_requests
+
+    arrived = []
+    monkeypatch.setattr(capture_requests, "notify_arrival",
+                        lambda rid, cap: arrived.append(rid))
+    client.post("/ingest-photo", files={"file": ("a.jpg", _JPEG, "image/jpeg")})
+    assert arrived == []

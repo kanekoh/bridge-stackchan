@@ -13,9 +13,11 @@ import logging
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
+from pydantic import BaseModel
+
 from bridge.config import CAPTURE_MAX_BYTES, CAPTURE_TEMP_DAYS, MQTT_DEVICE_ID
 from bridge.core.db import _count_captures, _fetch_captures, _get_capture
-from bridge.features.capture import store
+from bridge.features.capture import requests as capture_requests, store
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -82,7 +84,38 @@ async def ingest_photo(
     except store.CaptureError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # 「いま撮って」と頼んで待っている人がいれば起こす。
+    # デバイス起点のアップロード（request_id なし）のときは何も起きない。
+    if request_id:
+        capture_requests.notify_arrival(request_id, _public(capture))
+
     return _public(capture)
+
+
+class CaptureRequest(BaseModel):
+    kind: str = "photo"
+    reason: str = ""
+    device_id: str = ""
+    wait: bool = True
+
+
+@router.post("/api/captures/request")
+async def api_request_capture(req: CaptureRequest):
+    """Stack-chan に「いま撮って」と頼む（MQTT）。
+
+    写真は MQTT では返ってこない。デバイスが /ingest-photo に送り直すので、
+    ここでは requestId で突き合わせて到着を待つ。
+    """
+    if req.kind not in ("photo", "audio"):
+        raise HTTPException(status_code=400, detail="kind は photo か audio です")
+    result = await capture_requests.request_capture(
+        kind=req.kind, reason=req.reason or "ui", device_id=req.device_id, wait=req.wait,
+    )
+    if result["status"] == "no_ack":
+        raise HTTPException(status_code=504, detail="スタックちゃんが応答しません（電源と通信を確認してください）")
+    if result["status"] == "timeout":
+        raise HTTPException(status_code=504, detail="依頼は届きましたが、写真が返ってきませんでした")
+    return result
 
 
 @router.get("/api/captures")
