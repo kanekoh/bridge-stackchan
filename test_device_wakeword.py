@@ -177,6 +177,84 @@ def test_threshold_out_of_range_is_rejected(client, monkeypatch):
     assert client.post("/api/device/wakeword", json={"wakeWordThreshold": 5}).status_code == 422
 
 
+# ── カメラ ───────────────────────────────────────────────────────────────────
+
+def test_camera_settings_prefer_http(client, monkeypatch):
+    calls, sent = [], []
+    _patch_device_url(monkeypatch)
+    _patch_http(monkeypatch, calls)
+    _patch_mqtt(monkeypatch, sent)
+
+    body = client.post("/api/device/camera", json={"cameraAeLevel": 2}).json()
+    assert body["transport"] == "http"
+    assert calls == [("POST", "http://192.168.10.30/device", {"cameraAeLevel": 2})]
+    assert sent == []
+
+
+def test_camera_settings_fall_back_to_mqtt(client, monkeypatch):
+    calls, sent = [], []
+    _patch_device_url(monkeypatch)
+    _patch_http(monkeypatch, calls, error=OSError("unreachable"))
+    _patch_mqtt(monkeypatch, sent)
+
+    body = client.post("/api/device/camera", json={"cameraFrameSize": "VGA"}).json()
+    assert body["transport"] == "mqtt"
+    assert sent == [("default", {"cameraFrameSize": "VGA"})]
+
+
+def test_camera_zero_values_are_sent(client, monkeypatch):
+    """0 や -2 は「変更なし」ではない。落とすと暗いままになる。"""
+    calls = []
+    _patch_device_url(monkeypatch)
+    _patch_http(monkeypatch, calls)
+
+    client.post("/api/device/camera", json={"cameraAeLevel": 0, "cameraBrightness": -2,
+                                            "cameraWarmupFrames": 0})
+    assert calls[0][2] == {"cameraAeLevel": 0, "cameraBrightness": -2, "cameraWarmupFrames": 0}
+
+
+def test_test_shot_goes_over_http(client, monkeypatch):
+    calls = []
+    _patch_device_url(monkeypatch)
+    _patch_http(monkeypatch, calls)
+
+    body = client.post("/api/device/camera", json={"capture": True}).json()
+    assert body["transport"] == "http"
+    assert calls[0][2] == {"capture": True}
+
+
+def test_test_shot_without_device_url_is_refused(client, monkeypatch):
+    """試し撮りは HTTP でしか送れない。MQTT に流して黙って失敗しないこと。"""
+    sent = []
+    _patch_device_url(monkeypatch, "")
+    _patch_mqtt(monkeypatch, sent)
+
+    res = client.post("/api/device/camera", json={"capture": True})
+    assert res.status_code == 503
+    assert sent == []
+
+
+def test_camera_values_out_of_range_are_rejected(client, monkeypatch):
+    _patch_device_url(monkeypatch, "")
+    for payload in ({"cameraAeLevel": 3}, {"cameraBrightness": -3},
+                    {"cameraWarmupFrames": 31}, {"cameraJpegQuality": 5},
+                    {"cameraFrameSize": "UXGA"}):
+        assert client.post("/api/device/camera", json=payload).status_code == 422, payload
+
+
+def test_camera_empty_payload_is_rejected(client, monkeypatch):
+    _patch_device_url(monkeypatch, "")
+    assert client.post("/api/device/camera", json={}).status_code == 422
+
+
+def test_settings_endpoint_also_carries_camera(client, monkeypatch):
+    """既存のデバイス設定画面（MQTT 経由）からも送れること。"""
+    sent = []
+    _patch_mqtt(monkeypatch, sent)
+    client.post("/api/device/settings", json={"cameraAeLevel": 1, "volume": 50})
+    assert sent[0][1] == {"cameraAeLevel": 1, "volume": 50}
+
+
 # ── 設定キーの登録 ───────────────────────────────────────────────────────────
 
 def test_device_http_url_is_an_editable_setting():

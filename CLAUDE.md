@@ -90,6 +90,13 @@ paho-mqtt の永続接続クラス。`publish()` 呼び出し時に未接続な�
 **ウェイクワード**
 `device/state`（30秒間隔）には `wakeWord` / `wakeWordRegistered` / `wakeWordThreshold` / `wakeWordLastDistance` が載る。距離（DTW）は**小さいほど似ている**で、しきい値以下なら反応する。距離は話すたびに動くため 30 秒間隔では調整できず、`/ui/device` の距離メーターは `GET /api/device/live`（デバイス本体への直接 HTTP）を 1.5 秒ごとに読む。ブラウザから直接デバイスを叩くと UI が HTTPS のとき混在コンテンツで止まるので、必ず Bridge が代理で取りに行く。
 
+**カメラ設定**
+`device/state` に `cameraAeLevel` / `cameraBrightness` / `cameraWarmupFrames` / `cameraJpegQuality` / `cameraFrameSize` が載る。調整は `/ui/device` の「カメラ」から行い、変えたらその場で試し撮りして確かめる。
+- **暗いときは露出（`cameraAeLevel`、-2〜2）から。** `cameraBrightness` は後段の補正でノイズも持ち上がる
+- `cameraWarmupFrames`（0〜30）は AEC/AGC が落ち着くまでの捨て枚数。暗所で色が転ぶなら増やす
+- `cameraFrameSize` は QQVGA/QVGA/CIF/VGA。**VGA(640×480) が GC0308 の上限**
+- **0 や -2 を「変更なし」と混同しないこと。** 送信前に `None` のものだけ落とす（混同すると暗いまま直らない）
+
 **MQTT ACK 待機**
 - `_pending_acks: dict[str, asyncio.Event]` で requestId ごとにイベントを管理
 - `on_message`（MQTT スレッド）→ `call_soon_threadsafe(event.set)`（asyncio スレッドへ通知）
@@ -104,6 +111,7 @@ paho-mqtt の永続接続クラス。`publish()` 呼び出し時に未接続な�
 - `POST /calendar-sources` など — カレンダーソース管理 CRUD
 - `GET /api/device/live` — デバイス本体の `GET /device` を Bridge 経由で読む（ウェイクワードの距離調整用の短間隔ポーリング。届かなくても 200 + `available:false`）
 - `POST /api/device/wakeword` — ウェイクワードの ON/OFF・登録・しきい値。**HTTP を先に試し、駄目なら MQTT の `device/set` に回る**
+- `POST /api/device/camera` — カメラの露出・明るさ補正・ウォームアップ枚数・JPEG画質・解像度。同じく HTTP 優先・MQTT 退避。`capture: true` は試し撮り（**HTTP でしか送れない**）
 - `GET /api/songs` — 曲一覧・キャッシュ状態・ENGINE 状態・設定
 - `POST /api/songs/{id}/play` — 試聴（gatekeeper を通さない）
 - `POST /api/songs/{id}/rebuild` / `POST /api/songs/prebuild` — 再生成

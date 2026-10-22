@@ -34,6 +34,13 @@ class DeviceSettingsUpdate(BaseModel):
     wakeWord: bool | None = None
     wakeWordRegister: bool | None = None
     wakeWordThreshold: int | None = Field(default=None, ge=10, le=2000)
+    # カメラ。暗いときに効くのは露出（cameraAeLevel）で、brightness は後段の補正。
+    cameraAeLevel: int | None = Field(default=None, ge=-2, le=2)
+    cameraBrightness: int | None = Field(default=None, ge=-2, le=2)
+    cameraWarmupFrames: int | None = Field(default=None, ge=0, le=30)
+    cameraJpegQuality: int | None = Field(default=None, ge=10, le=100)
+    cameraFrameSize: Literal["QQVGA", "QVGA", "CIF", "VGA"] | None = None
+    capture: bool | None = None
 
 
 @router.get("/api/device/log")
@@ -87,6 +94,11 @@ def api_device_settings(req: DeviceSettingsUpdate):
         "wakeWord": req.wakeWord,
         "wakeWordRegister": True if req.wakeWordRegister else None,  # False は送らない
         "wakeWordThreshold": req.wakeWordThreshold,
+        "cameraAeLevel": req.cameraAeLevel,
+        "cameraBrightness": req.cameraBrightness,
+        "cameraWarmupFrames": req.cameraWarmupFrames,
+        "cameraJpegQuality": req.cameraJpegQuality,
+        "cameraFrameSize": req.cameraFrameSize,
         "brightness": req.brightness,
         "volume": req.volume,
         "speakerId": req.speakerId,
@@ -167,6 +179,49 @@ async def api_device_wakeword(req: DeviceSettingsUpdate):
 
     publish_device_set(MQTT_DEVICE_ID, **sent)
     return {"ok": True, "sent": sent, "transport": "mqtt"}
+
+
+_CAMERA_FIELDS = (
+    "cameraAeLevel", "cameraBrightness", "cameraWarmupFrames",
+    "cameraJpegQuality", "cameraFrameSize",
+)
+
+
+@router.post("/api/device/camera")
+async def api_device_camera(req: DeviceSettingsUpdate):
+    """カメラの設定を送る。ウェイクワードと同じく HTTP 優先・MQTT 退避。
+
+    露出を変えて試し撮りする、という往復をするので、反映が最大30秒あとになる
+    MQTT だけだと調整にならない。`capture: true` は試し撮りの合図で、
+    デバイスの HTTP でしか受け付けない（MQTT には撮影依頼の capture トピックがある）。
+    """
+    sent = {k: getattr(req, k) for k in _CAMERA_FIELDS}
+    sent = {k: v for k, v in sent.items() if v is not None}
+    shoot = bool(req.capture)
+    if not sent and not shoot:
+        raise HTTPException(status_code=422, detail="送信する設定がありません")
+
+    base = _device_http_base()
+    if base:
+        try:
+            payload = dict(sent)
+            if shoot:
+                payload["capture"] = True
+            async with httpx.AsyncClient(timeout=DEVICE_HTTP_TIMEOUT) as client:
+                res = await client.post(f"{base}/device", json=payload)
+                res.raise_for_status()
+            return {"ok": True, "sent": payload, "transport": "http"}
+        except Exception as e:
+            logger.info("カメラ設定の HTTP 送信に失敗、MQTT に切り替えます: %s", e)
+
+    if shoot and not sent:
+        raise HTTPException(
+            status_code=503,
+            detail="試し撮りはデバイスの HTTP アドレスが必要です（写真ページの「いま撮って」は MQTT で動きます）",
+        )
+    publish_device_set(MQTT_DEVICE_ID, **sent)
+    return {"ok": True, "sent": sent, "transport": "mqtt",
+            "note": "試し撮りは送っていません" if shoot else ""}
 
 
 @router.get("/api/device/metrics")

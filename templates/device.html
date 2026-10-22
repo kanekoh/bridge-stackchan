@@ -72,6 +72,81 @@
   <p id="settingsMsg" class="text-sm"></p>
 </div>
 
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">カメラ</h2>
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6 space-y-4">
+  <p class="text-xs text-gray-400">
+    暗いと感じたら、まず<b>露出（AEレベル）</b>を上げます。明るさ補正は後段の処理なので、
+    上げるとノイズも一緒に持ち上がります。変えたらその場で試し撮りして確かめてください。
+  </p>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <div class="flex items-center justify-between mb-1">
+        <label class="text-xs text-gray-500">露出（AEレベル）<span class="text-gray-400">-2〜2</span></label>
+        <span id="camAeLevelValue" class="text-sm text-gray-600 tabular-nums">—</span>
+      </div>
+      <input id="camAeLevel" type="range" min="-2" max="2" step="1"
+        oninput="document.getElementById('camAeLevelValue').textContent = this.value"
+        onchange="sendCamera({ cameraAeLevel: Number(this.value) })" class="w-full">
+      <p class="text-xs text-gray-400 mt-1">暗いときはここから。いちばん効きます</p>
+    </div>
+
+    <div>
+      <div class="flex items-center justify-between mb-1">
+        <label class="text-xs text-gray-500">明るさ補正<span class="text-gray-400"> -2〜2</span></label>
+        <span id="camBrightnessValue" class="text-sm text-gray-600 tabular-nums">—</span>
+      </div>
+      <input id="camBrightness" type="range" min="-2" max="2" step="1"
+        oninput="document.getElementById('camBrightnessValue').textContent = this.value"
+        onchange="sendCamera({ cameraBrightness: Number(this.value) })" class="w-full">
+      <p class="text-xs text-gray-400 mt-1">ノイズも持ち上がるので、露出の次に</p>
+    </div>
+
+    <div>
+      <div class="flex items-center justify-between mb-1">
+        <label class="text-xs text-gray-500">ウォームアップ枚数<span class="text-gray-400"> 0〜30</span></label>
+        <span id="camWarmupValue" class="text-sm text-gray-600 tabular-nums">—</span>
+      </div>
+      <input id="camWarmup" type="range" min="0" max="30" step="1"
+        oninput="document.getElementById('camWarmupValue').textContent = this.value"
+        onchange="sendCamera({ cameraWarmupFrames: Number(this.value) })" class="w-full">
+      <p class="text-xs text-gray-400 mt-1">明るさが安定するまでの捨て枚数。暗所で色が転ぶなら増やす</p>
+    </div>
+
+    <div>
+      <div class="flex items-center justify-between mb-1">
+        <label class="text-xs text-gray-500">JPEG 画質<span class="text-gray-400"> 10〜100</span></label>
+        <span id="camQualityValue" class="text-sm text-gray-600 tabular-nums">—</span>
+      </div>
+      <input id="camQuality" type="range" min="10" max="100" step="5"
+        oninput="document.getElementById('camQualityValue').textContent = this.value"
+        onchange="sendCamera({ cameraJpegQuality: Number(this.value) })" class="w-full">
+      <p class="text-xs text-gray-400 mt-1">上げるとファイルが大きくなり、送信も遅くなる</p>
+    </div>
+  </div>
+
+  <div>
+    <label class="block text-xs text-gray-500 mb-1">解像度</label>
+    <select id="camFrameSize" onchange="sendCamera({ cameraFrameSize: this.value })"
+      class="w-48 border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400 bg-white">
+      <option value="QQVGA">QQVGA（160×120）</option>
+      <option value="QVGA">QVGA（320×240）</option>
+      <option value="CIF">CIF（352×288）</option>
+      <option value="VGA">VGA（640×480・この機種の上限）</option>
+    </select>
+  </div>
+
+  <div class="flex items-center gap-3 border-t border-gray-100 pt-4">
+    <button onclick="testShot()" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">試し撮り</button>
+    <a href="/ui/captures" class="text-sm text-blue-500 hover:underline">写真を見る</a>
+    <span id="cameraMsg" class="text-sm"></span>
+  </div>
+  <p class="text-xs text-gray-400">
+    試し撮りにはデバイスの HTTP アドレスが必要です（下のウェイクワード欄で設定できます）。
+    未設定のときは写真ページの「いま撮って」（MQTT 経由）を使ってください。
+  </p>
+</div>
+
 <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">ウェイクワード</h2>
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6 space-y-5">
   <p class="text-xs text-gray-400">
@@ -203,6 +278,11 @@ async function loadState() {
       renderWakeWord(d);          // HTTP が未設定でも、ここまでは MQTT で分かる
       pushDistance(d.wakeWordLastDistance);
     }
+    if (d.cameraAeLevel != null) {
+      rows.push(['カメラ 露出 / 明るさ', `${d.cameraAeLevel} / ${d.cameraBrightness ?? '—'}`]);
+      rows.push(['カメラ 解像度 / 画質', `${d.cameraFrameSize ?? '—'} / ${d.cameraJpegQuality ?? '—'}`]);
+      renderCamera(d);
+    }
     el.innerHTML = `
       <div class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
         ${rows.map(([label, value]) => `
@@ -293,6 +373,54 @@ async function restartDevice() {
 }
 
 
+// ── カメラ ──────────────────────────────────────────────────────────────────
+function renderCamera(state) {
+  if (!state) return;
+  const pairs = [
+    ['camAeLevel', 'camAeLevelValue', state.cameraAeLevel],
+    ['camBrightness', 'camBrightnessValue', state.cameraBrightness],
+    ['camWarmup', 'camWarmupValue', state.cameraWarmupFrames],
+    ['camQuality', 'camQualityValue', state.cameraJpegQuality],
+  ];
+  for (const [inputId, labelId, value] of pairs) {
+    if (value == null) continue;
+    document.getElementById(inputId).value = value;
+    document.getElementById(labelId).textContent = value;
+  }
+  if (state.cameraFrameSize) document.getElementById('camFrameSize').value = state.cameraFrameSize;
+}
+
+async function sendCamera(payload) {
+  const msg = document.getElementById('cameraMsg');
+  try {
+    const res = await apiFetch('/api/device/camera', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    msg.textContent = res.transport === 'http'
+      ? '✅ 送信しました'
+      : '✅ 送信しました（MQTT 経由なので反映まで最大30秒）';
+    msg.className = 'text-sm text-green-600';
+    return res;
+  } catch (e) {
+    msg.textContent = '❌ ' + e.message;
+    msg.className = 'text-sm text-red-500';
+    return null;
+  }
+}
+
+async function testShot() {
+  const msg = document.getElementById('cameraMsg');
+  msg.textContent = '撮っています...';
+  msg.className = 'text-sm text-gray-500';
+  const res = await sendCamera({ capture: true });
+  if (res) {
+    msg.innerHTML = '✅ 撮りました（<a href="/ui/captures" class="text-blue-500 hover:underline">写真ページ</a>で確認）';
+    msg.className = 'text-sm text-green-600';
+  }
+}
+
 // ── ウェイクワード ──────────────────────────────────────────────────────────
 // device/state（30秒間隔）では、話すたびに動く距離の追従に間に合わない。
 // 「調整中」の間だけ、デバイス本体の HTTP を Bridge 経由で短い間隔で読む。
@@ -375,6 +503,7 @@ async function pollDevice() {
       return;
     }
     renderWakeWord(d.state);
+    renderCamera(d.state);
     pushDistance(d.state.wakeWordLastDistance);
   } catch (e) {
     document.getElementById('wwMeterMsg').textContent = '取得に失敗: ' + e.message;
@@ -441,7 +570,7 @@ async function loadDeviceUrl() {
   try {
     const d = await apiFetch('/api/device/live');
     if (d.url) document.getElementById('wwDeviceUrl').value = d.url;
-    if (d.available) renderWakeWord(d.state);
+    if (d.available) { renderWakeWord(d.state); renderCamera(d.state); }
   } catch (e) { /* アドレス未設定のときは何も出さない */ }
 }
 
