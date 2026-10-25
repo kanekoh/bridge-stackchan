@@ -120,10 +120,17 @@ def _init_db() -> None:
             name           TEXT NOT NULL UNIQUE,
             slack_user_id  TEXT,
             mac_address    TEXT,
+            gender         TEXT,
             created_at     TEXT NOT NULL,
             updated_at     TEXT NOT NULL
         )
     """)
+    # 性別。関係図のラベルを「父/母」「祖父/祖母」と出し分けるためだけに使う。
+    # 未設定なら「親」「祖父母」と表示する。
+    try:
+        _db_conn.execute("ALTER TABLE family_members ADD COLUMN gender TEXT")
+    except sqlite3.OperationalError:
+        pass  # already exists
     _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS earthquake_log (
             earthquake_id TEXT PRIMARY KEY,
@@ -472,9 +479,11 @@ def _get_display_tz() -> timezone | ZoneInfo:
 def _get_all_family_members() -> list[dict]:
     with _db_lock:
         rows = _db_conn.execute(  # type: ignore[union-attr]
-            "SELECT id, name, slack_user_id, mac_address, created_at, updated_at FROM family_members ORDER BY name",
+            "SELECT id, name, slack_user_id, mac_address, gender, created_at, updated_at"
+            " FROM family_members ORDER BY name",
         ).fetchall()
-    return [{"id": r[0], "name": r[1], "slack_user_id": r[2], "mac_address": r[3], "created_at": r[4], "updated_at": r[5]} for r in rows]
+    return [{"id": r[0], "name": r[1], "slack_user_id": r[2], "mac_address": r[3],
+             "gender": r[4], "created_at": r[5], "updated_at": r[6]} for r in rows]
 
 
 _CONVERSATION_MAX_ROWS = 50000

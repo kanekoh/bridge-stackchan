@@ -105,6 +105,63 @@ def test_delete_relation(db):
     assert _delete_family_relation(rel_id) is False
 
 
+# ── 性別によるラベルの出し分け ───────────────────────────────────────────────
+# 性別は関係図のラベルを「父/母」「祖父/祖母」と出し分けるためだけに持つ。
+# 未設定でも図は成立する（「親」「祖父母」と出る）。
+
+def _set_gender(conn, name, gender):
+    conn.execute("UPDATE family_members SET gender=? WHERE name=?", (gender, name))
+    conn.commit()
+
+
+@pytest.mark.parametrize("gender,expected", [
+    ("male", "父"), ("female", "母"), (None, "親"),
+])
+def test_parent_label_follows_gender(client, db, gender, expected):
+    ids = _ids(db)
+    _set_gender(db, "ひろゆき", gender)
+    _save_family_relation(ids["ひろゆき"], ids["しおり"], "parent")
+    body = client.get("/api/family-relations").json()
+    assert body["relations"][0]["label"] == expected
+
+
+@pytest.mark.parametrize("gender,expected", [
+    ("male", "祖父"), ("female", "祖母"), (None, "祖父母"),
+])
+def test_grandparent_label_follows_gender(client, db, gender, expected):
+    ids = _ids(db)
+    _set_gender(db, "えり", gender)
+    _save_family_relation(ids["えり"], ids["しおり"], "grandparent")
+    body = client.get("/api/family-relations").json()
+    assert body["relations"][0]["label"] == expected
+
+
+def test_undirected_labels_do_not_use_gender(client, db):
+    """夫婦・きょうだい・親戚は、どちらから見ても同じ呼び名。"""
+    ids = _ids(db)
+    _set_gender(db, "ひろゆき", "male")
+    _save_family_relation(ids["ひろゆき"], ids["えり"], "spouse")
+    body = client.get("/api/family-relations").json()
+    assert body["relations"][0]["label"] == "夫婦"
+
+
+def test_member_gender_can_be_set_and_cleared(client, db):
+    res = client.post("/api/family-members", data={"name": "たろう", "gender": "male"})
+    assert res.status_code == 201
+    member_id = res.json()["id"]
+    members = {m["name"]: m for m in client.get("/api/family-members").json()}
+    assert members["たろう"]["gender"] == "male"
+
+    client.put(f"/api/family-members/{member_id}", data={"name": "たろう", "gender": ""})
+    members = {m["name"]: m for m in client.get("/api/family-members").json()}
+    assert members["たろう"]["gender"] is None
+
+
+def test_unknown_gender_is_rejected(client, db):
+    res = client.post("/api/family-members", data={"name": "はなこ", "gender": "その他"})
+    assert res.status_code == 422
+
+
 # ── エンドポイント ───────────────────────────────────────────────────────────
 
 def test_api_returns_members_and_relations(client, db):
@@ -112,7 +169,8 @@ def test_api_returns_members_and_relations(client, db):
     _save_family_relation(ids["ひろゆき"], ids["しおり"], "parent")
     body = client.get("/api/family-relations").json()
     assert {m["name"] for m in body["members"]} == {"ひろゆき", "えり", "しおり"}
-    assert body["relations"][0]["label"] == "親子"
+    # 矢印の上に出る呼び名。性別が未設定なら「親」（設定済みなら「父」「母」）
+    assert body["relations"][0]["label"] == "親"
     assert {t["value"] for t in body["relationTypes"]} == {
         "parent", "grandparent", "spouse", "sibling", "relative"}
 

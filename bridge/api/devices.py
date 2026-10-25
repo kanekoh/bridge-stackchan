@@ -258,19 +258,36 @@ def api_device_metrics(hours: int = Query(default=2, le=24)):
     }
 
 
+# 関係図のラベルを「父/母」「祖父/祖母」と出し分けるためだけに使う。未設定可。
+_GENDERS = ("male", "female")
+
+
+def _normalize_gender(value: str) -> str | None:
+    value = (value or "").strip()
+    if not value:
+        return None
+    if value not in _GENDERS:
+        raise HTTPException(status_code=422, detail=f"gender は {_GENDERS} か空です")
+    return value
+
+
 @router.get("/api/family-members")
 def api_list_members():
     return _get_all_family_members()
 
 
 @router.post("/api/family-members", status_code=201)
-def api_create_member(name: str = Form(...), slack_user_id: str = Form(""), mac_address: str = Form("")):
+def api_create_member(name: str = Form(...), slack_user_id: str = Form(""),
+                      mac_address: str = Form(""), gender: str = Form("")):
     now = datetime.now(_JST).isoformat()
+    gender = _normalize_gender(gender)
     try:
         with _db_lock:
             cur = _db_mod._db_conn.execute(  # type: ignore[union-attr]
-                "INSERT INTO family_members (name, slack_user_id, mac_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                (name.strip(), slack_user_id.strip() or None, mac_address.strip() or None, now, now),
+                "INSERT INTO family_members (name, slack_user_id, mac_address, gender, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (name.strip(), slack_user_id.strip() or None, mac_address.strip() or None,
+                 gender, now, now),
             )
             _db_mod._db_conn.commit()
         return {"id": cur.lastrowid, "name": name}
@@ -279,12 +296,15 @@ def api_create_member(name: str = Form(...), slack_user_id: str = Form(""), mac_
 
 
 @router.put("/api/family-members/{member_id}")
-def api_update_member(member_id: int, name: str = Form(...), slack_user_id: str = Form(""), mac_address: str = Form("")):
+def api_update_member(member_id: int, name: str = Form(...), slack_user_id: str = Form(""),
+                      mac_address: str = Form(""), gender: str = Form("")):
     now = datetime.now(_JST).isoformat()
+    gender = _normalize_gender(gender)
     with _db_lock:
         cur = _db_mod._db_conn.execute(  # type: ignore[union-attr]
-            "UPDATE family_members SET name=?, slack_user_id=?, mac_address=?, updated_at=? WHERE id=?",
-            (name.strip(), slack_user_id.strip() or None, mac_address.strip() or None, now, member_id),
+            "UPDATE family_members SET name=?, slack_user_id=?, mac_address=?, gender=?, updated_at=? WHERE id=?",
+            (name.strip(), slack_user_id.strip() or None, mac_address.strip() or None,
+             gender, now, member_id),
         )
         _db_mod._db_conn.commit()
     if cur.rowcount == 0:
@@ -329,19 +349,36 @@ _RELATION_LABELS = {
 }
 
 
+def _relation_label(relation: str, from_member: dict | None) -> str:
+    """線に出す呼び名。性別が分かっていれば「父」「祖母」まで具体的に書く。
+
+    向きのある関係（親子・祖父母と孫）だけが出し分けの対象で、
+    未設定なら「親」「祖父母」と書く。
+    """
+    gender = (from_member or {}).get("gender")
+    if relation == "parent":
+        return {"male": "父", "female": "母"}.get(gender, "親")
+    if relation == "grandparent":
+        return {"male": "祖父", "female": "祖母"}.get(gender, "祖父母")
+    return _RELATION_LABELS.get(relation, relation)
+
+
 @router.get("/api/family-relations")
 def api_family_relations():
     """関係図の材料（人と線）をまとめて返す。"""
+    members = _get_all_family_members()
+    by_id = {m["id"]: m for m in members}
     return {
-        "members": _get_all_family_members(),
+        "members": members,
         # スタックちゃん自身は家族メンバー表には入れない（人ではないため）。
         # 図のうえでは「家」の中に別の形で置く。
         "device": {"name": "スタックちゃん", "device_id": MQTT_DEVICE_ID},
         "relations": [
-            {**r, "label": _RELATION_LABELS.get(r["relation"], r["relation"])}
+            {**r, "label": _relation_label(r["relation"], by_id.get(r["from_id"]))}
             for r in _fetch_family_relations()
         ],
         "relationTypes": [{"value": k, "label": v} for k, v in _RELATION_LABELS.items()],
+        "genders": [{"value": "male", "label": "男性"}, {"value": "female", "label": "女性"}],
     }
 
 

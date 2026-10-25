@@ -21,6 +21,15 @@
       <label class="block text-xs text-gray-500 mb-1">MAC アドレス</label>
       <input name="mac_address" placeholder="例: aa:bb:cc:dd:ee:ff" class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
     </div>
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">性別</label>
+      <select name="gender" class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400 bg-white">
+        <option value="">未設定</option>
+        <option value="male">男性</option>
+        <option value="female">女性</option>
+      </select>
+      <p class="text-xs text-gray-400 mt-1">家族図のラベルを「父／母」「祖父／祖母」と出し分けるのに使います</p>
+    </div>
     <div class="sm:col-span-3 flex gap-2">
       <button type="submit" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">追加</button>
       <span id="addMsg" class="text-sm self-center"></span>
@@ -36,6 +45,7 @@
         <th class="text-left px-4 py-3 text-gray-600 font-medium">呼び名</th>
         <th class="text-left px-4 py-3 text-gray-600 font-medium">Slack ID</th>
         <th class="text-left px-4 py-3 text-gray-600 font-medium">MAC アドレス</th>
+        <th class="text-left px-4 py-3 text-gray-600 font-medium">性別</th>
         <th class="px-4 py-3"></th>
       </tr>
     </thead>
@@ -68,6 +78,14 @@
         <label class="block text-xs text-gray-500 mb-1">MAC アドレス</label>
         <input name="mac_address" class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400">
       </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">性別</label>
+        <select name="gender" class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-400 bg-white">
+          <option value="">未設定</option>
+          <option value="male">男性</option>
+          <option value="female">女性</option>
+        </select>
+      </div>
       <div class="flex gap-2 mt-1">
         <button type="submit" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">保存</button>
         <button type="button" onclick="closeModal()" class="text-gray-500 hover:text-gray-700 text-sm px-4 py-2">キャンセル</button>
@@ -91,6 +109,7 @@
         <td class="px-4 py-3 font-medium">${esc(m.name)}</td>
         <td class="px-4 py-3 text-gray-500">${esc(m.slack_user_id || '—')}</td>
         <td class="px-4 py-3 text-gray-500">${esc(m.mac_address || '—')}</td>
+        <td class="px-4 py-3 text-gray-500">${({male: '男性', female: '女性'})[m.gender] || '—'}</td>
         <td class="px-4 py-3 text-right">
           <button onclick='openEdit(${JSON.stringify(m)})' class="text-blue-500 hover:text-blue-700 text-xs mr-3">編集</button>
           <button onclick="deleteMember(${m.id}, '${esc(m.name)}')" class="text-red-400 hover:text-red-600 text-xs">削除</button>
@@ -114,6 +133,7 @@
     f.id.value = m.id; f.name.value = m.name;
     f.slack_user_id.value = m.slack_user_id || '';
     f.mac_address.value = m.mac_address || '';
+    f.gender.value = m.gender || '';
     document.getElementById('editMsg').textContent = '';
     document.getElementById('editModal').classList.remove('hidden');
   }
