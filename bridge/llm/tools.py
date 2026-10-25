@@ -188,26 +188,13 @@ _CAPTURE_TOOLS = [
         "type": "function",
         "name": "take_photo",
         "description": (
-            "いまの様子を写真に撮って、自分の目で見る。"
-            "「いま部屋どうなってる？」「洗濯物ある？」「まだ電気ついてる？」など、"
-            "その場を見ないと答えられないことを聞かれたときに使う。"
-            "「写真撮って」と頼まれたときにも使う。"
-            "撮影から確認まで10秒ほどかかるので、呼ぶ前に「ちょっと見てくるね」と"
-            "一言そえるとよい。写真は保存され、あとから見返せる。"
+            "いまの様子を写真に撮って保存する。「写真撮って」「記念に1枚」などと"
+            "頼まれたときに使う。撮るまで10秒ほどかかるので、呼ぶ前に一言そえるとよい。"
+            "**スタックちゃん自身は写真を見られない。** 撮った写真は家の中に保存され、"
+            "家族が管理画面で見る。「いま部屋どうなってる？」のように中身を見ないと"
+            "答えられないことには、この道具では答えられないので、見られないことを正直に伝える。"
         ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "question": {
-                    "type": "string",
-                    "description": (
-                        "写真を見て確かめたいこと（例: 洗濯物は干してある？）。"
-                        "省略すると、写真の様子をそのまま説明する"
-                    ),
-                },
-            },
-            "required": [],
-        },
+        "parameters": {"type": "object", "properties": {}, "required": []},
     },
 ]
 
@@ -539,15 +526,14 @@ async def _tool_recall(args: dict, notify_context: dict) -> dict:
 
 
 async def _tool_take_photo(args: dict) -> dict:
-    """写真を撮って、その場で見る。
+    """写真を撮って保存する。**画像は外部に送らない。**
 
-    依頼（MQTT）→ 撮影 → 送信（HTTP）→ 画像を読む、と往復するため10秒前後かかる。
+    家の中（子どもや来客が写る）の写真を外部の事業者に渡さない、という方針。
+    そのため LLM に画像は渡さず、撮れたかどうかだけを返す。
     撮れなかった理由は分けて返す（電源なのか、撮影の失敗なのか）。
     """
-    from bridge.features.capture import requests as _requests, store as _store, vision
-    from bridge.core.db import _get_capture
+    from bridge.features.capture import requests as _requests
 
-    question = (args.get("question") or "").strip()
     try:
         result = await _requests.request_capture(reason="llm")
     except Exception as e:
@@ -560,26 +546,13 @@ async def _tool_take_photo(args: dict) -> dict:
     if result["status"] != "ok":
         return {"status": "error", "message": "写真が届きませんでした"}
 
-    capture = _get_capture(result["capture"]["id"])
-    if capture is None:
-        return {"status": "error", "message": "撮った写真が見つかりません"}
-
-    try:
-        with open(_store.abs_path(capture), "rb") as f:
-            image = f.read()
-    except OSError as e:
-        return {"status": "error", "message": f"写真を読めません: {e}"}
-
-    text = await vision.describe(
-        image, content_type=capture["content_type"],
-        question=question, capture_id=capture["id"],
-    )
-    logger.info("Function call take_photo: capture=%s question=%s",
-                capture["id"], question or "(なし)")
-    if not text:
-        return {"status": "ok", "photo_id": capture["id"],
-                "message": "写真は撮れましたが、内容を読み取れませんでした"}
-    return {"status": "ok", "photo_id": capture["id"], "seen": text}
+    photo_id = result["capture"]["id"]
+    logger.info("Function call take_photo: capture=%s", photo_id)
+    return {
+        "status": "ok",
+        "photo_id": photo_id,
+        "message": "写真を撮って保存しました（中身は見ていません。管理画面で見られます）",
+    }
 
 
 async def _tool_play_song(args: dict) -> dict:

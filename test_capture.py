@@ -363,40 +363,34 @@ def test_ingest_photo_without_request_id_does_not_notify(client, capture_env, mo
 
 
 # ── take_photo（LLM の道具） ─────────────────────────────────────────────────
+# 撮って保存するだけ。**画像は外部に送らない**（家の中の写真を事業者に渡さない方針、
+# 2026-10-25 決定）。スタックちゃん自身は写真を見られない。
 
 @pytest.fixture
 def photo_tool(monkeypatch, capture_env):
-    """撮影と画像の読み取りを差し替えて、道具の分岐だけを見る。"""
-    from bridge.features.capture import requests as _requests, vision
+    from bridge.features.capture import requests as _requests
     from bridge.llm import tools as _tools
 
-    state = {"capture_result": None, "seen": "机の上にコップがあります。", "describe_args": None}
+    state = {"capture_result": None}
 
     async def _request_capture(**kw):
         return state["capture_result"]
 
-    async def _describe(image, *, content_type="image/jpeg", question="", capture_id=""):
-        state["describe_args"] = {"question": question, "capture_id": capture_id,
-                                  "content_type": content_type, "bytes": len(image)}
-        return state["seen"]
-
     monkeypatch.setattr(_requests, "request_capture", _request_capture)
-    monkeypatch.setattr(vision, "describe", _describe)
     return _tools, state, capture_env
 
 
 @pytest.mark.asyncio
-async def test_take_photo_returns_what_it_saw(photo_tool):
+async def test_take_photo_saves_without_looking(photo_tool):
     tools, state, store = photo_tool
     saved = store.save(_JPEG, retention="temp")
     state["capture_result"] = {"status": "ok", "capture": {"id": saved["id"]}}
 
-    result = await tools._tool_take_photo({"question": "コップある？"})
+    result = await tools._tool_take_photo({})
     assert result["status"] == "ok"
-    assert result["seen"] == "机の上にコップがあります。"
     assert result["photo_id"] == saved["id"]
-    assert state["describe_args"]["question"] == "コップある？"
-    assert state["describe_args"]["bytes"] == len(_JPEG)
+    # 画像の中身にあたるものを LLM に返さない
+    assert "seen" not in result and "caption" not in result and "image" not in result
 
 
 @pytest.mark.asyncio
@@ -419,70 +413,39 @@ async def test_take_photo_reports_missing_photo(photo_tool):
 
 
 @pytest.mark.asyncio
-async def test_take_photo_survives_unreadable_image(photo_tool):
-    """写真は撮れたがファイルが読めない場合も、落ちずに理由を返す。"""
-    tools, state, store = photo_tool
-    saved = store.save(_JPEG, retention="temp")
-    os.remove(store.abs_path(saved))
-    state["capture_result"] = {"status": "ok", "capture": {"id": saved["id"]}}
-    result = await tools._tool_take_photo({})
-    assert result["status"] == "error"
-    assert "読めません" in result["message"]
+async def test_take_photo_has_no_question_parameter():
+    """「写真を見て答える」道具に戻さないこと。見るには外部へ送る必要がある。"""
+    from bridge.llm.tools import _CAPTURE_TOOLS
+
+    take_photo = next(t for t in _CAPTURE_TOOLS if t["name"] == "take_photo")
+    assert take_photo["parameters"]["properties"] == {}
+    assert "見られない" in take_photo["description"]
 
 
-@pytest.mark.asyncio
-async def test_take_photo_without_description_still_succeeds(photo_tool):
-    """画像を読めなくても、撮影自体は成功として扱う（写真は残っている）。"""
-    tools, state, store = photo_tool
-    saved = store.save(_JPEG, retention="temp")
-    state["capture_result"] = {"status": "ok", "capture": {"id": saved["id"]}}
-    state["seen"] = ""
-    result = await tools._tool_take_photo({})
-    assert result["status"] == "ok"
-    assert "seen" not in result
+# ── 写真を外部に送らない ─────────────────────────────────────────────────────
 
+def test_capture_code_does_not_send_images_anywhere():
+    """写真を外部 API に送るコードが入り込んでいないことを機械的に確かめる。
 
-# ── 写真の説明文 ─────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_description_is_saved_only_when_there_is_no_question(capture_env, monkeypatch):
-    """質問への回答は「その場の答え」なので説明文にしない。
-
-    あとから探すための説明（質問なし）だけ caption に保存する。
+    2026-10-25 に vision.py（写真を OpenAI に送って説明させる機能）を削除した。
+    家の中には子どもや来客が写る。撮られた本人の同意なく外部の事業者へ渡さない。
     """
-    from bridge.core.db import _get_capture
-    from bridge.features.capture import vision
-    import bridge.core.http as _http
+    import glob
 
-    class _Resp:
-        def raise_for_status(self): pass
-        def json(self):
-            return {"output": [{"content": [{"type": "output_text", "text": "部屋の写真です。"}]}]}
-
-    class _Client:
-        async def post(self, *a, **kw): return _Resp()
-
-    monkeypatch.setattr(_http, "get_http_client", lambda: _Client())
-    monkeypatch.setattr(vision, "get_http_client", lambda: _Client())
-    monkeypatch.setattr(vision, "OPENAI_API_KEY", "sk-test")
-
-    a = capture_env.save(_JPEG, retention="temp")
-    await vision.describe(_JPEG, capture_id=a["id"])                      # 質問なし
-    assert _get_capture(a["id"])["caption"] == "部屋の写真です。"
-
-    b = capture_env.save(_JPEG, retention="temp")
-    await vision.describe(_JPEG, capture_id=b["id"], question="コップある？")
-    assert _get_capture(b["id"])["caption"] == ""
+    suspicious = ("input_image", "image_url", "b64encode", "base64")
+    for path in glob.glob(os.path.join(os.path.dirname(__file__), "bridge", "features", "capture", "*.py")):
+        with open(path, encoding="utf-8") as f:
+            body = f.read()
+        for word in suspicious:
+            assert word not in body, f"{os.path.basename(path)} に {word} がある（画像を外に送っていないか確認）"
 
 
-@pytest.mark.asyncio
-async def test_description_failure_is_not_fatal(capture_env, monkeypatch):
-    """画像を読めなくても例外にしない（写真の保存は済んでいる）。"""
-    from bridge.features.capture import vision
+def test_take_photo_tool_does_not_read_image_bytes():
+    """道具の実装が画像ファイルを読んでいないこと（読む必要がない＝送らない）。"""
+    import inspect
 
-    class _Client:
-        async def post(self, *a, **kw): raise OSError("timeout")
+    from bridge.llm import tools as _tools
 
-    monkeypatch.setattr(vision, "get_http_client", lambda: _Client())
-    monkeypatch.setattr(vision, "OPENAI_API_KEY", "sk-test")
-    assert await vision.describe(_JPEG, capture_id="x") == ""
+    source = inspect.getsource(_tools._tool_take_photo)
+    assert "open(" not in source
+    assert "b64" not in source and "image" not in source.replace("take_photo", "")
