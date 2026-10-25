@@ -41,7 +41,7 @@ from bridge.llm.backends import (
 from bridge.llm.tools import (
     _TIMER_TOOLS, _CALENDAR_TOOLS, _MESSAGE_TOOLS, _ALERT_TOOLS, _WEATHER_TOOLS,
     _MEMORY_TOOLS,
-    _SONG_TOOLS,
+    _SONG_TOOLS, _CAPTURE_TOOLS,
     _REQUEST_WEB_SEARCH_TOOL,
     _tool_get_weather, _tool_get_upcoming_items, _tool_get_recent_alerts,
     _execute_tool, _handle_function_calls,

@@ -179,6 +179,7 @@ class OpenClawResponsesBackend:
         _ALERT_TOOLS = getattr(main_mod, "_ALERT_TOOLS", [])
         _MEMORY_TOOLS = getattr(main_mod, "_MEMORY_TOOLS", [])
         _SONG_TOOLS = getattr(main_mod, "_SONG_TOOLS", [])
+        _CAPTURE_TOOLS = getattr(main_mod, "_CAPTURE_TOOLS", [])
 
         OPENCLAW_BASE_URL = _cfg_val("OPENCLAW_BASE_URL")
         OPENCLAW_GATEWAY_TOKEN = _cfg_val("OPENCLAW_GATEWAY_TOKEN")
@@ -228,6 +229,8 @@ class OpenClawResponsesBackend:
             tools.extend(_MEMORY_TOOLS)
         if use_functions:
             tools.extend(_SONG_TOOLS)
+        if use_functions:
+            tools.extend(_CAPTURE_TOOLS)
         if use_functions and P2PQUAKE_ENABLED:
             tools.extend(_ALERT_TOOLS)
 
@@ -293,6 +296,7 @@ class OpenAIResponsesBackend:
         _ALERT_TOOLS = getattr(main_mod, "_ALERT_TOOLS", [])
         _MEMORY_TOOLS = getattr(main_mod, "_MEMORY_TOOLS", [])
         _SONG_TOOLS = getattr(main_mod, "_SONG_TOOLS", [])
+        _CAPTURE_TOOLS = getattr(main_mod, "_CAPTURE_TOOLS", [])
         _REQUEST_WEB_SEARCH_TOOL = getattr(main_mod, "_REQUEST_WEB_SEARCH_TOOL", None)
 
         OPENAI_RESPONSES_BASE_URL = _cfg_val("OPENAI_RESPONSES_BASE_URL")
@@ -359,6 +363,8 @@ class OpenAIResponsesBackend:
             tools.extend(_MEMORY_TOOLS)
         if use_functions and not DISABLE_TOOLS:
             tools.extend(_SONG_TOOLS)
+        if use_functions and not DISABLE_TOOLS:
+            tools.extend(_CAPTURE_TOOLS)
         if use_functions and P2PQUAKE_ENABLED and not DISABLE_TOOLS:
             tools.extend(_ALERT_TOOLS)
         # use_functions=False は「道具なしで一言返す」意味なので Web 検索も付けない。

@@ -183,6 +183,34 @@ _MEMORY_TOOLS = [
 # ON_DEMAND モード時のみ Pass 1 のツール一覧に追加される。
 # LLM がこれを呼ぶと notify_context に enable_web_search フラグが立ち、
 # 次のループで本物の web_search_preview に差し替えられる。
+_CAPTURE_TOOLS = [
+    {
+        "type": "function",
+        "name": "take_photo",
+        "description": (
+            "いまの様子を写真に撮って、自分の目で見る。"
+            "「いま部屋どうなってる？」「洗濯物ある？」「まだ電気ついてる？」など、"
+            "その場を見ないと答えられないことを聞かれたときに使う。"
+            "「写真撮って」と頼まれたときにも使う。"
+            "撮影から確認まで10秒ほどかかるので、呼ぶ前に「ちょっと見てくるね」と"
+            "一言そえるとよい。写真は保存され、あとから見返せる。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "写真を見て確かめたいこと（例: 洗濯物は干してある？）。"
+                        "省略すると、写真の様子をそのまま説明する"
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+]
+
 _SONG_TOOLS = [
     {
         "type": "function",
@@ -510,6 +538,50 @@ async def _tool_recall(args: dict, notify_context: dict) -> dict:
     }
 
 
+async def _tool_take_photo(args: dict) -> dict:
+    """写真を撮って、その場で見る。
+
+    依頼（MQTT）→ 撮影 → 送信（HTTP）→ 画像を読む、と往復するため10秒前後かかる。
+    撮れなかった理由は分けて返す（電源なのか、撮影の失敗なのか）。
+    """
+    from bridge.features.capture import requests as _requests, store as _store, vision
+    from bridge.core.db import _get_capture
+
+    question = (args.get("question") or "").strip()
+    try:
+        result = await _requests.request_capture(reason="llm")
+    except Exception as e:
+        logger.error("Function call take_photo failed: %s: %s", type(e).__name__, e)
+        return {"status": "error", "message": f"写真を撮れませんでした: {e}"}
+
+    if result["status"] == "no_ack":
+        return {"status": "error",
+                "message": "スタックちゃんが応答しませんでした（電源か通信の問題かもしれません）"}
+    if result["status"] != "ok":
+        return {"status": "error", "message": "写真が届きませんでした"}
+
+    capture = _get_capture(result["capture"]["id"])
+    if capture is None:
+        return {"status": "error", "message": "撮った写真が見つかりません"}
+
+    try:
+        with open(_store.abs_path(capture), "rb") as f:
+            image = f.read()
+    except OSError as e:
+        return {"status": "error", "message": f"写真を読めません: {e}"}
+
+    text = await vision.describe(
+        image, content_type=capture["content_type"],
+        question=question, capture_id=capture["id"],
+    )
+    logger.info("Function call take_photo: capture=%s question=%s",
+                capture["id"], question or "(なし)")
+    if not text:
+        return {"status": "ok", "photo_id": capture["id"],
+                "message": "写真は撮れましたが、内容を読み取れませんでした"}
+    return {"status": "ok", "photo_id": capture["id"], "seen": text}
+
+
 async def _tool_play_song(args: dict) -> dict:
     """歌を鳴らす。本人が頼んだ／焦っている場面なので、深夜帯でも応じる。
 
@@ -660,6 +732,8 @@ async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
             "message": "Web検索が有効になりました。次のターンで検索を実行して回答してください。",
             "query": query,
         }
+    if name == "take_photo":
+        return await _tool_take_photo(args)
     if name == "play_song":
         return await _tool_play_song(args)
     if name == "list_songs":
