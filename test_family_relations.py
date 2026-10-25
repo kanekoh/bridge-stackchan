@@ -162,6 +162,23 @@ def test_unknown_gender_is_rejected(client, db):
     assert res.status_code == 422
 
 
+def test_parent_label_is_about_the_from_side(client, db):
+    """ラベルは「from から見た呼び名」。向きを逆に入れると意味が変わる。
+
+    実際に「しおり → えり parent」と逆向きに登録され、しおり（女性）の性別で
+    「母」と出る取り違えが起きた（2026-10-25）。入力欄の見出しを
+    「親はだれ／子はだれ」に変えたのはこのため。
+    """
+    ids = _ids(db)
+    _set_gender(db, "ひろゆき", "male")
+    _set_gender(db, "しおり", "female")
+
+    _save_family_relation(ids["ひろゆき"], ids["しおり"], "parent")   # 正しい向き
+    _save_family_relation(ids["しおり"], ids["ひろゆき"], "parent")   # 逆向き
+    labels = [r["label"] for r in client.get("/api/family-relations").json()["relations"]]
+    assert labels == ["父", "母"]
+
+
 # ── エンドポイント ───────────────────────────────────────────────────────────
 
 def test_api_returns_members_and_relations(client, db):

@@ -24,20 +24,23 @@
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
   <div class="flex flex-wrap items-end gap-3">
     <div>
-      <label class="block text-xs text-gray-500 mb-1">だれ</label>
-      <select id="fromId" class="border border-gray-300 rounded px-3 py-2 text-sm bg-white"></select>
+      <label id="fromLabel" class="block text-xs text-gray-500 mb-1">だれ</label>
+      <select id="fromId" onchange="updateHint()" class="border border-gray-300 rounded px-3 py-2 text-sm bg-white"></select>
     </div>
     <div>
       <label class="block text-xs text-gray-500 mb-1">関係</label>
       <select id="relation" onchange="updateHint()" class="border border-gray-300 rounded px-3 py-2 text-sm bg-white"></select>
     </div>
     <div>
-      <label class="block text-xs text-gray-500 mb-1">だれ</label>
-      <select id="toId" class="border border-gray-300 rounded px-3 py-2 text-sm bg-white"></select>
+      <label id="toLabel" class="block text-xs text-gray-500 mb-1">だれ</label>
+      <select id="toId" onchange="updateHint()" class="border border-gray-300 rounded px-3 py-2 text-sm bg-white"></select>
     </div>
+    <button onclick="swapSides()" title="左右を入れ替える"
+      class="border border-gray-300 text-gray-600 hover:bg-gray-50 text-sm px-3 py-2 rounded">⇄ 入れ替え</button>
     <button onclick="addRelation()" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">追加</button>
   </div>
-  <p id="hint" class="text-xs text-gray-400 mt-2"></p>
+  <p id="preview" class="text-sm text-gray-700 mt-3"></p>
+  <p id="hint" class="text-xs text-gray-400 mt-1"></p>
   <p id="formMsg" class="text-sm mt-2"></p>
 </div>
 
@@ -57,16 +60,52 @@
 
   function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+  // 入力欄の見出しと、確認用の一文を関係に合わせて出し分ける。
+  // 「だれ・関係・だれ」だけでは、どちらが親か分からず逆向きに登録しやすい。
+  const SIDES = {
+    parent:      { from: '親はだれ', to: '子はだれ' },
+    grandparent: { from: '祖父母はだれ', to: '孫はだれ' },
+    spouse:      { from: 'だれ', to: 'だれ' },
+    sibling:     { from: 'だれ', to: 'だれ' },
+    relative:    { from: 'だれ', to: 'だれ' },
+  };
+  const HINTS = {
+    parent: '向きがあります。「◯◯が△△の父（母）」という意味になります。',
+    grandparent: '向きがあります。「◯◯が△△の祖父（祖母）」という意味になります。',
+    spouse: '向きはありません。どちらを先に選んでも同じです。',
+    sibling: '向きはありません。どちらを先に選んでも同じです。',
+    relative: '向きはありません。おじ・おば・いとこなど、上の4つに当てはまらない家族に使います。',
+  };
+
+  function labelFor(relation, member) {
+    const gender = member && member.gender;
+    if (relation === 'parent') return { male: '父', female: '母' }[gender] || '親';
+    if (relation === 'grandparent') return { male: '祖父', female: '祖母' }[gender] || '祖父母';
+    return (_data.relationTypes.find(t => t.value === relation) || {}).label || relation;
+  }
+
   function updateHint() {
     const rel = document.getElementById('relation').value;
-    const hints = {
-      parent: '向きがあります。左が親、右が子です。',
-      grandparent: '向きがあります。左が祖父母、右が孫です。',
-      spouse: '向きはありません。どちらを先に選んでも同じです。',
-      sibling: '向きはありません。どちらを先に選んでも同じです。',
-      relative: '向きはありません。おじ・おば・いとこなど、上の4つに当てはまらない家族に使います。',
-    };
-    document.getElementById('hint').textContent = hints[rel] || '';
+    const sides = SIDES[rel] || { from: 'だれ', to: 'だれ' };
+    document.getElementById('fromLabel').textContent = sides.from;
+    document.getElementById('toLabel').textContent = sides.to;
+    document.getElementById('hint').textContent = HINTS[rel] || '';
+
+    // 保存する前に、できあがる関係を日本語で見せる（逆向きの登録を防ぐ）
+    const from = _data.members.find(m => String(m.id) === document.getElementById('fromId').value);
+    const to = _data.members.find(m => String(m.id) === document.getElementById('toId').value);
+    const preview = document.getElementById('preview');
+    if (!from || !to) { preview.textContent = ''; return; }
+    const label = labelFor(rel, from);
+    preview.innerHTML = ['parent', 'grandparent'].includes(rel)
+      ? `<b>${esc(from.name)}</b> が <b>${esc(to.name)}</b> の <b>${esc(label)}</b> になります`
+      : `<b>${esc(from.name)}</b> と <b>${esc(to.name)}</b> が <b>${esc(label)}</b> になります`;
+  }
+
+  function swapSides() {
+    const a = document.getElementById('fromId'), b = document.getElementById('toId');
+    [a.value, b.value] = [b.value, a.value];
+    updateHint();
   }
 
   function renderGraph() {
@@ -133,10 +172,9 @@
     empty.classList.add('hidden');
     tbody.innerHTML = _data.relations.map(r => `
       <tr class="border-b border-gray-50">
-        <td class="py-2 px-4">${esc(r.from_name)}
-          <span class="text-gray-400 mx-2">${['parent','grandparent'].includes(r.relation) ? '→' : '—'}</span>
-          ${esc(r.to_name)}</td>
-        <td class="py-2 px-4 text-gray-500">${esc(r.label)}</td>
+        <td class="py-2 px-4">${['parent','grandparent'].includes(r.relation)
+          ? `${esc(r.from_name)} <span class="text-gray-400">が</span> ${esc(r.to_name)} <span class="text-gray-400">の</span> <b>${esc(r.label)}</b>`
+          : `${esc(r.from_name)} <span class="text-gray-400">と</span> ${esc(r.to_name)} <span class="text-gray-400">が</span> <b>${esc(r.label)}</b>`}</td>
         <td class="py-2 px-4 text-right">
           <button onclick="removeRelation(${r.id})" class="text-xs text-red-500 hover:text-red-700">削除</button>
         </td>
