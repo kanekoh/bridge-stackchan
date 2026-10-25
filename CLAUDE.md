@@ -33,6 +33,7 @@ pytest test_device_wakeword.py      # ウェイクワード操作（HTTP優先�
 pytest test_iss.py                  # ISS の軌道暦の解析・座標変換・通過探索
 pytest test_ui_maps.py              # 地図タイルが鍵なしで使える配信元か
 pytest test_speaker_id.py           # 話者識別スコアの記録・集計
+pytest test_family_relations.py     # 家族の関係（親子の向き・夫婦の正規化）
 pytest -k "test_parse_expression"   # 単一テスト
 
 # 起動中サービスへの E2E インターフェーステスト
@@ -51,7 +52,7 @@ python calendar_sync.py --auth --key shiori
 - `calendar_sync.py` — Google Calendar / Tasks の同期ロジック（スレッドで実行）
 - `config/expression_map.yaml` — 感情ラベル → VOICEVOX 話者ID + Stack-chan 表情名のマッピング
 - `config/songs/*.yaml` — 歌の楽譜（歌詞・音名・拍数・BPM・移調）
-- `data/bridge.db` — SQLite DB（llm_sessions / items / notification_log / calendar_sources / gate_log / song_play_log / song_trigger_overrides / captures / speaker_id_log）
+- `data/bridge.db` — SQLite DB（llm_sessions / items / notification_log / calendar_sources / gate_log / song_play_log / song_trigger_overrides / captures / speaker_id_log / family_relations）
 - `data/songs/*.mp3` — 事前生成した歌（`/songs` で配信。キャッシュなので消してよい）
 - `data/captures/YYYY-MM/*.jpg` — Stack-chan が撮った写真（**記憶に昇格したものは消してはいけない**）
 - `data/iss/ISS_OEM.txt` — NASA の ISS 軌道暦（15日分）。取得先が落ちている間はこれで通知を続ける

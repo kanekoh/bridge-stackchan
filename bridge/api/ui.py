@@ -38,6 +38,11 @@ async def ui_members(request: Request):
     return _templates.TemplateResponse(request=request, name="members.html", context=_ui_context(request))
 
 
+@router.get("/ui/family", response_class=HTMLResponse)
+async def ui_family(request: Request):
+    return _templates.TemplateResponse(request=request, name="family.html", context=_ui_context(request))
+
+
 @router.get("/ui/messages", response_class=HTMLResponse)
 async def ui_messages(request: Request):
     return _templates.TemplateResponse(request=request, name="messages.html", context=_ui_context(request))

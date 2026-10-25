@@ -11,7 +11,10 @@ from pydantic import BaseModel, Field
 
 from bridge.config import DEVICE_HTTP_TIMEOUT, DEVICE_HTTP_URL, MQTT_DEVICE_ID, _JST
 import bridge.core.db as _db_mod
-from bridge.core.db import _db_lock, _get_setting, _get_display_tz, _get_all_family_members
+from bridge.core.db import (
+    _db_lock, _get_setting, _get_display_tz, _get_all_family_members,
+    _delete_family_relation, _fetch_family_relations, _save_family_relation,
+)
 from bridge.devices.mqtt import get_device_state, publish_device_set
 
 logger = logging.getLogger(__name__)
@@ -311,3 +314,44 @@ def api_delete_member(member_id: int):
         _db_mod._db_conn.commit()
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="メンバーが見つかりません")
+
+
+# ── 家族の関係図 ─────────────────────────────────────────────────────────────
+# 家族に閉じる。友達やよその家の子は入れない（撮られる側・書かれる側の同意が
+# 取れないため、2026-10-25 に方針として決めた）。
+
+_RELATION_LABELS = {"parent": "親子", "spouse": "夫婦", "sibling": "きょうだい"}
+
+
+@router.get("/api/family-relations")
+def api_family_relations():
+    """関係図の材料（人と線）をまとめて返す。"""
+    return {
+        "members": _get_all_family_members(),
+        "relations": [
+            {**r, "label": _RELATION_LABELS.get(r["relation"], r["relation"])}
+            for r in _fetch_family_relations()
+        ],
+        "relationTypes": [{"value": k, "label": v} for k, v in _RELATION_LABELS.items()],
+    }
+
+
+@router.post("/api/family-relations", status_code=201)
+def api_create_family_relation(
+    from_id: int = Form(...), to_id: int = Form(...), relation: str = Form(...),
+):
+    try:
+        new_id = _save_family_relation(from_id, to_id, relation)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=404, detail="その家族メンバーはいません")
+    if new_id is None:
+        raise HTTPException(status_code=409, detail="同じ関係がすでに登録されています")
+    return {"id": new_id}
+
+
+@router.delete("/api/family-relations/{relation_id}", status_code=204)
+def api_delete_family_relation(relation_id: int):
+    if not _delete_family_relation(relation_id):
+        raise HTTPException(status_code=404, detail="その関係はありません")

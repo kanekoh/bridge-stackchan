@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}家族図{% endblock %}
+{% block nav_family %}font-semibold text-blue-600{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/cytoscape@3/dist/cytoscape.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<h1 class="text-xl font-bold text-gray-800 mb-2">家族図</h1>
+<p class="text-sm text-gray-500 mb-6">
+  家族メンバーどうしの関係を図にします。
+  <span class="text-gray-400">家族だけを登録します。友達やよその家の子は入れません。</span>
+</p>
+
+<div class="bg-white rounded-lg border border-gray-200 mb-6">
+  <div id="graph" style="height: 420px;"></div>
+  <p id="graphEmpty" class="text-center text-gray-400 py-12 hidden">
+    まだ関係が登録されていません。下のフォームから追加してください。
+  </p>
+</div>
+
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">関係を追加</h2>
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+  <div class="flex flex-wrap items-end gap-3">
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">だれ</label>
+      <select id="fromId" class="border border-gray-300 rounded px-3 py-2 text-sm bg-white"></select>
+    </div>
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">関係</label>
+      <select id="relation" onchange="updateHint()" class="border border-gray-300 rounded px-3 py-2 text-sm bg-white"></select>
+    </div>
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">だれ</label>
+      <select id="toId" class="border border-gray-300 rounded px-3 py-2 text-sm bg-white"></select>
+    </div>
+    <button onclick="addRelation()" class="bg-blue-500 hover:bg-blue-600 text-white text-sm px-4 py-2 rounded">追加</button>
+  </div>
+  <p id="hint" class="text-xs text-gray-400 mt-2"></p>
+  <p id="formMsg" class="text-sm mt-2"></p>
+</div>
+
+<h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-2">登録した関係</h2>
+<div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+  <table class="w-full text-sm">
+    <tbody id="relationRows"></tbody>
+  </table>
+  <p id="listEmpty" class="text-center text-gray-400 py-8 hidden">まだありません</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let _cy = null;
+  let _data = { members: [], relations: [], relationTypes: [] };
+
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  function updateHint() {
+    const rel = document.getElementById('relation').value;
+    document.getElementById('hint').textContent = rel === 'parent'
+      ? '親子は向きがあります。左が親、右が子です。'
+      : '向きはありません。どちらを先に選んでも同じです。';
+  }
+
+  function renderGraph() {
+    const empty = document.getElementById('graphEmpty');
+    if (!_data.relations.length) {
+      empty.classList.remove('hidden');
+      document.getElementById('graph').style.height = '0';
+      if (_cy) { _cy.destroy(); _cy = null; }
+      return;
+    }
+    empty.classList.add('hidden');
+    document.getElementById('graph').style.height = '420px';
+
+    // 線が付いている人だけを描く（登録しただけで関係の無い人を並べない）
+    const used = new Set();
+    _data.relations.forEach(r => { used.add(r.from_id); used.add(r.to_id); });
+    const elements = [
+      ..._data.members.filter(m => used.has(m.id))
+        .map(m => ({ data: { id: 'm' + m.id, label: m.name } })),
+      ..._data.relations.map(r => ({ data: {
+        id: 'r' + r.id, source: 'm' + r.from_id, target: 'm' + r.to_id,
+        label: r.label, kind: r.relation,
+      } })),
+    ];
+
+    if (_cy) _cy.destroy();
+    _cy = cytoscape({
+      container: document.getElementById('graph'),
+      elements,
+      style: [
+        { selector: 'node', style: {
+          'background-color': '#3b82f6', 'label': 'data(label)',
+          'color': '#1f2937', 'font-size': 13, 'text-valign': 'bottom',
+          'text-margin-y': 6, 'width': 36, 'height': 36,
+        } },
+        { selector: 'edge', style: {
+          'width': 2, 'line-color': '#cbd5e1', 'label': 'data(label)',
+          'font-size': 10, 'color': '#94a3b8', 'curve-style': 'bezier',
+          'text-background-color': '#fff', 'text-background-opacity': 1,
+          'text-background-padding': 2,
+        } },
+        // 親子は向きが意味を持つので矢印を出す。夫婦・きょうだいは出さない
+        { selector: 'edge[kind = "parent"]', style: {
+          'target-arrow-shape': 'triangle', 'target-arrow-color': '#cbd5e1',
+          'line-color': '#94a3b8',
+        } },
+        { selector: 'edge[kind = "spouse"]', style: { 'line-color': '#f9a8d4', 'line-style': 'solid' } },
+        { selector: 'edge[kind = "sibling"]', style: { 'line-style': 'dashed' } },
+      ],
+      layout: { name: 'cose', animate: false, padding: 40, nodeRepulsion: 9000 },
+      minZoom: 0.4, maxZoom: 2.5,
+    });
+  }
+
+  function renderList() {
+    const tbody = document.getElementById('relationRows');
+    const empty = document.getElementById('listEmpty');
+    if (!_data.relations.length) { tbody.innerHTML = ''; empty.classList.remove('hidden'); return; }
+    empty.classList.add('hidden');
+    tbody.innerHTML = _data.relations.map(r => `
+      <tr class="border-b border-gray-50">
+        <td class="py-2 px-4">${esc(r.from_name)}
+          <span class="text-gray-400 mx-2">${r.relation === 'parent' ? '→' : '—'}</span>
+          ${esc(r.to_name)}</td>
+        <td class="py-2 px-4 text-gray-500">${esc(r.label)}</td>
+        <td class="py-2 px-4 text-right">
+          <button onclick="removeRelation(${r.id})" class="text-xs text-red-500 hover:text-red-700">削除</button>
+        </td>
+      </tr>`).join('');
+  }
+
+  function renderForm() {
+    const options = _data.members.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('');
+    document.getElementById('fromId').innerHTML = options;
+    document.getElementById('toId').innerHTML = options;
+    document.getElementById('relation').innerHTML = _data.relationTypes
+      .map(t => `<option value="${esc(t.value)}">${esc(t.label)}</option>`).join('');
+    updateHint();
+  }
+
+  async function addRelation() {
+    const msg = document.getElementById('formMsg');
+    const body = new FormData();
+    body.append('from_id', document.getElementById('fromId').value);
+    body.append('to_id', document.getElementById('toId').value);
+    body.append('relation', document.getElementById('relation').value);
+    try {
+      await apiFetch('/api/family-relations', { method: 'POST', body });
+      msg.textContent = '✅ 追加しました';
+      msg.className = 'text-sm text-green-600 mt-2';
+      load();
+    } catch (e) {
+      msg.textContent = '❌ ' + e.message;
+      msg.className = 'text-sm text-red-500 mt-2';
+    }
+  }
+
+  async function removeRelation(id) {
+    await apiFetch('/api/family-relations/' + id, { method: 'DELETE' });
+    load();
+  }
+
+  async function load() {
+    _data = await apiFetch('/api/family-relations');
+    renderForm();
+    renderGraph();
+    renderList();
+  }
+
+  load();
+</script>
+{% endblock %}

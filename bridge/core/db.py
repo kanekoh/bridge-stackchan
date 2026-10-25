@@ -360,6 +360,18 @@ def _init_db() -> None:
             updated_at     TEXT NOT NULL
         )
     """)
+    # 家族の関係（親子・夫婦・きょうだい）。関係図の表示にだけ使う。
+    # 家族に閉じる。友達やよその家の子は入れない（本人の同意が取れないため）。
+    _db_conn.execute("""
+        CREATE TABLE IF NOT EXISTS family_relations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_id     INTEGER NOT NULL,
+            to_id       INTEGER NOT NULL,
+            relation    TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            UNIQUE(from_id, to_id, relation)
+        )
+    """)
     # 話者識別の記録。しきい値を決め直すための材料で、判定自体には使わない。
     # スコアはこれまでログに出すだけで捨てていたため、「0.75 が妥当か」を
     # 後から検討できなかった。2位との差（margin）も残す。
@@ -1225,5 +1237,54 @@ def _set_speaker_id_actual(log_id: int, actual_speaker: str | None) -> bool:
             "UPDATE speaker_id_log SET actual_speaker = ? WHERE id = ?",
             (actual_speaker, log_id),
         )
+        _db_conn.commit()  # type: ignore[union-attr]
+    return cur.rowcount > 0
+
+
+# ─── 家族の関係 ──────────────────────────────────────────────────────────────
+
+# relation の向き: parent は from が親で to が子。spouse と sibling は向きなし
+# （同じ組を二重に持たないよう、保存時に id の小さい方を from にそろえる）。
+_RELATIONS = ("parent", "spouse", "sibling")
+
+
+def _fetch_family_relations() -> list[dict]:
+    with _db_lock:
+        rows = _db_conn.execute(  # type: ignore[union-attr]
+            "SELECT r.id, r.from_id, r.to_id, r.relation, a.name, b.name"
+            " FROM family_relations r"
+            " JOIN family_members a ON a.id = r.from_id"
+            " JOIN family_members b ON b.id = r.to_id"
+            " ORDER BY r.id"
+        ).fetchall()
+    return [
+        {"id": r[0], "from_id": r[1], "to_id": r[2], "relation": r[3],
+         "from_name": r[4], "to_name": r[5]}
+        for r in rows
+    ]
+
+
+def _save_family_relation(from_id: int, to_id: int, relation: str) -> int | None:
+    """関係を1件足す。すでに同じものがあれば None を返す。"""
+    if relation not in _RELATIONS:
+        raise ValueError(f"relation は {_RELATIONS} のいずれかです: {relation!r}")
+    if from_id == to_id:
+        raise ValueError("同じ人どうしの関係は作れません")
+    if relation in ("spouse", "sibling") and from_id > to_id:
+        from_id, to_id = to_id, from_id      # 向きなしの関係は順序をそろえる
+    with _db_lock:
+        cur = _db_conn.execute(  # type: ignore[union-attr]
+            "INSERT OR IGNORE INTO family_relations (from_id, to_id, relation, created_at)"
+            " VALUES (?,?,?,?)",
+            (from_id, to_id, relation, datetime.now(_JST).isoformat()),
+        )
+        _db_conn.commit()  # type: ignore[union-attr]
+    return cur.lastrowid if cur.rowcount else None
+
+
+def _delete_family_relation(relation_id: int) -> bool:
+    with _db_lock:
+        cur = _db_conn.execute(  # type: ignore[union-attr]
+            "DELETE FROM family_relations WHERE id = ?", (relation_id,))
         _db_conn.commit()  # type: ignore[union-attr]
     return cur.rowcount > 0
