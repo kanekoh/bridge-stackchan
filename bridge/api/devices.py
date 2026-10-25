@@ -370,9 +370,6 @@ def api_family_relations():
     by_id = {m["id"]: m for m in members}
     return {
         "members": members,
-        # スタックちゃん自身は家族メンバー表には入れない（人ではないため）。
-        # 図のうえでは「家」の中に別の形で置く。
-        "device": {"name": "スタックちゃん", "device_id": MQTT_DEVICE_ID},
         "relations": [
             {**r, "label": _relation_label(r["relation"], by_id.get(r["from_id"]))}
             for r in _fetch_family_relations()

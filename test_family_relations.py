@@ -175,16 +175,6 @@ def test_api_returns_members_and_relations(client, db):
         "parent", "grandparent", "spouse", "sibling", "relative"}
 
 
-def test_device_is_not_a_family_member(client, db):
-    """スタックちゃんは人ではないので family_members に入れない。
-
-    図のうえでは「家」の中に別の形で置くため、API は名前だけ別に返す。
-    """
-    body = client.get("/api/family-relations").json()
-    assert body["device"]["name"] == "スタックちゃん"
-    assert all(m["name"] != "スタックちゃん" for m in body["members"])
-
-
 @pytest.mark.parametrize("relation", ["grandparent", "relative"])
 def test_added_relation_types_are_accepted(client, db, relation):
     ids = _ids(db)
