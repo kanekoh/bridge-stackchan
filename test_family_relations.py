@@ -113,7 +113,41 @@ def test_api_returns_members_and_relations(client, db):
     body = client.get("/api/family-relations").json()
     assert {m["name"] for m in body["members"]} == {"ひろゆき", "えり", "しおり"}
     assert body["relations"][0]["label"] == "親子"
-    assert {t["value"] for t in body["relationTypes"]} == {"parent", "spouse", "sibling"}
+    assert {t["value"] for t in body["relationTypes"]} == {
+        "parent", "grandparent", "spouse", "sibling", "relative"}
+
+
+def test_device_is_not_a_family_member(client, db):
+    """スタックちゃんは人ではないので family_members に入れない。
+
+    図のうえでは「家」の中に別の形で置くため、API は名前だけ別に返す。
+    """
+    body = client.get("/api/family-relations").json()
+    assert body["device"]["name"] == "スタックちゃん"
+    assert all(m["name"] != "スタックちゃん" for m in body["members"])
+
+
+@pytest.mark.parametrize("relation", ["grandparent", "relative"])
+def test_added_relation_types_are_accepted(client, db, relation):
+    ids = _ids(db)
+    res = client.post("/api/family-relations",
+                      data={"from_id": ids["ひろゆき"], "to_id": ids["しおり"], "relation": relation})
+    assert res.status_code == 201
+
+
+def test_grandparent_keeps_its_direction(db):
+    """祖父母→孫は向きが意味を持つ。逆向きは別の行。"""
+    ids = _ids(db)
+    _save_family_relation(ids["ひろゆき"], ids["しおり"], "grandparent")
+    assert _save_family_relation(ids["しおり"], ids["ひろゆき"], "grandparent") is not None
+    assert _fetch_family_relations()[0]["from_name"] == "ひろゆき"
+
+
+def test_relative_order_is_normalized(db):
+    """親戚に向きは無い。逆順で入れても同じ1件。"""
+    ids = _ids(db)
+    assert _save_family_relation(ids["えり"], ids["ひろゆき"], "relative") is not None
+    assert _save_family_relation(ids["ひろゆき"], ids["えり"], "relative") is None
 
 
 def test_api_create_and_delete(client, db):

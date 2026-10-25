@@ -320,7 +320,13 @@ def api_delete_member(member_id: int):
 # 家族に閉じる。友達やよその家の子は入れない（撮られる側・書かれる側の同意が
 # 取れないため、2026-10-25 に方針として決めた）。
 
-_RELATION_LABELS = {"parent": "親子", "spouse": "夫婦", "sibling": "きょうだい"}
+_RELATION_LABELS = {
+    "parent": "親子",
+    "grandparent": "祖父母と孫",
+    "spouse": "夫婦",
+    "sibling": "きょうだい",
+    "relative": "親戚",
+}
 
 
 @router.get("/api/family-relations")
@@ -328,6 +334,9 @@ def api_family_relations():
     """関係図の材料（人と線）をまとめて返す。"""
     return {
         "members": _get_all_family_members(),
+        # スタックちゃん自身は家族メンバー表には入れない（人ではないため）。
+        # 図のうえでは「家」の中に別の形で置く。
+        "device": {"name": "スタックちゃん", "device_id": MQTT_DEVICE_ID},
         "relations": [
             {**r, "label": _RELATION_LABELS.get(r["relation"], r["relation"])}
             for r in _fetch_family_relations()

@@ -11,12 +11,13 @@
 <p class="text-sm text-gray-500 mb-6">
   家族メンバーどうしの関係を図にします。
   <span class="text-gray-400">家族だけを登録します。友達やよその家の子は入れません。</span>
+  <br>スタックちゃんは人ではないので関係の線は引かず、同じ「家」の中に四角で置いています。
 </p>
 
 <div class="bg-white rounded-lg border border-gray-200 mb-6">
   <div id="graph" style="height: 420px;"></div>
   <p id="graphEmpty" class="text-center text-gray-400 py-12 hidden">
-    まだ関係が登録されていません。下のフォームから追加してください。
+    家族メンバーがまだ登録されていません。「家族メンバー」の画面から追加してください。
   </p>
 </div>
 
@@ -59,14 +60,19 @@
 
   function updateHint() {
     const rel = document.getElementById('relation').value;
-    document.getElementById('hint').textContent = rel === 'parent'
-      ? '親子は向きがあります。左が親、右が子です。'
-      : '向きはありません。どちらを先に選んでも同じです。';
+    const hints = {
+      parent: '向きがあります。左が親、右が子です。',
+      grandparent: '向きがあります。左が祖父母、右が孫です。',
+      spouse: '向きはありません。どちらを先に選んでも同じです。',
+      sibling: '向きはありません。どちらを先に選んでも同じです。',
+      relative: '向きはありません。おじ・おば・いとこなど、上の4つに当てはまらない家族に使います。',
+    };
+    document.getElementById('hint').textContent = hints[rel] || '';
   }
 
   function renderGraph() {
     const empty = document.getElementById('graphEmpty');
-    if (!_data.relations.length) {
+    if (!_data.members.length) {
       empty.classList.remove('hidden');
       document.getElementById('graph').style.height = '0';
       if (_cy) { _cy.destroy(); _cy = null; }
@@ -75,27 +81,47 @@
     empty.classList.add('hidden');
     document.getElementById('graph').style.height = '420px';
 
-    // 線が付いている人だけを描く（登録しただけで関係の無い人を並べない）
-    const used = new Set();
-    _data.relations.forEach(r => { used.add(r.from_id); used.add(r.to_id); });
+    // 「家」の枠（Cytoscape の複合ノード）の中に家族とスタックちゃんを置く。
+    // スタックちゃんは人ではないので、親子やきょうだいの線は引かず、
+    // 形を変えて同じ家にいることだけを示す。
     const elements = [
-      ..._data.members.filter(m => used.has(m.id))
-        .map(m => ({ data: { id: 'm' + m.id, label: m.name } })),
+      { data: { id: 'house', label: '家' } },
+      ..._data.members.map(m => ({
+        data: { id: 'm' + m.id, label: m.name, parent: 'house', kind: 'person' },
+      })),
       ..._data.relations.map(r => ({ data: {
         id: 'r' + r.id, source: 'm' + r.from_id, target: 'm' + r.to_id,
         label: r.label, kind: r.relation,
       } })),
     ];
+    if (_data.device) {
+      elements.push({ data: {
+        id: 'device', label: _data.device.name, parent: 'house', kind: 'device',
+      } });
+    }
 
     if (_cy) _cy.destroy();
     _cy = cytoscape({
       container: document.getElementById('graph'),
       elements,
       style: [
-        { selector: 'node', style: {
+        { selector: 'node[kind = "person"]', style: {
           'background-color': '#3b82f6', 'label': 'data(label)',
           'color': '#1f2937', 'font-size': 13, 'text-valign': 'bottom',
           'text-margin-y': 6, 'width': 36, 'height': 36,
+        } },
+        // スタックちゃん。四角くして、人と一目で見分けられるようにする
+        { selector: 'node[kind = "device"]', style: {
+          'shape': 'round-rectangle', 'background-color': '#f1f5f9',
+          'border-width': 2, 'border-color': '#94a3b8',
+          'label': 'data(label)', 'color': '#475569', 'font-size': 12,
+          'text-valign': 'bottom', 'text-margin-y': 6, 'width': 40, 'height': 32,
+        } },
+        { selector: '$node > node', style: {   // 「家」の枠
+          'background-color': '#f8fafc', 'border-color': '#e2e8f0', 'border-width': 1,
+          'label': 'data(label)', 'font-size': 11, 'color': '#94a3b8',
+          'text-valign': 'top', 'text-halign': 'center', 'text-margin-y': -4,
+          'padding': 24,
         } },
         { selector: 'edge', style: {
           'width': 2, 'line-color': '#cbd5e1', 'label': 'data(label)',
@@ -103,13 +129,20 @@
           'text-background-color': '#fff', 'text-background-opacity': 1,
           'text-background-padding': 2,
         } },
-        // 親子は向きが意味を持つので矢印を出す。夫婦・きょうだいは出さない
+        // 向きが意味を持つ関係だけ矢印を出す
         { selector: 'edge[kind = "parent"]', style: {
-          'target-arrow-shape': 'triangle', 'target-arrow-color': '#cbd5e1',
+          'target-arrow-shape': 'triangle', 'target-arrow-color': '#94a3b8',
           'line-color': '#94a3b8',
         } },
-        { selector: 'edge[kind = "spouse"]', style: { 'line-color': '#f9a8d4', 'line-style': 'solid' } },
+        { selector: 'edge[kind = "grandparent"]', style: {
+          'target-arrow-shape': 'triangle', 'target-arrow-color': '#cbd5e1',
+          'line-style': 'dotted',
+        } },
+        { selector: 'edge[kind = "spouse"]', style: { 'line-color': '#f9a8d4' } },
         { selector: 'edge[kind = "sibling"]', style: { 'line-style': 'dashed' } },
+        { selector: 'edge[kind = "relative"]', style: {
+          'line-style': 'dotted', 'line-color': '#cbd5e1',
+        } },
       ],
       layout: { name: 'cose', animate: false, padding: 40, nodeRepulsion: 9000 },
       minZoom: 0.4, maxZoom: 2.5,
@@ -124,7 +157,7 @@
     tbody.innerHTML = _data.relations.map(r => `
       <tr class="border-b border-gray-50">
         <td class="py-2 px-4">${esc(r.from_name)}
-          <span class="text-gray-400 mx-2">${r.relation === 'parent' ? '→' : '—'}</span>
+          <span class="text-gray-400 mx-2">${['parent','grandparent'].includes(r.relation) ? '→' : '—'}</span>
           ${esc(r.to_name)}</td>
         <td class="py-2 px-4 text-gray-500">${esc(r.label)}</td>
         <td class="py-2 px-4 text-right">

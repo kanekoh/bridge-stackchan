@@ -1243,9 +1243,13 @@ def _set_speaker_id_actual(log_id: int, actual_speaker: str | None) -> bool:
 
 # ─── 家族の関係 ──────────────────────────────────────────────────────────────
 
-# relation の向き: parent は from が親で to が子。spouse と sibling は向きなし
-# （同じ組を二重に持たないよう、保存時に id の小さい方を from にそろえる）。
-_RELATIONS = ("parent", "spouse", "sibling")
+# relation の向き:
+#   向きあり … parent（from が親、to が子）、grandparent（from が祖父母、to が孫）
+#   向きなし … spouse / sibling / relative（同じ組を二重に持たないよう、
+#              保存時に id の小さい方を from にそろえる）
+# 祖父母は親を2回たどれば出せるが、間の人が登録されていないこともあるので別に持つ。
+_RELATIONS = ("parent", "grandparent", "spouse", "sibling", "relative")
+_UNDIRECTED = ("spouse", "sibling", "relative")
 
 
 def _fetch_family_relations() -> list[dict]:
@@ -1270,7 +1274,7 @@ def _save_family_relation(from_id: int, to_id: int, relation: str) -> int | None
         raise ValueError(f"relation は {_RELATIONS} のいずれかです: {relation!r}")
     if from_id == to_id:
         raise ValueError("同じ人どうしの関係は作れません")
-    if relation in ("spouse", "sibling") and from_id > to_id:
+    if relation in _UNDIRECTED and from_id > to_id:
         from_id, to_id = to_id, from_id      # 向きなしの関係は順序をそろえる
     with _db_lock:
         cur = _db_conn.execute(  # type: ignore[union-attr]
