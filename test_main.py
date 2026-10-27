@@ -1519,3 +1519,30 @@ class TestFunctionCallingLoop:
             )
         _, kwargs = mock_reg.call_args
         assert kwargs["slack_channel"] is None
+
+
+class TestPronunciationRules:
+    """外国語を「読み上げられる形」で返させる指示が、プロンプトに入っていること。
+
+    発話は VOICEVOX が読むため、アルファベットのままだと正しく読めない。
+    2026-10-27 に「発音をカタカナで、リンキングはつなげて、区切らないところに
+    スペースを入れない」という指示を追加した。
+    """
+
+    def test_prompt_requires_katakana_for_foreign_words(self):
+        from bridge.core.expression import _STACKCHAN_SYSTEM_PROMPT
+
+        assert "発音をカタカナ" in _STACKCHAN_SYSTEM_PROMPT
+        assert "アルファベットのまま書かず" in _STACKCHAN_SYSTEM_PROMPT
+
+    def test_prompt_mentions_linking_and_spaces(self):
+        from bridge.core.expression import _STACKCHAN_SYSTEM_PROMPT
+
+        assert "リンキング" in _STACKCHAN_SYSTEM_PROMPT
+        assert "スペースを入れない" in _STACKCHAN_SYSTEM_PROMPT
+
+    def test_prompt_shows_examples(self):
+        """規則だけだと守られにくい。実例を添える。"""
+        from bridge.core.expression import _STACKCHAN_SYSTEM_PROMPT
+
+        assert "チェキラウト" in _STACKCHAN_SYSTEM_PROMPT
