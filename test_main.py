@@ -1535,14 +1535,27 @@ class TestPronunciationRules:
         assert "発音をカタカナ" in _STACKCHAN_SYSTEM_PROMPT
         assert "アルファベットのまま書かず" in _STACKCHAN_SYSTEM_PROMPT
 
-    def test_prompt_mentions_linking_and_spaces(self):
+    def test_prompt_requires_spaces_between_words(self):
+        """単語はスペースで区切らせる。
+
+        VOICEVOX は**スペースと読点でしか読みを区切らない**（中黒「・」は無視される）。
+        全部つなげると1つのアクセント句として一息で読まれ、聞き取れなくなる。
+        実際に「エリ、ユーブベターディッシュズスーン！」が出て聞き取れなかった
+        （2026-10-31）。ENGINE の audio_query で検証済み。
+        """
+        from bridge.core.expression import _STACKCHAN_SYSTEM_PROMPT
+
+        assert "単語ごとに半角スペースで区切る" in _STACKCHAN_SYSTEM_PROMPT
+        assert "スペースを入れない" not in _STACKCHAN_SYSTEM_PROMPT
+
+    def test_prompt_limits_linking_to_within_a_word(self):
         from bridge.core.expression import _STACKCHAN_SYSTEM_PROMPT
 
         assert "リンキング" in _STACKCHAN_SYSTEM_PROMPT
-        assert "スペースを入れない" in _STACKCHAN_SYSTEM_PROMPT
+        assert "単語どうしはつなげない" in _STACKCHAN_SYSTEM_PROMPT
 
     def test_prompt_shows_examples(self):
         """規則だけだと守られにくい。実例を添える。"""
         from bridge.core.expression import _STACKCHAN_SYSTEM_PROMPT
 
-        assert "チェキラウト" in _STACKCHAN_SYSTEM_PROMPT
+        assert "グッ モーニン" in _STACKCHAN_SYSTEM_PROMPT
