@@ -103,6 +103,36 @@ _MESSAGE_TOOLS = [
             "required": [],
         },
     },
+    {
+        "type": "function",
+        "name": "send_slack_message",
+        "description": (
+            "家族のだれかに Slack でメッセージを送る。"
+            "「ひろゆきに『今日遅くなる』って送って」「パパに牛乳買ってきてって伝えて」"
+            "「Slack でママに連絡して」など、いまここにいない家族へ文字で届けたいときに使う。"
+            "宛先の「おとうさん」「ママ」は家の子どもから見た呼び方のまま渡してよい"
+            "（だれのことかはこの道具が家族の関係から決める）。"
+            "送ったあとは、だれに送ったかを一言で伝えること。"
+            "候補が複数あると返ってきたら、どちらに送るか聞き返すこと。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "description": "宛先。家族の名前か、家での呼び方（例: えり、ひろゆき、パパ、おばあちゃん）",
+                },
+                "message": {
+                    "type": "string",
+                    "description": (
+                        "送る内容。頼まれた中身を言い換えずにそのまま書く"
+                        "（スタックちゃんの口調にしない。感情ラベルも入れない）"
+                    ),
+                },
+            },
+            "required": ["to", "message"],
+        },
+    },
 ]
 
 _ALERT_TOOLS = [
@@ -555,6 +585,50 @@ async def _tool_take_photo(args: dict) -> dict:
     }
 
 
+async def _tool_send_slack_message(args: dict, notify_context: dict) -> dict:
+    """家族のだれかに Slack の DM を送る。宛先は名前か、家での呼び方で解く。
+
+    「おとうさん」は話している人の父親ではなく、家の子どもから見た父親
+    （bridge/features/family.py）。だれに送ったかは LLM に返して口で確かめさせる。
+    """
+    from bridge.core.db import _fetch_family_relations, _get_all_family_members
+    from bridge.features.family import resolve_member
+
+    to = str(args.get("to", "")).strip()
+    message = str(args.get("message", "")).strip()
+    if not to or not message:
+        return {"status": "error", "message": "宛先と内容の両方が必要です"}
+    slack_app = getattr(sys.modules["main"], "_slack_app", None)
+    if slack_app is None:
+        return {"status": "error", "message": "Slack につながっていないので送れません"}
+
+    found = resolve_member(to, _get_all_family_members(), _fetch_family_relations())
+    if found["status"] == "ambiguous":
+        return {"status": "ambiguous",
+                "candidates": [m["name"] for m in found["candidates"]],
+                "message": f"「{to}」に当てはまる人が複数います。どちらに送るか聞き返してください"}
+    if found["status"] != "ok":
+        return {"status": "error",
+                "message": f"「{to}」がだれのことか分かりませんでした（家族の一覧にいません）"}
+    member = found["member"]
+    if not member.get("slack_user_id"):
+        return {"status": "error",
+                "message": f"{member['name']}は Slack を登録していないので送れません"
+                           "（Slack で /register すると送れるようになります）"}
+
+    speaker = notify_context.get("speaker")
+    header = f"🤖 スタックちゃんから（{speaker}より）" if speaker else "🤖 スタックちゃんから"
+    try:
+        await slack_app.client.chat_postMessage(
+            channel=member["slack_user_id"], text=f"{header}\n{message}")
+    except Exception as e:
+        logger.error("Function call send_slack_message failed: to=%s %s", member["name"], e)
+        return {"status": "error", "message": "Slack への送信に失敗しました"}
+    logger.info("Function call send_slack_message: to=%s via=%s speaker=%s",
+                member["name"], found["via"], speaker)
+    return {"status": "ok", "sent_to": member["name"], "asked_as": to}
+
+
 async def _tool_play_song(args: dict) -> dict:
     """歌を鳴らす。本人が頼んだ／焦っている場面なので、深夜帯でも応じる。
 
@@ -719,6 +793,8 @@ async def _execute_tool(name: str, args: dict, notify_context: dict) -> dict:
         return _tool_get_upcoming_items(args)
     if name == "get_recent_alerts":
         return _tool_get_recent_alerts(args)
+    if name == "send_slack_message":
+        return await _tool_send_slack_message(args, notify_context)
     if name == "get_pending_messages":
         _fetch_pending_messages = _main._fetch_pending_messages
         _mark_message_delivered = _main._mark_message_delivered

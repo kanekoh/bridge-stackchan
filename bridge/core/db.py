@@ -125,7 +125,7 @@ def _init_db() -> None:
             updated_at     TEXT NOT NULL
         )
     """)
-    # 性別。関係図のラベルを「父/母」「祖父/祖母」と出し分けるためだけに使う。
+    # 性別。関係図のラベルと、LLM に渡す家族構成の「父/母」「祖父/祖母」を出し分けるのに使う。
     # 未設定なら「親」「祖父母」と表示する。
     try:
         _db_conn.execute("ALTER TABLE family_members ADD COLUMN gender TEXT")
@@ -367,7 +367,7 @@ def _init_db() -> None:
             updated_at     TEXT NOT NULL
         )
     """)
-    # 家族の関係（親子・夫婦・きょうだい）。関係図の表示にだけ使う。
+    # 家族の関係（親子・夫婦・きょうだい）。関係図の表示と、LLM に家族構成を伝えるのに使う。
     # 家族に閉じる。友達やよその家の子は入れない（本人の同意が取れないため）。
     _db_conn.execute("""
         CREATE TABLE IF NOT EXISTS family_relations (

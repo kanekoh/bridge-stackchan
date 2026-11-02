@@ -34,6 +34,7 @@ pytest test_iss.py                  # ISS の軌道暦の解析・座標変換�
 pytest test_ui_maps.py              # 地図タイルが鍵なしで使える配信元か
 pytest test_speaker_id.py           # 話者識別スコアの記録・集計
 pytest test_family_relations.py     # 家族の関係（親子の向き・夫婦の正規化）
+pytest test_family.py               # 家での呼び方（おとうさん＝子どもから見た父）・Slack への送信
 pytest -k "test_parse_expression"   # 単一テスト
 
 # 起動中サービスへの E2E インターフェーステスト
@@ -144,6 +145,9 @@ paho-mqtt の永続接続クラス。`publish()` 呼び出し時に未接続な�
 Socket Mode（WebSocket）で動作。`SLACK_BOT_TOKEN` と `SLACK_APP_TOKEN` の両方が必要。
 - `/speak <text>` — LLM 変換 → VOICEVOX → MQTT。ACK 受信後に Slack へ結果通知
 - `/timer <時間> <ラベル>` — タイマー設定。発火時に LLM で声かけ文を生成して MQTT 送信
+- **スタックちゃん → Slack**: LLM ツール `send_slack_message(to, message)` で家族に DM を送る。宛先は `family_members.slack_user_id`（`/register` 済みの人だけ）
+  - **「おとうさん」「ママ」は家の子どもから見た呼び方で解く**（`bridge/features/family.py`）。えりが「おとうさん」と言ってもえりの父ではなくひろゆき。日本の家庭の呼び方にそろえている。関係図（親子の線と性別）から決まり、性別が未設定だと呼び方では引けない。同じ続柄が2人いれば聞き返す
+  - 同じ呼び方の対応は家族構成の文脈（`_build_family_context`）にも「この家での呼び方」として載り、会話でも同じ意味で受け取らせる
 
 **タイマー**
 `asyncio.Task` で管理。`_active_timers[timer_id]` に格納。発火後オプションでスヌーズあり。

@@ -106,7 +106,7 @@ def test_delete_relation(db):
 
 
 # ── 性別によるラベルの出し分け ───────────────────────────────────────────────
-# 性別は関係図のラベルを「父/母」「祖父/祖母」と出し分けるためだけに持つ。
+# 性別は「父/母」「祖父/祖母」の出し分け（関係図のラベルと LLM に渡す家族構成）に使う。
 # 未設定でも図は成立する（「親」「祖父母」と出る）。
 
 def _set_gender(conn, name, gender):
@@ -244,3 +244,83 @@ def test_api_rejects_self_relation(client, db):
     res = client.post("/api/family-relations",
                       data={"from_id": ids["えり"], "to_id": ids["えり"], "relation": "sibling"})
     assert res.status_code == 422
+
+
+# ── LLM に渡す家族構成 ───────────────────────────────────────────────────────
+# 以前は名前を並べるだけで、誰が親で誰が子かをスタックちゃんは知らなかった。
+# 向きは LLM に解釈させず、一人ひとりの立場から見た呼び名に直して渡す。
+
+def _family_context():
+    from bridge.llm.persona import _build_family_context
+    return _build_family_context()
+
+
+def _line_of(text, name):
+    return next(line for line in text.splitlines() if line.startswith(f"・{name}"))
+
+
+def test_context_lists_names_without_relations(db):
+    text = _family_context()
+    assert "・ひろゆき" in text and "・えり" in text and "・しおり" in text
+    assert "推測で決めつけない" not in text      # 関係がなければ関係の説明もしない
+
+
+def test_context_shows_parent_from_both_sides(db):
+    ids = _ids(db)
+    _set_gender(db, "ひろゆき", "male")
+    _set_gender(db, "しおり", "female")
+    _save_family_relation(ids["ひろゆき"], ids["しおり"], "parent")
+    text = _family_context()
+    assert _line_of(text, "ひろゆき") == "・ひろゆき（男性）：しおりの父"
+    assert _line_of(text, "しおり") == "・しおり（女性）：ひろゆきの娘"
+
+
+def test_context_groups_same_label(db):
+    """両親とも登録されていれば「ひろゆき・えりの子」とまとめる。"""
+    ids = _ids(db)
+    _save_family_relation(ids["ひろゆき"], ids["しおり"], "parent")
+    _save_family_relation(ids["えり"], ids["しおり"], "parent")
+    assert _line_of(_family_context(), "しおり") == "・しおり：ひろゆき・えりの子"
+
+
+def test_context_spouse_follows_own_gender(db):
+    ids = _ids(db)
+    _set_gender(db, "ひろゆき", "male")
+    _set_gender(db, "えり", "female")
+    _save_family_relation(ids["えり"], ids["ひろゆき"], "spouse")
+    text = _family_context()
+    assert _line_of(text, "ひろゆき").endswith("えりの夫")
+    assert _line_of(text, "えり").endswith("ひろゆきの妻")
+
+
+def test_context_grandparent_and_grandchild(db):
+    ids = _ids(db)
+    _set_gender(db, "えり", "female")
+    _save_family_relation(ids["えり"], ids["しおり"], "grandparent")
+    text = _family_context()
+    assert _line_of(text, "えり").endswith("しおりの祖母")
+    assert _line_of(text, "しおり").endswith("えりの孫")
+
+
+def test_context_marks_stackchan_as_self(db):
+    """スタックちゃんも家族として登録されている。LLM には「あなた自身」と分かるように渡す。"""
+    db.execute("INSERT INTO family_members (name, created_at, updated_at) VALUES (?,?,?)",
+               ("スタックちゃん", "2026-10-25T12:00:00+09:00", "2026-10-25T12:00:00+09:00"))
+    db.commit()
+    ids = _ids(db)
+    _save_family_relation(ids["しおり"], ids["スタックちゃん"], "sibling")
+    text = _family_context()
+    assert _line_of(text, "スタックちゃん") == "・スタックちゃん（あなた自身）：しおりのきょうだい"
+    assert _line_of(text, "しおり").endswith("あなたのきょうだい")
+
+
+def test_context_shows_household_terms(db):
+    """家の中の呼び方は子どもから見たもの。えりが「おとうさん」と言ってもひろゆきのこと。"""
+    ids = _ids(db)
+    _set_gender(db, "ひろゆき", "male")
+    _set_gender(db, "えり", "female")
+    _save_family_relation(ids["ひろゆき"], ids["しおり"], "parent")
+    _save_family_relation(ids["えり"], ids["しおり"], "parent")
+    text = _family_context()
+    assert "【この家での呼び方】おとうさん・パパ＝ひろゆき／おかあさん・ママ＝えり" in text
+    assert "話している人自身の親のことだと受け取らないこと" in text
